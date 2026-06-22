@@ -166,7 +166,10 @@ function maskContact(value) {
 app.post('/signup', async (req, res) => {
     console.log("SIGNUP ROUTE HIT");
 
-    const { name, emailPhone, region, city } = req.body;
+    const { name, region, city } = req.body;
+    // Normalize email to lowercase so "User@Gmail.com" and "user@gmail.com"
+    // are treated as the same account. Phone numbers are unaffected.
+    const emailPhone = (req.body.emailPhone || "").toLowerCase().trim();
 
     if (!name || !emailPhone || !region || !city) {
         return res.status(400).json({ error: "Please fill these required fields" });
@@ -207,7 +210,8 @@ app.post('/signup', async (req, res) => {
 // ---- SIGN IN ----
 app.post('/signin', async (req, res) => {
     console.log("SIGNIN ROUTE HIT");
-    const { emailPhone } = req.body;
+    // Normalize to lowercase so case doesn't matter at login either
+    const emailPhone = (req.body.emailPhone || "").toLowerCase().trim();
 
     try {
         const foundUser = await User.findOne({ emailPhone });
@@ -243,7 +247,8 @@ app.post('/signin', async (req, res) => {
 
 // ---- VERIFY ----
 app.post('/verify', async (req, res) => {
-    const { emailPhone, code } = req.body;
+    const code = req.body.code;
+    const emailPhone = (req.body.emailPhone || "").toLowerCase().trim();
     if (!emailPhone || !code) {
         return res.status(400).json({ error: "Email/phone and code are required" });
     }
