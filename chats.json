@@ -1,0 +1,85 @@
+[
+  {
+    "id": "1781916421930",
+    "userId": "1781915678482",
+    "handle": "anon-amber-893",
+    "text": "There's light at Bantama",
+    "location": "Bantama",
+    "createdAt": "2026-06-20T00:47:01.931Z"
+  },
+  {
+    "id": "1781916702147",
+    "userId": "1781916506335",
+    "handle": "anon-amber-893",
+    "text": "Is there light at Bantama?",
+    "location": "Bantama, Ashanti",
+    "createdAt": "2026-06-20T00:51:42.148Z"
+  },
+  {
+    "id": "1781916708111",
+    "userId": "1781916506335",
+    "handle": "anon-amber-893",
+    "text": "Really?",
+    "location": "Bantama, Ashanti",
+    "createdAt": "2026-06-20T00:51:48.111Z"
+  },
+  {
+    "id": "1781917127723",
+    "userId": "1781915678482",
+    "handle": "anon-amber-893",
+    "text": "I think so",
+    "location": "Bantama",
+    "createdAt": "2026-06-20T00:58:47.727Z"
+  },
+  {
+    "id": "1781917659807",
+    "userId": "1781915678482",
+    "handle": "anon-river-103",
+    "text": "light is on at bantama",
+    "location": "Bantama",
+    "createdAt": "2026-06-20T01:07:39.808Z"
+  },
+  {
+    "id": "1781917668718",
+    "userId": "1781915678482",
+    "handle": "anon-river-103",
+    "text": "right?",
+    "location": "Bantama",
+    "createdAt": "2026-06-20T01:07:48.718Z"
+  },
+  {
+    "id": "1781918109167",
+    "userId": "1781916506335",
+    "handle": "anon-stone-182",
+    "text": "Yes there's light everywhere",
+    "location": "Bantama, Ashanti",
+    "createdAt": "2026-06-20T01:15:09.169Z"
+  },
+  {
+    "id": "1781918574590",
+    "userId": "1781918564425",
+    "handle": "anon-glow-811",
+    "text": "Is there light at Bantama?",
+    "location": "Offinso, Ashanti",
+    "createdAt": "2026-06-20T01:22:54.590Z",
+    "locationKey": "offinso, ashanti"
+  },
+  {
+    "id": "1781919023798",
+    "userId": "1781915678482",
+    "handle": "anon-river-103",
+    "text": "ecg for be study o",
+    "location": "Bantama",
+    "createdAt": "2026-06-20T01:30:23.800Z",
+    "locationKey": "bantama"
+  },
+  {
+    "id": "1781919187272",
+    "userId": "1781918207290",
+    "handle": "anon-glow-354",
+    "text": "abuakwa get light?",
+    "location": "Atonsu, Ashanti",
+    "createdAt": "2026-06-20T01:33:07.272Z",
+    "locationKey": "atonsu, ashanti"
+  }
+]
