@@ -300,9 +300,9 @@ app.get('/chats', async (req, res) => {
     const location = req.query.location;
 
     try {
-        // Fetch chats and populate user info for richer client display
-        let query = Chat.find().sort({ createdAt: -1 }).limit(500).populate('userId', 'name emailPhone chatHandle');
-        const allChats = await query.exec();
+        // Return userId as plain string so client-side === comparison works correctly.
+        // Do NOT populate here — it turns userId into an object and breaks isOwn detection.
+        const allChats = await Chat.find().sort({ createdAt: -1 }).limit(500).lean();
 
         if (location) {
             const normalizedLocation = normalizeLocation(location);
@@ -350,12 +350,11 @@ app.post('/chats', async (req, res) => {
         });
         const saved = await newChat.save();
 
-        // populate user info for response and server logs
-        await saved.populate('userId', 'name emailPhone chatHandle');
-
-        console.log('Chat saved:', { id: saved._id.toString(), user: saved.userId.emailPhone, handle: saved.userId.chatHandle, location: saved.location });
-
-        return res.status(201).json(saved);
+        // Return as plain object with userId as string — keeps client comparison simple
+        const chatObj = saved.toObject();
+        chatObj.userId = chatObj.userId.toString();
+        console.log('Chat saved:', { id: chatObj._id.toString(), handle: chatObj.handle, location: chatObj.location });
+        return res.status(201).json(chatObj);
     } catch (err) {
         console.error("Post chat error:", err.message);
         return res.status(500).json({ error: "Server error saving chat" });
@@ -432,6 +431,50 @@ app.get('/user/:id', async (req, res) => {
     } catch (err) {
         console.error("User lookup error:", err.message);
         return res.status(404).json({ error: "User not found" });
+    }
+});
+
+// ---- LIGHT STATUS ----
+// Stores the crowd-sourced light status per location.
+// This makes status shared across all users (not per-device localStorage).
+const lightStatusSchema = new mongoose.Schema({
+    locationKey: { type: String, required: true, unique: true },
+    status: { type: String, enum: ['on', 'off', 'unknown'], default: 'unknown' },
+    reportedBy: { type: String },
+    reportedAt: { type: Date, default: Date.now }
+});
+const LightStatus = mongoose.model('LightStatus', lightStatusSchema);
+
+// GET /lightstatus?location=Bantama%2C+Ashanti
+app.get('/lightstatus', async (req, res) => {
+    const location = req.query.location;
+    if (!location) return res.status(400).json({ error: 'location required' });
+    try {
+        const key = normalizeLocation(location).split(',')[0].trim();
+        const record = await LightStatus.findOne({ locationKey: key });
+        return res.json(record || { locationKey: key, status: 'unknown' });
+    } catch (err) {
+        return res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// POST /lightstatus  { location, status, userId }
+app.post('/lightstatus', async (req, res) => {
+    const { location, status, userId } = req.body;
+    if (!location || !status) return res.status(400).json({ error: 'location and status required' });
+    if (!['on', 'off'].includes(status)) return res.status(400).json({ error: 'status must be on or off' });
+    try {
+        const key = normalizeLocation(location).split(',')[0].trim();
+        const record = await LightStatus.findOneAndUpdate(
+            { locationKey: key },
+            { status, reportedBy: userId || 'anonymous', reportedAt: new Date() },
+            { upsert: true, new: true }
+        );
+        console.log(`Light status updated: ${key} => ${status}`);
+        return res.json(record);
+    } catch (err) {
+        console.error('Light status error:', err.message);
+        return res.status(500).json({ error: 'Server error' });
     }
 });
 
