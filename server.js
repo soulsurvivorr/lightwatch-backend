@@ -7,12 +7,7 @@ const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 
-// ---------------------------------------------------------------------------
 // MONGODB CONNECTION
-// Reads from environment variable on Render. NEVER hardcode the URI here.
-// In Render dashboard -> your service -> Environment -> add:
-//   MONGODB_URI = mongodb+srv://...   (or the mongodb:// shard form you have)
-// ---------------------------------------------------------------------------
 const MONGO_URI = process.env.MONGODB_URI;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin123";
 const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key-change-this";
@@ -56,9 +51,7 @@ mongoose.connection.on('error', (err) => {
 // Enable mongoose debug output to see queries and connection activity in server logs
 mongoose.set('debug', true);
 
-// ---------------------------------------------------------------------------
 // SCHEMAS / MODELS
-// ---------------------------------------------------------------------------
 const userSchema = new mongoose.Schema({
     name: { type: String, required: true },
     emailPhone: { type: String, required: true, unique: true },
@@ -81,10 +74,8 @@ const User = mongoose.model('User', userSchema);
 const Chat = mongoose.model('Chat', chatSchema);
 
 console.log("MY SERVER FILE IS RUNNING");
-
-// ---------------------------------------------------------------------------
+ 
 // APP / MIDDLEWARE
-// ---------------------------------------------------------------------------
 const app = express();
 
 app.use(cors());
@@ -113,9 +104,7 @@ function verifyAdminToken(req, res, next) {
     }
 }
 
-// ---------------------------------------------------------------------------
 // HELPERS
-// ---------------------------------------------------------------------------
 const HANDLE_WORDS = [
     "fern", "river", "glow", "cedar", "amber", "quartz",
     "willow", "ember", "harbor", "maple", "drift", "stone"
