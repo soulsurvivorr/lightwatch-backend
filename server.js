@@ -488,13 +488,12 @@ app.post('/lightstatus', async (req, res) => {
         const pushPromises = subscribers.map(async sub => {
             try {
                 await webpush.sendNotification(sub.subscription, payload);
-            } catch (err) {
-                // 410 Gone = subscription expired — clean it up
+         } catch (err) {
                 if (err.statusCode === 410) {
                     await PushSubscription.deleteOne({ _id: sub._id });
                     console.log('Removed stale subscription:', sub._id);
                 } else {
-                    console.error('Push send error:', err.message);
+                    console.error('Push send error:', err.statusCode, err.body, err.message);
                 }
             }
         });
@@ -563,3 +562,8 @@ function startServer(port) {
 }
 
 startServer(Number(PORT));
+
+app.get('/admin/clear-subscriptions', verifyAdminToken, async (req, res) => {
+    await PushSubscription.deleteMany({});
+    res.json({ cleared: true });
+});
