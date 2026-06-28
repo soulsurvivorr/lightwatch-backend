@@ -6,6 +6,7 @@ const mongoose = require('mongoose');
 const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
+const webpush = require('web-push');
 
 // MONGODB CONNECTION
 const MONGO_URI = process.env.MONGODB_URI;
@@ -22,6 +23,18 @@ if (!process.env.JWT_SECRET) {
 }
 if (!process.env.ADMIN_PASSWORD) {
     console.warn("WARNING: ADMIN_PASSWORD not set in environment. Using default. Set it on Render.");
+}
+
+// VAPID setup for push notifications
+if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
+    webpush.setVapidDetails(
+        `mailto:${process.env.VAPID_EMAIL}`,
+        process.env.VAPID_PUBLIC_KEY,
+        process.env.VAPID_PRIVATE_KEY
+    );
+    console.log("Web push VAPID configured.");
+} else {
+    console.warn("WARNING: VAPID keys not set. Push notifications will not work.");
 }
 
 // Log a masked version of the URI so we can confirm which form is being used (no secrets printed)
@@ -70,11 +83,29 @@ const chatSchema = new mongoose.Schema({
     createdAt: { type: Date, default: Date.now }
 });
 
-const User = mongoose.model('User', userSchema);
-const Chat = mongoose.model('Chat', chatSchema);
+const lightStatusSchema = new mongoose.Schema({
+    locationKey: { type: String, required: true, unique: true },
+    status: { type: String, enum: ['on', 'off', 'unknown'], default: 'unknown' },
+    reportedBy: { type: String },
+    reportedAt: { type: Date, default: Date.now }
+});
+
+// Push subscription — one per device, upserted on endpoint
+const pushSubscriptionSchema = new mongoose.Schema({
+    userId:       { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    location:     { type: String, required: true }, // normalised location key
+    subscription: { type: Object, required: true }, // full browser push subscription object
+    createdAt:    { type: Date, default: Date.now }
+});
+pushSubscriptionSchema.index({ 'subscription.endpoint': 1 }, { unique: true });
+
+const User             = mongoose.model('User', userSchema);
+const Chat             = mongoose.model('Chat', chatSchema);
+const LightStatus      = mongoose.model('LightStatus', lightStatusSchema);
+const PushSubscription = mongoose.model('PushSubscription', pushSubscriptionSchema);
 
 console.log("MY SERVER FILE IS RUNNING");
- 
+
 // APP / MIDDLEWARE
 const app = express();
 
@@ -113,13 +144,10 @@ const HANDLE_WORDS = [
 async function generateUniqueChatHandle() {
     while (true) {
         const word = HANDLE_WORDS[Math.floor(Math.random() * HANDLE_WORDS.length)];
-        const number = Math.floor(Math.random() * 900) + 100; // 100-999
+        const number = Math.floor(Math.random() * 900) + 100;
         const handle = `anon-${word}-${number}`;
-
         const existing = await User.findOne({ chatHandle: handle });
-        if (!existing) {
-            return handle;
-        }
+        if (!existing) return handle;
     }
 }
 
@@ -128,15 +156,12 @@ function normalizeLocation(value) {
     return value.toString().trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
-// In-memory pending verification store. This is fine to keep in memory
-// (it's short-lived, single-use data) — it does NOT need to be in MongoDB.
-// Keyed by emailPhone. Code is hardcoded '5687' for now.
+// In-memory pending verification store.
 const pendingVerifications = {};
 
 function maskContact(value) {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     const phoneRegex = /^[0-9]{10}$/;
-
     if (phoneRegex.test(value)) {
         return "*".repeat(value.length - 2) + value.slice(-2);
     }
@@ -154,10 +179,7 @@ function maskContact(value) {
 // ---- SIGN UP ----
 app.post('/signup', async (req, res) => {
     console.log("SIGNUP ROUTE HIT");
-
     const { name, region, city } = req.body;
-    // Normalize email to lowercase so "User@Gmail.com" and "user@gmail.com"
-    // are treated as the same account. Phone numbers are unaffected.
     const emailPhone = (req.body.emailPhone || "").toLowerCase().trim();
 
     if (!name || !emailPhone || !region || !city) {
@@ -199,7 +221,6 @@ app.post('/signup', async (req, res) => {
 // ---- SIGN IN ----
 app.post('/signin', async (req, res) => {
     console.log("SIGNIN ROUTE HIT");
-    // Normalize to lowercase so case doesn't matter at login either
     const emailPhone = (req.body.emailPhone || "").toLowerCase().trim();
 
     try {
@@ -272,6 +293,7 @@ app.post('/verify', async (req, res) => {
         }
 
         delete pendingVerifications[emailPhone];
+
         return res.json({
             success: true,
             userId,
@@ -289,8 +311,6 @@ app.get('/chats', async (req, res) => {
     const location = req.query.location;
 
     try {
-        // Return userId as plain string so client-side === comparison works correctly.
-        // Do NOT populate here — it turns userId into an object and breaks isOwn detection.
         const allChats = await Chat.find().sort({ createdAt: -1 }).limit(500).lean();
 
         if (location) {
@@ -339,7 +359,6 @@ app.post('/chats', async (req, res) => {
         });
         const saved = await newChat.save();
 
-        // Return as plain object with userId as string — keeps client comparison simple
         const chatObj = saved.toObject();
         chatObj.userId = chatObj.userId.toString();
         console.log('Chat saved:', { id: chatObj._id.toString(), handle: chatObj.handle, location: chatObj.location });
@@ -387,12 +406,12 @@ app.get('/admin/summary', verifyAdminToken, async (req, res) => {
     try {
         const now = new Date();
         const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-        
-        const userCount = await User.countDocuments();
-        const newUsers24h = await User.countDocuments({ createdAt: { $gte: oneDayAgo } });
-        const chatCount = await Chat.countDocuments();
-        const newChats24h = await Chat.countDocuments({ createdAt: { $gte: oneDayAgo } });
-        
+
+        const userCount    = await User.countDocuments();
+        const newUsers24h  = await User.countDocuments({ createdAt: { $gte: oneDayAgo } });
+        const chatCount    = await Chat.countDocuments();
+        const newChats24h  = await Chat.countDocuments({ createdAt: { $gte: oneDayAgo } });
+
         return res.json({ userCount, newUsers24h, chatCount, newChats24h });
     } catch (err) {
         console.error('Admin summary error:', err.message);
@@ -424,15 +443,6 @@ app.get('/user/:id', async (req, res) => {
 });
 
 // ---- LIGHT STATUS ----
-// Stores the crowd-sourced light status per location.
-// This makes status shared across all users (not per-device localStorage).
-const lightStatusSchema = new mongoose.Schema({
-    locationKey: { type: String, required: true, unique: true },
-    status: { type: String, enum: ['on', 'off', 'unknown'], default: 'unknown' },
-    reportedBy: { type: String },
-    reportedAt: { type: Date, default: Date.now }
-});
-const LightStatus = mongoose.model('LightStatus', lightStatusSchema);
 
 // GET /lightstatus?location=Bantama%2C+Ashanti
 app.get('/lightstatus', async (req, res) => {
@@ -452,14 +462,46 @@ app.post('/lightstatus', async (req, res) => {
     const { location, status, userId } = req.body;
     if (!location || !status) return res.status(400).json({ error: 'location and status required' });
     if (!['on', 'off'].includes(status)) return res.status(400).json({ error: 'status must be on or off' });
+
     try {
         const key = normalizeLocation(location).split(',')[0].trim();
+
         const record = await LightStatus.findOneAndUpdate(
             { locationKey: key },
             { status, reportedBy: userId || 'anonymous', reportedAt: new Date() },
             { upsert: true, new: true }
         );
+
         console.log(`Light status updated: ${key} => ${status}`);
+
+        // ── Send push notifications to all subscribers at this location ──
+        const emoji = status === 'on' ? '💡' : '🌑';
+        const payload = JSON.stringify({
+            title: `LightWatch — ${key}`,
+            body: `${emoji} Light is now ${status.toUpperCase()} in ${key}.`,
+            url: '/pages/home.html'
+        });
+
+        const subscribers = await PushSubscription.find({ location: key });
+        console.log(`Sending push to ${subscribers.length} subscriber(s) at ${key}`);
+
+        const pushPromises = subscribers.map(async sub => {
+            try {
+                await webpush.sendNotification(sub.subscription, payload);
+            } catch (err) {
+                // 410 Gone = subscription expired — clean it up
+                if (err.statusCode === 410) {
+                    await PushSubscription.deleteOne({ _id: sub._id });
+                    console.log('Removed stale subscription:', sub._id);
+                } else {
+                    console.error('Push send error:', err.message);
+                }
+            }
+        });
+
+        // Don't block the response waiting for pushes
+        Promise.allSettled(pushPromises);
+
         return res.json(record);
     } catch (err) {
         console.error('Light status error:', err.message);
@@ -467,8 +509,31 @@ app.post('/lightstatus', async (req, res) => {
     }
 });
 
+// ---- PUSH SUBSCRIPTION ----
+app.post('/subscribe', async (req, res) => {
+    const { userId, location, subscription } = req.body;
+
+    if (!userId || !subscription || !location) {
+        return res.status(400).json({ error: 'userId, location, and subscription required' });
+    }
+
+    try {
+        const locationKey = normalizeLocation(location).split(',')[0].trim();
+
+        await PushSubscription.findOneAndUpdate(
+            { 'subscription.endpoint': subscription.endpoint },
+            { userId, location: locationKey, subscription },
+            { upsert: true, new: true }
+        );
+
+        return res.json({ success: true });
+    } catch (err) {
+        console.error('Subscribe error:', err.message);
+        return res.status(500).json({ error: 'Server error saving subscription' });
+    }
+});
+
 // ---- HEALTH CHECK ----
-// Useful to quickly verify the server + DB are alive from a browser.
 app.get('/', (req, res) => {
     const dbState = mongoose.connection.readyState;
     const states = ['disconnected', 'connected', 'connecting', 'disconnecting'];
