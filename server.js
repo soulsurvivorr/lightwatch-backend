@@ -113,7 +113,21 @@ app.use(cors());
 app.use(express.json());
 
 app.use((req, res, next) => {
-    console.log(req.method, req.url);
+
+    const noisyRoutes = [
+        '/lightstatus',
+        '/user/',
+        '/chats'
+    ];
+
+    const isNoisyGet =
+        req.method === 'GET' &&
+        noisyRoutes.some(route => req.url.startsWith(route));
+
+    if (!isNoisyGet) {
+        console.log(req.method, req.url);
+    }
+
     next();
 });
 
@@ -362,6 +376,33 @@ app.post('/chats', async (req, res) => {
         const chatObj = saved.toObject();
         chatObj.userId = chatObj.userId.toString();
         console.log('Chat saved:', { id: chatObj._id.toString(), handle: chatObj.handle, location: chatObj.location });
+        const key = normalizeLocation(saved.location).split(',')[0].trim();
+        const payload = JSON.stringify({
+            title: `LightWatch chat — ${key}`,
+            body: `${saved.handle}: ${saved.text}`,
+            url: '/pages/home.html',
+            tag: 'chat-message'
+        });
+
+        const subscribers = await PushSubscription.find({ location: key });
+        console.log(`Sending chat push to ${subscribers.length} subscriber(s) at ${key}`);
+
+        const pushPromises = subscribers.map(async sub => {
+            if (sub.userId && String(sub.userId) === String(userId)) {
+                return;
+            }
+            try {
+                await webpush.sendNotification(sub.subscription, payload);
+            } catch (err) {
+                if (err.statusCode === 410) {
+                    await PushSubscription.deleteOne({ _id: sub._id });
+                    console.log('Removed stale subscription:', sub._id);
+                } else {
+                    console.error('Chat push send error:', err.statusCode, err.body, err.message);
+                }
+            }
+        });
+        Promise.allSettled(pushPromises);
         return res.status(201).json(chatObj);
     } catch (err) {
         console.error("Post chat error:", err.message);
