@@ -534,7 +534,15 @@ app.get('/user/:id', async (req, res) => {
             await user.save();
         }
 
-        return res.json(user);
+        const [chatCount, reportCount] = await Promise.all([
+            Chat.countDocuments({ userId: user._id }),
+            LightStatusEvent.countDocuments({ userId: user._id })
+        ]);
+        const userObj = user.toObject();
+        userObj.chatCount = chatCount;
+        userObj.reportCount = reportCount;
+
+        return res.json(userObj);
     } catch (err) {
         console.error("User lookup error:", err.message);
         return res.status(404).json({ error: "User not found" });
@@ -581,6 +589,7 @@ app.get('/reports', async (req, res) => {
             const isOn = event.status === 'on';
             return {
                 id: event._id,
+                userId: event.userId ? event.userId.toString() : null,
                 status: event.status,
                 location: locationName,
                 title: isOn ? `Light restored — ${locationName}` : `Outage reported — ${locationName}`,
