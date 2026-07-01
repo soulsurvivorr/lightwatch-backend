@@ -90,6 +90,14 @@ const lightStatusSchema = new mongoose.Schema({
     reportedAt: { type: Date, default: Date.now }
 });
 
+const lightStatusEventSchema = new mongoose.Schema({
+    locationKey: { type: String, required: true },
+    status: { type: String, enum: ['on', 'off'], required: true },
+    reportedBy: { type: String },
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    reportedAt: { type: Date, default: Date.now }
+});
+
 // Push subscription — one per device, upserted on endpoint
 const pushSubscriptionSchema = new mongoose.Schema({
     userId:       { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
@@ -102,6 +110,7 @@ pushSubscriptionSchema.index({ 'subscription.endpoint': 1 }, { unique: true });
 const User             = mongoose.model('User', userSchema);
 const Chat             = mongoose.model('Chat', chatSchema);
 const LightStatus      = mongoose.model('LightStatus', lightStatusSchema);
+const LightStatusEvent = mongoose.model('LightStatusEvent', lightStatusEventSchema);
 const PushSubscription = mongoose.model('PushSubscription', pushSubscriptionSchema);
 
 console.log("MY SERVER FILE IS RUNNING");
@@ -168,6 +177,55 @@ async function generateUniqueChatHandle() {
 function normalizeLocation(value) {
     if (!value) return "";
     return value.toString().trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+async function getLightStatusStats(locationKey) {
+    const events = await LightStatusEvent.find({ locationKey }).sort({ reportedAt: 1 }).lean();
+    const now = Date.now();
+    const oneWeekAgo = now - 7 * 24 * 60 * 60 * 1000;
+
+    const eventsThisWeek = events.filter(event => event.reportedAt >= oneWeekAgo);
+    const onChecksThisWeek = eventsThisWeek.filter(event => event.status === 'on').length;
+    const offChecksThisWeek = eventsThisWeek.filter(event => event.status === 'off').length;
+    const totalChecks = events.length;
+    const uniqueContributors = new Set(events
+        .map(event => event.reportedBy)
+        .filter(report => report && report !== 'anonymous')
+    ).size;
+
+    const outageDurations = [];
+    for (let i = 0; i < events.length - 1; i++) {
+        if (events[i].status === 'off' && events[i + 1].status === 'on') {
+            outageDurations.push(events[i + 1].reportedAt.getTime() - events[i].reportedAt.getTime());
+        }
+    }
+
+    const avgOutageMs = outageDurations.length > 0
+        ? Math.round(outageDurations.reduce((acc, value) => acc + value, 0) / outageDurations.length)
+        : null;
+    const lastOutageMs = outageDurations.length > 0
+        ? outageDurations[outageDurations.length - 1]
+        : null;
+    const outageFreq = eventsThisWeek.filter(event => event.status === 'off').length;
+    const checksThisWeek = eventsThisWeek.length;
+    const uptimePercent = checksThisWeek > 0
+        ? Math.round((onChecksThisWeek / checksThisWeek) * 100)
+        : 0;
+    const sameStatePercent = checksThisWeek > 0
+        ? Math.round((Math.max(onChecksThisWeek, offChecksThisWeek) / checksThisWeek) * 100)
+        : 0;
+
+    return {
+        totalChecks,
+        uniqueContributors,
+        checksThisWeek,
+        onChecksThisWeek,
+        uptimePercent,
+        sourceConfidence: sameStatePercent,
+        avgOutageMs,
+        lastOutageMs,
+        outageFreq
+    };
 }
 
 // In-memory pending verification store.
@@ -492,9 +550,52 @@ app.get('/lightstatus', async (req, res) => {
     try {
         const key = normalizeLocation(location).split(',')[0].trim();
         const record = await LightStatus.findOne({ locationKey: key });
-        return res.json(record || { locationKey: key, status: 'unknown' });
+        const stats = await getLightStatusStats(key);
+        return res.json({
+            locationKey: key,
+            status: record?.status || 'unknown',
+            reportedBy: record?.reportedBy || null,
+            reportedAt: record?.reportedAt || null,
+            stats
+        });
     } catch (err) {
         return res.status(500).json({ error: 'Server error' });
+    }
+});
+
+app.get('/reports', async (req, res) => {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 100);
+    try {
+        const events = await LightStatusEvent.find().sort({ reportedAt: -1 }).limit(limit).lean();
+
+        function titleCaseLocation(key) {
+            return key.split(',')[0]
+                .split(' ')
+                .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+                .join(' ');
+        }
+
+        const reports = events.map(event => {
+            const locationName = titleCaseLocation(event.locationKey || 'unknown');
+            const reporter = event.reportedBy === 'anonymous' ? 'A volunteer' : event.reportedBy;
+            const isOn = event.status === 'on';
+            return {
+                id: event._id,
+                status: event.status,
+                location: locationName,
+                title: isOn ? `Light restored — ${locationName}` : `Outage reported — ${locationName}`,
+                text: isOn
+                    ? `${reporter} confirmed power is back on in ${locationName}.`
+                    : `${reporter} reported the light is off in ${locationName}.`,
+                reportedAt: event.reportedAt,
+                type: isOn ? 'success' : 'warning'
+            };
+        });
+
+        return res.json(reports);
+    } catch (err) {
+        console.error('Reports fetch error:', err.message);
+        return res.status(500).json({ error: 'Server error fetching reports' });
     }
 });
 
@@ -507,11 +608,22 @@ app.post('/lightstatus', async (req, res) => {
     try {
         const key = normalizeLocation(location).split(',')[0].trim();
 
+        const user = userId ? await User.findById(userId).select('chatHandle') : null;
+        const reportedBy = user?.chatHandle || userId || 'anonymous';
+
         const record = await LightStatus.findOneAndUpdate(
             { locationKey: key },
-            { status, reportedBy: userId || 'anonymous', reportedAt: new Date() },
+            { status, reportedBy, reportedAt: new Date() },
             { upsert: true, new: true }
         );
+
+        await LightStatusEvent.create({
+            locationKey: key,
+            status,
+            reportedBy,
+            userId: userId || undefined,
+            reportedAt: new Date()
+        });
 
         console.log(`Light status updated: ${key} => ${status}`);
 
@@ -529,7 +641,7 @@ app.post('/lightstatus', async (req, res) => {
         const pushPromises = subscribers.map(async sub => {
             try {
                 await webpush.sendNotification(sub.subscription, payload);
-         } catch (err) {
+            } catch (err) {
                 if (err.statusCode === 410) {
                     await PushSubscription.deleteOne({ _id: sub._id });
                     console.log('Removed stale subscription:', sub._id);
