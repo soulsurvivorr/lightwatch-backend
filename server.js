@@ -248,32 +248,42 @@ function generateOtpCode(length = OTP_LENGTH) {
     return code;
 }
 
-// ── Email sending (only wired up if SMTP env vars are set) ────
-const nodemailer = require('nodemailer');
-let mailTransporter = null;
-if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
-    mailTransporter = nodemailer.createTransport({
-        host: process.env.SMTP_HOST,
-        port: Number(process.env.SMTP_PORT) || 587,
-        secure: false,
-        auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
-    });
-    console.log("Email OTP sending configured (SMTP).");
-} else {
-    console.warn("WARNING: SMTP_HOST/SMTP_USER/SMTP_PASS not set. Email OTPs will just be logged to the console instead of sent.");
+// ── Email sending via Brevo's HTTP API ──────────────────────
+// NOT using SMTP here on purpose: Render's free tier blocks all
+// outbound traffic on SMTP ports (25, 465, 587) as of Sept 2025,
+// so nodemailer/SMTP will always hang and time out on a free
+// instance. Brevo's API runs over plain HTTPS (port 443), which
+// isn't blocked, so this works on the free tier with no changes
+// needed on Render's side.
+if (!process.env.BREVO_API_KEY) {
+    console.warn("WARNING: BREVO_API_KEY not set. Email OTPs will just be logged to the console instead of sent.");
 }
 
 async function sendOtpEmail(email, code) {
-    if (!mailTransporter) {
-        console.log(`[DEV MODE — no SMTP configured] OTP for ${email} is ${code}`);
+    if (!process.env.BREVO_API_KEY) {
+        console.log(`[DEV MODE — no BREVO_API_KEY set] OTP for ${email} is ${code}`);
         return;
     }
-    await mailTransporter.sendMail({
-        from: process.env.SMTP_FROM || 'LightWatch <no-reply@lightwatch.app>',
-        to: email,
-        subject: 'Your LightWatch verification code',
-        text: `Your LightWatch verification code is ${code}. It expires in 10 minutes.`
+    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'api-key': process.env.BREVO_API_KEY
+        },
+        body: JSON.stringify({
+            sender: {
+                name: 'LightWatch',
+                email: process.env.BREVO_SENDER_EMAIL || 'no-reply@lightwatch.app'
+            },
+            to: [{ email }],
+            subject: 'Your LightWatch verification code',
+            textContent: `Your LightWatch verification code is ${code}. It expires in 10 minutes.`
+        })
     });
+    if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`Email send failed: ${response.status} ${errText}`);
+    }
 }
 
 // ── SMS sending via Arkesel (only wired up if ARKESEL_API_KEY is set) ──
