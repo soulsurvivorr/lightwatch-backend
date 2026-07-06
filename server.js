@@ -121,6 +121,15 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Serves /public/logo.png etc. at https://<your-render-domain>/logo.png
+// so it can be referenced by an absolute URL inside emails (Brevo needs
+// a public URL for images — it does not support cid: inline images).
+app.use(express.static('public'));
+
+// Set this to your real Render URL (e.g. https://lightwatch-api.onrender.com)
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://YOUR-APP-NAME.onrender.com';
+const LOGO_URL = `${PUBLIC_BASE_URL}/logo.png`;
+
 app.use((req, res, next) => {
 
     const noisyRoutes = [
@@ -259,6 +268,86 @@ if (!process.env.BREVO_API_KEY) {
     console.warn("WARNING: BREVO_API_KEY not set. Email OTPs will just be logged to the console instead of sent.");
 }
 
+// Builds the branded HTML body for the OTP email. Kept as a plain string
+// with inline styles (not classes) because most email clients strip
+// <style> blocks and external CSS — inline is the only thing that
+// renders consistently across Gmail, Outlook, Apple Mail, etc.
+function buildOtpEmailHtml(code) {
+    const year = new Date().getFullYear();
+    return `
+<!DOCTYPE html>
+<html>
+  <body style="margin:0; padding:0; background-color:#f2f4f7; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f2f4f7; padding:32px 16px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="max-width:480px; width:100%; background-color:#ffffff; border-radius:12px; overflow:hidden; box-shadow:0 2px 10px rgba(16,24,40,0.06);">
+
+            <!-- Header -->
+            <tr>
+              <td align="center" style="background-color:#0a0e1a; padding:32px 24px;">
+                <img src="${LOGO_URL}" width="56" height="56" alt="LightWatch" style="display:block; border-radius:14px;" />
+                <div style="margin-top:12px; font-size:18px; font-weight:600; color:#ffffff; letter-spacing:0.3px;">
+                  LightWatch
+                </div>
+                <div style="margin-top:4px; font-size:13px; color:#9aa4b8;">
+                  Community power outage reports
+                </div>
+              </td>
+            </tr>
+
+            <!-- Body -->
+            <tr>
+              <td style="padding:32px 32px 8px 32px;">
+                <p style="margin:0 0 16px 0; font-size:15px; line-height:1.6; color:#1f2430;">
+                  Hi there,
+                </p>
+                <p style="margin:0 0 24px 0; font-size:15px; line-height:1.6; color:#1f2430;">
+                  Use the code below to verify your email and finish setting up your LightWatch account.
+                </p>
+              </td>
+            </tr>
+
+            <!-- OTP code -->
+            <tr>
+              <td align="center" style="padding:0 32px 24px 32px;">
+                <div style="display:inline-block; padding:16px 32px; background:linear-gradient(135deg,#f4c95d,#5b8def); border-radius:10px;">
+                  <span style="font-size:32px; font-weight:700; letter-spacing:8px; color:#0a0e1a;">
+                    ${code}
+                  </span>
+                </div>
+                <p style="margin:16px 0 0 0; font-size:13px; color:#6b7280;">
+                  This code expires in 10 minutes.
+                </p>
+              </td>
+            </tr>
+
+            <!-- Security note -->
+            <tr>
+              <td style="padding:0 32px 32px 32px;">
+                <p style="margin:0; font-size:13px; line-height:1.6; color:#6b7280; border-top:1px solid #eef0f3; padding-top:20px;">
+                  Didn't request this code? You can safely ignore this email — no account changes will be made.
+                </p>
+              </td>
+            </tr>
+
+            <!-- Footer -->
+            <tr>
+              <td align="center" style="background-color:#f8f9fb; padding:20px 24px;">
+                <p style="margin:0; font-size:12px; color:#98a2b3;">
+                  © ${year} LightWatch · Real-time power status for your community
+                </p>
+              </td>
+            </tr>
+
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`;
+}
+
 async function sendOtpEmail(email, code) {
     if (!process.env.BREVO_API_KEY) {
         console.log(`[DEV MODE — no BREVO_API_KEY set] OTP for ${email} is ${code}`);
@@ -277,7 +366,9 @@ async function sendOtpEmail(email, code) {
             },
             to: [{ email }],
             subject: 'Your LightWatch verification code',
-            textContent: `Your LightWatch verification code is ${code}. It expires in 10 minutes.`
+            htmlContent: buildOtpEmailHtml(code),
+            // Plain-text fallback for clients that block/strip HTML.
+            textContent: `Your LightWatch verification code is ${code}. It expires in 10 minutes. If you didn't request this, you can ignore this email.`
         })
     });
     if (!response.ok) {
