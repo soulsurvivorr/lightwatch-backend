@@ -229,7 +229,89 @@ async function getLightStatusStats(locationKey) {
 }
 
 // In-memory pending verification store.
+// NOTE: this resets if the server restarts (Render free tier does this
+// on every deploy and after periods of inactivity). That's fine for a
+// single backend instance — if you ever run multiple instances, this
+// would need to move into MongoDB instead so all instances share it.
 const pendingVerifications = {};
+
+const OTP_LENGTH       = 4;                 // matches the 4-box UI on verification.html
+const OTP_EXPIRY_MS    = 10 * 60 * 1000;    // codes are valid for 10 minutes
+const OTP_MAX_ATTEMPTS = 5;                 // lock the code after 5 wrong tries
+
+// ── Generate a random numeric code, e.g. "4839" ────────────────
+function generateOtpCode(length = OTP_LENGTH) {
+    let code = '';
+    for (let i = 0; i < length; i++) {
+        code += Math.floor(Math.random() * 10);
+    }
+    return code;
+}
+
+// ── Email sending (only wired up if SMTP env vars are set) ────
+const nodemailer = require('nodemailer');
+let mailTransporter = null;
+if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+    mailTransporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST,
+        port: Number(process.env.SMTP_PORT) || 587,
+        secure: false,
+        auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+    });
+    console.log("Email OTP sending configured (SMTP).");
+} else {
+    console.warn("WARNING: SMTP_HOST/SMTP_USER/SMTP_PASS not set. Email OTPs will just be logged to the console instead of sent.");
+}
+
+async function sendOtpEmail(email, code) {
+    if (!mailTransporter) {
+        console.log(`[DEV MODE — no SMTP configured] OTP for ${email} is ${code}`);
+        return;
+    }
+    await mailTransporter.sendMail({
+        from: process.env.SMTP_FROM || 'LightWatch <no-reply@lightwatch.app>',
+        to: email,
+        subject: 'Your LightWatch verification code',
+        text: `Your LightWatch verification code is ${code}. It expires in 10 minutes.`
+    });
+}
+
+// ── SMS sending via Arkesel (only wired up if ARKESEL_API_KEY is set) ──
+// Arkesel works well for Ghanaian numbers specifically. Swap this out
+// for Termii/Twilio/etc if you'd rather use a different provider —
+// only this one function needs to change.
+async function sendOtpSms(phoneNumber, code) {
+    if (!process.env.ARKESEL_API_KEY) {
+        console.log(`[DEV MODE — no SMS provider configured] OTP for ${phoneNumber} is ${code}`);
+        return;
+    }
+    const response = await fetch('https://sms.arkesel.com/api/v2/sms/send', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'api-key': process.env.ARKESEL_API_KEY
+        },
+        body: JSON.stringify({
+            sender: process.env.ARKESEL_SENDER_ID || 'LightWatch',
+            message: `Your LightWatch verification code is ${code}. It expires in 10 minutes.`,
+            recipients: [phoneNumber]
+        })
+    });
+    if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`SMS send failed: ${response.status} ${errText}`);
+    }
+}
+
+// ── Picks email vs SMS automatically based on the value's shape ──
+async function sendOtp(emailPhone, code) {
+    const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailPhone);
+    if (isEmail) {
+        await sendOtpEmail(emailPhone, code);
+    } else {
+        await sendOtpSms(emailPhone, code);
+    }
+}
 
 function maskContact(value) {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -271,18 +353,30 @@ app.post('/signup', async (req, res) => {
             return res.status(400).json({ error: "Account already exists" });
         }
 
+        const code = generateOtpCode();
+
+        try {
+            await sendOtp(emailPhone, code);
+        } catch (sendErr) {
+            console.error("Failed to send signup OTP:", sendErr.message);
+            return res.status(500).json({ error: "Could not send verification code. Please try again." });
+        }
+
         pendingVerifications[emailPhone] = {
             type: 'signup',
-            code: '5687',
+            code,
+            expiresAt: Date.now() + OTP_EXPIRY_MS,
+            attempts: 0,
             userData: { name, emailPhone, region, city }
         };
 
-        console.log(`Pending signup created for ${emailPhone} (code: 5687)`);
+        console.log(`Pending signup created for ${emailPhone}`);
 
         return res.status(200).json({
             emailPhone,
-            maskedContact: maskContact(emailPhone),
-            code: '5687'
+            maskedContact: maskContact(emailPhone)
+            // NOTE: the code itself is intentionally NOT included here —
+            // it only goes out via the SMS/email send above.
         });
     } catch (err) {
         console.error("Signup error:", err.message);
@@ -307,19 +401,31 @@ app.post('/signin', async (req, res) => {
             await foundUser.save();
         }
 
+        const code = generateOtpCode();
+
+        try {
+            await sendOtp(emailPhone, code);
+        } catch (sendErr) {
+            console.error("Failed to send signin OTP:", sendErr.message);
+            return res.status(500).json({ error: "Could not send verification code. Please try again." });
+        }
+
         pendingVerifications[emailPhone] = {
             type: 'signin',
-            code: '5687',
+            code,
+            expiresAt: Date.now() + OTP_EXPIRY_MS,
+            attempts: 0,
             userId: foundUser._id.toString()
         };
 
-        console.log(`Pending signin created for ${emailPhone} (code: 5687)`);
+        console.log(`Pending signin created for ${emailPhone}`);
 
         return res.json({
             userId: foundUser._id.toString(),
             maskedContact: maskContact(foundUser.emailPhone),
-            chatHandle: foundUser.chatHandle,
-            code: '5687'
+            chatHandle: foundUser.chatHandle
+            // NOTE: the code itself is intentionally NOT included here —
+            // it only goes out via the SMS/email send above.
         });
     } catch (err) {
         console.error("Signin error:", err.message);
@@ -329,14 +435,28 @@ app.post('/signin', async (req, res) => {
 
 // ---- VERIFY ----
 app.post('/verify', async (req, res) => {
-    const code = req.body.code;
+    const code = (req.body.code || '').trim();
     const emailPhone = (req.body.emailPhone || "").toLowerCase().trim();
     if (!emailPhone || !code) {
         return res.status(400).json({ error: "Email/phone and code are required" });
     }
 
     const pending = pendingVerifications[emailPhone];
-    if (!pending || pending.code !== code) {
+    if (!pending) {
+        return res.status(400).json({ error: "No pending verification. Please request a new code." });
+    }
+
+    if (Date.now() > pending.expiresAt) {
+        delete pendingVerifications[emailPhone];
+        return res.status(400).json({ error: "This code has expired. Please request a new one." });
+    }
+
+    if (pending.code !== code) {
+        pending.attempts = (pending.attempts || 0) + 1;
+        if (pending.attempts >= OTP_MAX_ATTEMPTS) {
+            delete pendingVerifications[emailPhone];
+            return res.status(400).json({ error: "Too many incorrect attempts. Please request a new code." });
+        }
         return res.status(400).json({ error: "Incorrect code" });
     }
 
@@ -376,6 +496,38 @@ app.post('/verify', async (req, res) => {
         console.error("Verify error:", err.message);
         return res.status(500).json({ error: "Server error during verification" });
     }
+});
+
+// ---- RESEND CODE ----
+// Regenerates a fresh code for whatever verification is already pending
+// (signup or signin) and sends it again — powers the "Get a new code"
+// link on the verification page.
+app.post('/resend', async (req, res) => {
+    const emailPhone = (req.body.emailPhone || "").toLowerCase().trim();
+    if (!emailPhone) {
+        return res.status(400).json({ error: "Email/phone is required" });
+    }
+
+    const pending = pendingVerifications[emailPhone];
+    if (!pending) {
+        return res.status(400).json({ error: "No pending verification for this contact. Please start again." });
+    }
+
+    const code = generateOtpCode();
+
+    try {
+        await sendOtp(emailPhone, code);
+    } catch (sendErr) {
+        console.error("Failed to resend OTP:", sendErr.message);
+        return res.status(500).json({ error: "Could not send verification code. Please try again." });
+    }
+
+    pending.code = code;
+    pending.expiresAt = Date.now() + OTP_EXPIRY_MS;
+    pending.attempts = 0;
+
+    console.log(`Resent code for ${emailPhone}`);
+    return res.json({ success: true, maskedContact: maskContact(emailPhone) });
 });
 
 // ---- CHATS ----
