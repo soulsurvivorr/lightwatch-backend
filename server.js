@@ -127,7 +127,7 @@ app.use(express.json());
 app.use(express.static('public'));
 
 // Set this to your real Render URL (e.g. https://lightwatch-api.onrender.com)
-const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://YOUR-APP-NAME.onrender.com';
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://lightwatch-backend.onrender.com';
 const LOGO_URL = `${PUBLIC_BASE_URL}/logo.png`;
 
 app.use((req, res, next) => {
@@ -237,12 +237,20 @@ async function getLightStatusStats(locationKey) {
     };
 }
 
-// In-memory pending verification store.
-// NOTE: this resets if the server restarts (Render free tier does this
-// on every deploy and after periods of inactivity). That's fine for a
-// single backend instance — if you ever run multiple instances, this
-// would need to move into MongoDB instead so all instances share it.
-const pendingVerifications = {};
+// Pending verification store — backed by MongoDB (not in-memory) so it
+// survives Render restarts/redeploys and works across multiple instances.
+// The TTL index below makes MongoDB auto-delete expired docs on its own.
+const pendingVerificationSchema = new mongoose.Schema({
+    emailPhone: { type: String, required: true, unique: true },
+    type:       { type: String, enum: ['signup', 'signin'], required: true },
+    code:       { type: String, required: true },
+    attempts:   { type: Number, default: 0 },
+    userData:   { type: Object },   // only for type: 'signup'
+    userId:     { type: String },   // only for type: 'signin'
+    expiresAt:  { type: Date, required: true }
+});
+pendingVerificationSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+const PendingVerification = mongoose.model('PendingVerification', pendingVerificationSchema);
 
 const OTP_LENGTH       = 4;                 // matches the 4-box UI on verification.html
 const OTP_EXPIRY_MS    = 10 * 60 * 1000;    // codes are valid for 10 minutes
@@ -463,13 +471,17 @@ app.post('/signup', async (req, res) => {
             return res.status(500).json({ error: "Could not send verification code. Please try again." });
         }
 
-        pendingVerifications[emailPhone] = {
-            type: 'signup',
-            code,
-            expiresAt: Date.now() + OTP_EXPIRY_MS,
-            attempts: 0,
-            userData: { name, emailPhone, region, city }
-        };
+        await PendingVerification.findOneAndUpdate(
+            { emailPhone },
+            {
+                type: 'signup',
+                code,
+                expiresAt: new Date(Date.now() + OTP_EXPIRY_MS),
+                attempts: 0,
+                userData: { name, emailPhone, region, city }
+            },
+            { upsert: true, new: true }
+        );
 
         console.log(`Pending signup created for ${emailPhone}`);
 
@@ -511,13 +523,17 @@ app.post('/signin', async (req, res) => {
             return res.status(500).json({ error: "Could not send verification code. Please try again." });
         }
 
-        pendingVerifications[emailPhone] = {
-            type: 'signin',
-            code,
-            expiresAt: Date.now() + OTP_EXPIRY_MS,
-            attempts: 0,
-            userId: foundUser._id.toString()
-        };
+        await PendingVerification.findOneAndUpdate(
+            { emailPhone },
+            {
+                type: 'signin',
+                code,
+                expiresAt: new Date(Date.now() + OTP_EXPIRY_MS),
+                attempts: 0,
+                userId: foundUser._id.toString()
+            },
+            { upsert: true, new: true }
+        );
 
         console.log(`Pending signin created for ${emailPhone}`);
 
@@ -542,22 +558,23 @@ app.post('/verify', async (req, res) => {
         return res.status(400).json({ error: "Email/phone and code are required" });
     }
 
-    const pending = pendingVerifications[emailPhone];
+    const pending = await PendingVerification.findOne({ emailPhone });
     if (!pending) {
         return res.status(400).json({ error: "No pending verification. Please request a new code." });
     }
 
-    if (Date.now() > pending.expiresAt) {
-        delete pendingVerifications[emailPhone];
+    if (Date.now() > pending.expiresAt.getTime()) {
+        await PendingVerification.deleteOne({ emailPhone });
         return res.status(400).json({ error: "This code has expired. Please request a new one." });
     }
 
     if (pending.code !== code) {
         pending.attempts = (pending.attempts || 0) + 1;
         if (pending.attempts >= OTP_MAX_ATTEMPTS) {
-            delete pendingVerifications[emailPhone];
+            await PendingVerification.deleteOne({ emailPhone });
             return res.status(400).json({ error: "Too many incorrect attempts. Please request a new code." });
         }
+        await pending.save();
         return res.status(400).json({ error: "Incorrect code" });
     }
 
@@ -585,7 +602,7 @@ app.post('/verify', async (req, res) => {
             chatHandle = existingUser?.chatHandle;
         }
 
-        delete pendingVerifications[emailPhone];
+        await PendingVerification.deleteOne({ emailPhone });
 
         return res.json({
             success: true,
@@ -609,7 +626,7 @@ app.post('/resend', async (req, res) => {
         return res.status(400).json({ error: "Email/phone is required" });
     }
 
-    const pending = pendingVerifications[emailPhone];
+    const pending = await PendingVerification.findOne({ emailPhone });
     if (!pending) {
         return res.status(400).json({ error: "No pending verification for this contact. Please start again." });
     }
@@ -624,8 +641,9 @@ app.post('/resend', async (req, res) => {
     }
 
     pending.code = code;
-    pending.expiresAt = Date.now() + OTP_EXPIRY_MS;
+    pending.expiresAt = new Date(Date.now() + OTP_EXPIRY_MS);
     pending.attempts = 0;
+    await pending.save();
 
     console.log(`Resent code for ${emailPhone}`);
     return res.json({ success: true, maskedContact: maskContact(emailPhone) });
