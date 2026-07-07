@@ -258,7 +258,7 @@ const OTP_MAX_ATTEMPTS = 5;                 // lock the code after 5 wrong tries
 
 // ── Generate a random numeric code, e.g. "4839" ────────────────
 function generateOtpCode(length = OTP_LENGTH) {
-    let code = '';
+    let code = '';  
     for (let i = 0; i < length; i++) {
         code += Math.floor(Math.random() * 10);
     }
@@ -786,6 +786,21 @@ app.get('/admin/summary', verifyAdminToken, async (req, res) => {
     } catch (err) {
         console.error('Admin summary error:', err.message);
         return res.status(500).json({ error: 'Server error fetching summary' });
+    }
+});
+
+// ---- PUBLIC STATS ----
+// Just a headline number for the sign-in page ("N registered users") —
+// intentionally public and minimal, no auth needed since it reveals
+// nothing except a count. (Separate from /admin/summary above, which
+// requires an admin token and returns more detail.)
+app.get('/stats', async (req, res) => {
+    try {
+        const userCount = await User.countDocuments();
+        return res.json({ userCount });
+    } catch (err) {
+        console.error("Stats error:", err.message);
+        return res.status(500).json({ error: "Could not load stats" });
     }
 });
 
