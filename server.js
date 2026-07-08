@@ -78,6 +78,11 @@ const chatSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     handle: { type: String, required: true },
     text: { type: String, required: true },
+    replyTo: {
+        chatId: { type: String },
+        handle: { type: String },
+        text: { type: String }
+    },
     location: { type: String, required: true },
     locationKey: { type: String, required: true },
     createdAt: { type: Date, default: Date.now }
@@ -674,7 +679,7 @@ app.get('/chats', async (req, res) => {
 });
 
 app.post('/chats', async (req, res) => {
-    const { userId, text, location } = req.body;
+    const { userId, text, location, replyTo } = req.body;
     if (!userId || !text || !location) {
         return res.status(400).json({ error: "Missing user, text, or location" });
     }
@@ -697,6 +702,11 @@ app.post('/chats', async (req, res) => {
             userId,
             handle: user.chatHandle,
             text,
+            replyTo: replyTo ? {
+                chatId: String(replyTo.chatId || ''),
+                handle: String(replyTo.handle || '').slice(0, 80),
+                text: String(replyTo.text || '').slice(0, 220)
+            } : undefined,
             location: savedLocation,
             locationKey: normalizedLocation
         });
@@ -763,11 +773,58 @@ app.get('/admin/chats', verifyAdminToken, async (req, res) => {
 // ---- ADMIN: All users (protected) ----
 app.get('/admin/users', verifyAdminToken, async (req, res) => {
     try {
-        const users = await User.find().sort({ createdAt: -1 }).select('-_id name emailPhone region city chatHandle createdAt');
+        const users = await User.find().sort({ createdAt: -1 }).select('name emailPhone region city chatHandle createdAt');
         return res.json(users);
     } catch (err) {
         console.error('Admin users error:', err.message);
         return res.status(500).json({ error: 'Server error fetching users' });
+    }
+});
+
+// ---- ADMIN: Delete chats (single or bulk) ----
+app.delete('/admin/chats', verifyAdminToken, async (req, res) => {
+    try {
+        const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+        const validIds = ids.filter(id => mongoose.Types.ObjectId.isValid(id));
+
+        if (validIds.length === 0) {
+            return res.status(400).json({ error: 'No valid chat ids provided' });
+        }
+
+        const result = await Chat.deleteMany({ _id: { $in: validIds } });
+        return res.json({ deletedCount: result.deletedCount || 0 });
+    } catch (err) {
+        console.error('Admin delete chats error:', err.message);
+        return res.status(500).json({ error: 'Server error deleting chats' });
+    }
+});
+
+// ---- ADMIN: Delete users (single or bulk) ----
+app.delete('/admin/users', verifyAdminToken, async (req, res) => {
+    try {
+        const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+        const validIds = ids.filter(id => mongoose.Types.ObjectId.isValid(id));
+
+        if (validIds.length === 0) {
+            return res.status(400).json({ error: 'No valid user ids provided' });
+        }
+
+        const [usersResult, chatsResult, eventsResult, subsResult] = await Promise.all([
+            User.deleteMany({ _id: { $in: validIds } }),
+            Chat.deleteMany({ userId: { $in: validIds } }),
+            LightStatusEvent.deleteMany({ userId: { $in: validIds } }),
+            PushSubscription.deleteMany({ userId: { $in: validIds } })
+        ]);
+
+        return res.json({
+            deletedUsers: usersResult.deletedCount || 0,
+            deletedChats: chatsResult.deletedCount || 0,
+            deletedEvents: eventsResult.deletedCount || 0,
+            deletedSubscriptions: subsResult.deletedCount || 0
+        });
+    } catch (err) {
+        console.error('Admin delete users error:', err.message);
+        return res.status(500).json({ error: 'Server error deleting users' });
     }
 });
 
