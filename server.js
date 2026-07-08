@@ -720,7 +720,9 @@ app.post('/chats', async (req, res) => {
             title: `LightWatch chat — ${key}`,
             body: `${saved.handle}: ${saved.text}`,
             url: '/pages/home.html',
-            tag: 'chat-message'
+            tag: 'chat-message',
+            requireInteraction: true,
+            vibrate: [240, 120, 240]
         });
 
         const subscribers = await PushSubscription.find({ location: key });
@@ -987,7 +989,10 @@ app.post('/lightstatus', async (req, res) => {
         const payload = JSON.stringify({
             title: `LightWatch — ${key}`,
             body: `${emoji} Light is now ${status.toUpperCase()} in ${key}.`,
-            url: '/pages/home.html'
+            url: '/pages/home.html',
+            tag: 'light-status',
+            requireInteraction: status === 'off',
+            vibrate: status === 'off' ? [300, 120, 300, 120, 300] : [180, 90, 180]
         });
 
         const subscribers = await PushSubscription.find({ location: key });
@@ -1077,4 +1082,76 @@ startServer(Number(PORT));
 app.get('/admin/clear-subscriptions', verifyAdminToken, async (req, res) => {
     await PushSubscription.deleteMany({});
     res.json({ cleared: true });
+});
+
+// ---- ADMIN: PUSH TEST ----
+app.post('/admin/push-test', verifyAdminToken, async (req, res) => {
+    const {
+        location,
+        title,
+        body,
+        url,
+        tag,
+        requireInteraction,
+        vibrate,
+        image,
+        icon,
+        badge
+    } = req.body || {};
+
+    if (!location) {
+        return res.status(400).json({ error: 'location is required' });
+    }
+
+    try {
+        const key = normalizeLocation(location).split(',')[0].trim();
+        const subscribers = await PushSubscription.find({ location: key });
+
+        if (!subscribers.length) {
+            return res.status(404).json({ error: 'No subscribers found for this location' });
+        }
+
+        const payload = JSON.stringify({
+            title: title || `LightWatch test — ${key}`,
+            body: body || 'Testing heads-up push behavior on this device.',
+            url: url || '/pages/home.html',
+            tag: tag || `test-${Date.now()}`,
+            requireInteraction: typeof requireInteraction === 'boolean' ? requireInteraction : true,
+            vibrate: Array.isArray(vibrate) ? vibrate : [300, 120, 300, 120, 300],
+            image: image || undefined,
+            icon: icon || undefined,
+            badge: badge || undefined
+        });
+
+        const pushPromises = subscribers.map(async sub => {
+            try {
+                await webpush.sendNotification(sub.subscription, payload, {
+                    urgency: 'high',
+                    TTL: 60
+                });
+                return { ok: true };
+            } catch (err) {
+                if (err.statusCode === 410) {
+                    await PushSubscription.deleteOne({ _id: sub._id });
+                    return { ok: false, stale: true };
+                }
+                console.error('Admin push test error:', err.statusCode, err.body, err.message);
+                return { ok: false, statusCode: err.statusCode || 500 };
+            }
+        });
+
+        const settled = await Promise.all(pushPromises);
+        const sentCount = settled.filter(x => x.ok).length;
+        const staleCount = settled.filter(x => x.stale).length;
+
+        return res.json({
+            location: key,
+            subscribers: subscribers.length,
+            sentCount,
+            staleRemoved: staleCount
+        });
+    } catch (err) {
+        console.error('Admin push-test route error:', err.message);
+        return res.status(500).json({ error: 'Server error sending test push' });
+    }
 });
