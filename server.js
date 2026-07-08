@@ -731,7 +731,10 @@ app.post('/chats', async (req, res) => {
                 return;
             }
             try {
-                await webpush.sendNotification(sub.subscription, payload);
+                await webpush.sendNotification(sub.subscription, payload, {
+                    urgency: 'high',
+                    TTL: 60
+                });
             } catch (err) {
                 if (err.statusCode === 410) {
                     await PushSubscription.deleteOne({ _id: sub._id });
@@ -992,7 +995,10 @@ app.post('/lightstatus', async (req, res) => {
 
         const pushPromises = subscribers.map(async sub => {
             try {
-                await webpush.sendNotification(sub.subscription, payload);
+                await webpush.sendNotification(sub.subscription, payload, {
+                    urgency: 'high',
+                    TTL: 60
+                });
             } catch (err) {
                 if (err.statusCode === 410) {
                     await PushSubscription.deleteOne({ _id: sub._id });
