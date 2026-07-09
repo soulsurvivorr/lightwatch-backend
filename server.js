@@ -78,6 +78,7 @@ const chatSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     handle: { type: String, required: true },
     text: { type: String, required: true },
+    scope: { type: String, enum: ['local', 'global'], default: 'local' },
     replyTo: {
         chatId: { type: String },
         handle: { type: String },
@@ -657,13 +658,21 @@ app.post('/resend', async (req, res) => {
 // ---- CHATS ----
 app.get('/chats', async (req, res) => {
     const location = req.query.location;
+    const scope = (req.query.scope || 'local').toString().toLowerCase() === 'global' ? 'global' : 'local';
 
     try {
         const allChats = await Chat.find().sort({ createdAt: -1 }).limit(500).lean();
 
+        if (scope === 'global') {
+            const globalChats = allChats.filter(chat => (chat.scope || 'local') === 'global');
+            return res.json(globalChats);
+        }
+
+        const localChats = allChats.filter(chat => (chat.scope || 'local') !== 'global');
+
         if (location) {
             const normalizedLocation = normalizeLocation(location);
-            const filtered = allChats.filter(chat => {
+            const filtered = localChats.filter(chat => {
                 const chatLoc = normalizeLocation(chat.location || chat.locationKey || '');
                 if (!chatLoc) return false;
                 return chatLoc === normalizedLocation || chatLoc.includes(normalizedLocation) || normalizedLocation.includes(chatLoc);
@@ -671,7 +680,7 @@ app.get('/chats', async (req, res) => {
             return res.json(filtered);
         }
 
-        return res.json(allChats);
+        return res.json(localChats);
     } catch (err) {
         console.error("Get chats error:", err.message);
         return res.status(500).json({ error: "Server error fetching chats" });
@@ -679,8 +688,9 @@ app.get('/chats', async (req, res) => {
 });
 
 app.post('/chats', async (req, res) => {
-    const { userId, text, location, replyTo } = req.body;
-    if (!userId || !text || !location) {
+    const { userId, text, location, replyTo, scope } = req.body;
+    const normalizedScope = (scope || 'local').toString().toLowerCase() === 'global' ? 'global' : 'local';
+    if (!userId || !text || (normalizedScope === 'local' && !location)) {
         return res.status(400).json({ error: "Missing user, text, or location" });
     }
 
@@ -695,13 +705,18 @@ app.post('/chats', async (req, res) => {
             await user.save();
         }
 
-        const normalizedLocation = normalizeLocation(location);
-        const savedLocation = location.trim();
+        const normalizedLocation = normalizedScope === 'global'
+            ? 'global'
+            : normalizeLocation(location);
+        const savedLocation = normalizedScope === 'global'
+            ? 'All areas'
+            : location.trim();
 
         const newChat = new Chat({
             userId,
             handle: user.chatHandle,
             text,
+            scope: normalizedScope,
             replyTo: replyTo ? {
                 chatId: String(replyTo.chatId || ''),
                 handle: String(replyTo.handle || '').slice(0, 80),
