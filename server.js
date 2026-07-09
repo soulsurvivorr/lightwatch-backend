@@ -833,6 +833,60 @@ app.delete('/admin/users', verifyAdminToken, async (req, res) => {
     }
 });
 
+// ---- ADMIN: Clear all light status reports (protected) ----
+app.get('/admin/reports', verifyAdminToken, async (req, res) => {
+    try {
+        const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 200);
+        const events = await LightStatusEvent.find().sort({ reportedAt: -1 }).limit(limit).lean();
+
+        function titleCaseLocation(key) {
+            return (key || 'unknown').split(',')[0]
+                .split(' ')
+                .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+                .join(' ');
+        }
+
+        const reports = events.map(event => {
+            const locationName = titleCaseLocation(event.locationKey);
+            const reporter = event.reportedBy === 'anonymous' ? 'A volunteer' : (event.reportedBy || 'A resident');
+            const isOn = event.status === 'on';
+            return {
+                id: event._id,
+                userId: event.userId ? event.userId.toString() : null,
+                status: event.status,
+                location: locationName,
+                title: isOn ? `Light restored - ${locationName}` : `Outage reported - ${locationName}`,
+                text: isOn
+                    ? `${reporter} confirmed power is back on in ${locationName}.`
+                    : `${reporter} reported the light is off in ${locationName}.`,
+                reportedAt: event.reportedAt,
+                type: isOn ? 'success' : 'warning'
+            };
+        });
+
+        return res.json(reports);
+    } catch (err) {
+        console.error('Admin reports error:', err.message);
+        return res.status(500).json({ error: 'Server error fetching reports' });
+    }
+});
+
+app.delete('/admin/reports', verifyAdminToken, async (req, res) => {
+    try {
+        const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+        const validIds = ids.filter(id => mongoose.Types.ObjectId.isValid(id));
+
+        const result = validIds.length > 0
+            ? await LightStatusEvent.deleteMany({ _id: { $in: validIds } })
+            : await LightStatusEvent.deleteMany({});
+
+        return res.json({ deletedCount: result.deletedCount || 0 });
+    } catch (err) {
+        console.error('Admin clear reports error:', err.message);
+        return res.status(500).json({ error: 'Server error clearing reports' });
+    }
+});
+
 // ---- ADMIN: Summary stats (protected) ----
 app.get('/admin/summary', verifyAdminToken, async (req, res) => {
     try {
