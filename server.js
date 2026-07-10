@@ -70,6 +70,8 @@ const userSchema = new mongoose.Schema({
     emailPhone: { type: String, required: true, unique: true },
     region: { type: String, required: true },
     city: { type: String, required: true },
+    cityChangeLocked: { type: Boolean, default: false },
+    cityChangedAt: { type: Date, default: null },
     chatHandle: { type: String },
     createdAt: { type: Date, default: Date.now }
 });
@@ -108,6 +110,7 @@ const lightStatusEventSchema = new mongoose.Schema({
 const pushSubscriptionSchema = new mongoose.Schema({
     userId:       { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     location:     { type: String, required: true }, // normalised location key
+    muteGlobalChat: { type: Boolean, default: false },
     subscription: { type: Object, required: true }, // full browser push subscription object
     createdAt:    { type: Date, default: Date.now }
 });
@@ -731,22 +734,42 @@ app.post('/chats', async (req, res) => {
         chatObj.userId = chatObj.userId.toString();
         console.log('Chat saved:', { id: chatObj._id.toString(), handle: chatObj.handle, location: chatObj.location });
         const key = normalizeLocation(saved.location).split(',')[0].trim();
-        const payload = JSON.stringify({
-            title: `LightWatch chat — ${key}`,
-            body: `${saved.handle}: ${saved.text}`,
-            url: '/pages/home.html',
-            tag: 'chat-message',
-            requireInteraction: true,
-            vibrate: [240, 120, 240]
-        });
+        const isGlobalChat = normalizedScope === 'global';
+        const audienceTitle = isGlobalChat ? 'Everyone' : key;
+        const replyTargetChat = replyTo?.chatId
+            ? await Chat.findById(replyTo.chatId).select('userId handle text').lean()
+            : null;
 
-        const subscribers = await PushSubscription.find({ location: key });
-        console.log(`Sending chat push to ${subscribers.length} subscriber(s) at ${key}`);
+        const subscribers = isGlobalChat
+            ? await PushSubscription.find({ muteGlobalChat: { $ne: true } })
+            : await PushSubscription.find({ location: key });
+        console.log(`Sending chat push to ${subscribers.length} subscriber(s) at ${audienceTitle}`);
 
         const pushPromises = subscribers.map(async sub => {
             if (sub.userId && String(sub.userId) === String(userId)) {
                 return;
             }
+
+            const isReplyForThisUser = Boolean(
+                replyTargetChat?.userId && sub.userId &&
+                String(replyTargetChat.userId) === String(sub.userId)
+            );
+
+            const payload = JSON.stringify({
+                title: isReplyForThisUser
+                    ? `Reply in ${audienceTitle}`
+                    : `LightWatch chat — ${audienceTitle}`,
+                body: isReplyForThisUser
+                    ? `${saved.handle} replied to your message: ${saved.text}`
+                    : `${saved.handle}: ${saved.text}`,
+                url: '/pages/home.html',
+                tag: isReplyForThisUser ? 'chat-reply' : 'chat-message',
+                requireInteraction: true,
+                vibrate: isReplyForThisUser ? [280, 120, 280] : [240, 120, 240],
+                chatScope: normalizedScope,
+                isReply: isReplyForThisUser
+            });
+
             try {
                 await webpush.sendNotification(sub.subscription, payload, {
                     urgency: 'high',
@@ -1106,7 +1129,12 @@ app.post('/subscribe', async (req, res) => {
 
         await PushSubscription.findOneAndUpdate(
             { 'subscription.endpoint': subscription.endpoint },
-            { userId, location: locationKey, subscription },
+            {
+                userId,
+                location: locationKey,
+                subscription,
+                $setOnInsert: { muteGlobalChat: false }
+            },
             { upsert: true, new: true }
         );
 
@@ -1114,6 +1142,74 @@ app.post('/subscribe', async (req, res) => {
     } catch (err) {
         console.error('Subscribe error:', err.message);
         return res.status(500).json({ error: 'Server error saving subscription' });
+    }
+});
+
+app.patch('/subscribe/preferences', async (req, res) => {
+    const { userId, endpoint, muteGlobalChat } = req.body;
+    if (!userId || !endpoint || typeof muteGlobalChat !== 'boolean') {
+        return res.status(400).json({ error: 'userId, endpoint, and muteGlobalChat are required' });
+    }
+
+    try {
+        const updated = await PushSubscription.findOneAndUpdate(
+            {
+                userId,
+                'subscription.endpoint': endpoint
+            },
+            { muteGlobalChat },
+            { new: true }
+        );
+
+        if (!updated) {
+            return res.status(404).json({ error: 'Subscription not found for this user/device' });
+        }
+
+        return res.json({ success: true, muteGlobalChat: updated.muteGlobalChat });
+    } catch (err) {
+        console.error('Subscribe preferences error:', err.message);
+        return res.status(500).json({ error: 'Server error saving preferences' });
+    }
+});
+
+app.patch('/user/:id/city', async (req, res) => {
+    const { id } = req.params;
+    const city = String(req.body?.city || '').trim();
+    if (!city) {
+        return res.status(400).json({ error: 'city is required' });
+    }
+    if (city.length < 2 || city.length > 60) {
+        return res.status(400).json({ error: 'city must be between 2 and 60 characters' });
+    }
+
+    try {
+        const user = await User.findById(id);
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        if (user.cityChangeLocked) {
+            return res.status(409).json({ error: 'City/Town has already been changed and is now locked.' });
+        }
+
+        user.city = city;
+        user.cityChangeLocked = true;
+        user.cityChangedAt = new Date();
+        await user.save();
+
+        return res.json({
+            success: true,
+            user: {
+                id: user._id,
+                city: user.city,
+                region: user.region,
+                cityChangeLocked: true,
+                cityChangedAt: user.cityChangedAt
+            }
+        });
+    } catch (err) {
+        console.error('City update error:', err.message);
+        return res.status(500).json({ error: 'Server error updating city' });
     }
 });
 
