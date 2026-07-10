@@ -755,6 +755,15 @@ app.post('/chats', async (req, res) => {
                 String(replyTargetChat.userId) === String(sub.userId)
             );
 
+            const deepLinkParams = new URLSearchParams({
+                chatId: String(saved._id),
+                chatScope: normalizedScope,
+                chatLocation: savedLocation
+            });
+            if (replyTo?.chatId) {
+                deepLinkParams.set('replyToChatId', String(replyTo.chatId));
+            }
+
             const payload = JSON.stringify({
                 title: isReplyForThisUser
                     ? `Reply in ${audienceTitle}`
@@ -762,7 +771,7 @@ app.post('/chats', async (req, res) => {
                 body: isReplyForThisUser
                     ? `${saved.handle} replied to your message: ${saved.text}`
                     : `${saved.handle}: ${saved.text}`,
-                url: '/pages/home.html',
+                url: `/pages/home.html?${deepLinkParams.toString()}`,
                 tag: isReplyForThisUser ? 'chat-reply' : 'chat-message',
                 requireInteraction: true,
                 vibrate: isReplyForThisUser ? [280, 120, 280] : [240, 120, 240],
