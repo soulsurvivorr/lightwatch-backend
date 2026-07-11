@@ -302,18 +302,34 @@ const pendingVerificationSchema = new mongoose.Schema({
 pendingVerificationSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 const PendingVerification = mongoose.model('PendingVerification', pendingVerificationSchema);
 
-const OTP_LENGTH       = 6;                 // 6-digit numeric code — verification.html's
-                                             // boxes/inputs need to match this count
+const OTP_LENGTH       = 4;                 // matches the 4-box UI on verification.html
 const OTP_EXPIRY_MS    = 10 * 60 * 1000;    // codes are valid for 10 minutes
 const OTP_MAX_ATTEMPTS = 5;                 // lock the code after 5 wrong tries
 
-// ── Generate a random numeric code, e.g. "483920" ────────────────
+// ── Generate a random numeric code, e.g. "4839" ────────────────
 function generateOtpCode(length = OTP_LENGTH) {
     let code = '';  
     for (let i = 0; i < length; i++) {
         code += Math.floor(Math.random() * 10);
     }
     return code;
+}
+
+// ── Pull the last name off a full name for a friendlier greeting
+// ("Kofi Sarkodie" -> "Sarkodie"). Falls back to '' (caller then
+// falls back to "there") if there's nothing usable. ──────────────
+function getLastName(fullName) {
+    if (!fullName || typeof fullName !== 'string') return '';
+    const parts = fullName.trim().split(/\s+/).filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : '';
+}
+
+// ── Minimal HTML-escaping for the one user-supplied string we ever
+// interpolate into the email template (the name). ─────────────────
+function escapeHtml(str) {
+    return String(str).replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
 }
 
 // ── Email sending via Brevo's HTTP API ──────────────────────
@@ -331,8 +347,9 @@ if (!process.env.BREVO_API_KEY) {
 // with inline styles (not classes) because most email clients strip
 // <style> blocks and external CSS — inline is the only thing that
 // renders consistently across Gmail, Outlook, Apple Mail, etc.
-function buildOtpEmailHtml(code) {
+function buildOtpEmailHtml(code, name) {
     const year = new Date().getFullYear();
+    const greetingName = escapeHtml(getLastName(name) || 'there');
     return `
 <!DOCTYPE html>
 <html>
@@ -359,7 +376,7 @@ function buildOtpEmailHtml(code) {
             <tr>
               <td style="padding:32px 32px 8px 32px;">
                 <p style="margin:0 0 16px 0; font-size:15px; line-height:1.6; color:#1f2430;">
-                  Hi there,
+                  Hi ${greetingName},
                 </p>
                 <p style="margin:0 0 24px 0; font-size:15px; line-height:1.6; color:#1f2430;">
                   Use the code below to verify your email and finish setting up your LightWatch account.
@@ -406,7 +423,7 @@ function buildOtpEmailHtml(code) {
 </html>`;
 }
 
-async function sendOtpEmail(email, code) {
+async function sendOtpEmail(email, code, name) {
     if (!process.env.BREVO_API_KEY) {
         console.log(`[DEV MODE — no BREVO_API_KEY set] OTP for ${email} is ${code}`);
         return;
@@ -424,7 +441,7 @@ async function sendOtpEmail(email, code) {
             },
             to: [{ email }],
             subject: 'Your LightWatch verification code',
-            htmlContent: buildOtpEmailHtml(code),
+            htmlContent: buildOtpEmailHtml(code, name),
             // Plain-text fallback for clients that block/strip HTML.
             textContent: `Your LightWatch verification code is ${code}. It expires in 10 minutes. If you didn't request this, you can ignore this email.`
         })
@@ -463,10 +480,10 @@ async function sendOtpSms(phoneNumber, code) {
 }
 
 // ── Picks email vs SMS automatically based on the value's shape ──
-async function sendOtp(emailPhone, code) {
+async function sendOtp(emailPhone, code, name) {
     const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailPhone);
     if (isEmail) {
-        await sendOtpEmail(emailPhone, code);
+        await sendOtpEmail(emailPhone, code, name);
     } else {
         await sendOtpSms(emailPhone, code);
     }
@@ -515,7 +532,7 @@ app.post('/signup', async (req, res) => {
         const code = generateOtpCode();
 
         try {
-            await sendOtp(emailPhone, code);
+            await sendOtp(emailPhone, code, name);
         } catch (sendErr) {
             console.error("Failed to send signup OTP:", sendErr.message);
             return res.status(500).json({ error: "Could not send verification code. Please try again." });
@@ -567,7 +584,7 @@ app.post('/signin', async (req, res) => {
         const code = generateOtpCode();
 
         try {
-            await sendOtp(emailPhone, code);
+            await sendOtp(emailPhone, code, foundUser.name);
         } catch (sendErr) {
             console.error("Failed to send signin OTP:", sendErr.message);
             return res.status(500).json({ error: "Could not send verification code. Please try again." });
@@ -683,8 +700,19 @@ app.post('/resend', async (req, res) => {
 
     const code = generateOtpCode();
 
+    // Same name the original code's email used — from the signup form
+    // data still sitting on the pending doc, or looked back up for an
+    // existing user signing in.
+    let name;
+    if (pending.type === 'signup') {
+        name = pending.userData?.name;
+    } else if (pending.type === 'signin') {
+        const existingUser = await User.findById(pending.userId);
+        name = existingUser?.name;
+    }
+
     try {
-        await sendOtp(emailPhone, code);
+        await sendOtp(emailPhone, code, name);
     } catch (sendErr) {
         console.error("Failed to resend OTP:", sendErr.message);
         return res.status(500).json({ error: "Could not send verification code. Please try again." });
