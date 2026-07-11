@@ -73,6 +73,13 @@ const userSchema = new mongoose.Schema({
     cityChangeLocked: { type: Boolean, default: false },
     cityChangedAt: { type: Date, default: null },
     chatHandle: { type: String },
+    // Optional second monitored location (e.g. "Work") — separate from the
+    // primary signup region/city above, which stays the account's home base.
+    secondaryLocation: {
+        label:  { type: String, default: null }, // "Work", "Family house", etc.
+        city:   { type: String, default: null },
+        region: { type: String, default: null }
+    },
     createdAt: { type: Date, default: Date.now }
 });
 
@@ -1636,6 +1643,59 @@ app.patch('/user/:id/city', async (req, res) => {
     } catch (err) {
         console.error('City update error:', err.message);
         return res.status(500).json({ error: 'Server error updating city' });
+    }
+});
+
+// PATCH /user/:id/secondary-location  { label, city, region }
+// Adds or updates the user's one extra monitored location (e.g. "Work").
+// Unlike the primary city, this can be edited any number of times.
+app.patch('/user/:id/secondary-location', async (req, res) => {
+    const { id } = req.params;
+    const label  = String(req.body?.label || '').trim().slice(0, 40);
+    const city   = String(req.body?.city || '').trim();
+    const region = String(req.body?.region || '').trim();
+
+    if (!city || !region) {
+        return res.status(400).json({ error: 'city and region are required' });
+    }
+    if (city.length < 2 || city.length > 60) {
+        return res.status(400).json({ error: 'city must be between 2 and 60 characters' });
+    }
+
+    try {
+        const user = await User.findById(id);
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        user.secondaryLocation = {
+            label: label || 'Second location',
+            city,
+            region
+        };
+        await user.save();
+
+        return res.json({ success: true, secondaryLocation: user.secondaryLocation });
+    } catch (err) {
+        console.error('Secondary location update error:', err.message);
+        return res.status(500).json({ error: 'Server error updating secondary location' });
+    }
+});
+
+// DELETE /user/:id/secondary-location
+app.delete('/user/:id/secondary-location', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const user = await User.findById(id);
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        user.secondaryLocation = { label: null, city: null, region: null };
+        await user.save();
+        return res.json({ success: true });
+    } catch (err) {
+        console.error('Secondary location delete error:', err.message);
+        return res.status(500).json({ error: 'Server error removing secondary location' });
     }
 });
 
