@@ -111,6 +111,7 @@ const pushSubscriptionSchema = new mongoose.Schema({
     userId:       { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     location:     { type: String, required: true }, // normalised location key
     muteGlobalChat: { type: Boolean, default: false },
+    chatMentionsEnabled: { type: Boolean, default: true },
     subscription: { type: Object, required: true }, // full browser push subscription object
     createdAt:    { type: Date, default: Date.now }
 });
@@ -195,6 +196,22 @@ async function generateUniqueChatHandle() {
 function normalizeLocation(value) {
     if (!value) return "";
     return value.toString().trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function titleCaseLocation(value) {
+    if (!value) return 'Unknown';
+    return value
+        .toString()
+        .split(',')[0]
+        .trim()
+        .split(' ')
+        .filter(Boolean)
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(' ');
+}
+
+function escapeRegex(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 async function getLightStatusStats(locationKey) {
@@ -735,15 +752,25 @@ app.post('/chats', async (req, res) => {
         console.log('Chat saved:', { id: chatObj._id.toString(), handle: chatObj.handle, location: chatObj.location });
         const key = normalizeLocation(saved.location).split(',')[0].trim();
         const isGlobalChat = normalizedScope === 'global';
-        const audienceTitle = isGlobalChat ? 'Everyone' : key;
+        const audienceTitle = isGlobalChat ? 'Everyone' : titleCaseLocation(key);
         const replyTargetChat = replyTo?.chatId
             ? await Chat.findById(replyTo.chatId).select('userId handle text').lean()
             : null;
 
         const subscribers = isGlobalChat
-            ? await PushSubscription.find({ muteGlobalChat: { $ne: true } })
+            ? await PushSubscription.find({})
             : await PushSubscription.find({ location: key });
         console.log(`Sending chat push to ${subscribers.length} subscriber(s) at ${audienceTitle}`);
+
+        const recipientUserIds = [...new Set(
+            subscribers
+                .map(sub => sub.userId ? String(sub.userId) : '')
+                .filter(Boolean)
+        )];
+        const recipientUsers = recipientUserIds.length
+            ? await User.find({ _id: { $in: recipientUserIds } }).select('chatHandle').lean()
+            : [];
+        const handleByUserId = new Map(recipientUsers.map(u => [String(u._id), (u.chatHandle || '').toLowerCase()]));
 
         const pushPromises = subscribers.map(async sub => {
             if (sub.userId && String(sub.userId) === String(userId)) {
@@ -755,6 +782,25 @@ app.post('/chats', async (req, res) => {
                 String(replyTargetChat.userId) === String(sub.userId)
             );
 
+            const recipientUserId = sub.userId ? String(sub.userId) : '';
+            const recipientHandle = handleByUserId.get(recipientUserId) || '';
+            const isMentionForThisUser = Boolean(
+                recipientHandle &&
+                new RegExp(`(^|\\W)@?${escapeRegex(recipientHandle)}(?=$|\\W)`, 'i').test(saved.text || '')
+            );
+
+            const isPriorityMention = isReplyForThisUser || isMentionForThisUser;
+            const mentionsEnabled = sub.chatMentionsEnabled !== false;
+            const mutedGlobalChat = sub.muteGlobalChat === true;
+
+            if (isGlobalChat) {
+                if (isPriorityMention) {
+                    if (!mentionsEnabled) return;
+                } else if (mutedGlobalChat) {
+                    return;
+                }
+            }
+
             const deepLinkParams = new URLSearchParams({
                 chatId: String(saved._id),
                 chatScope: normalizedScope,
@@ -765,18 +811,19 @@ app.post('/chats', async (req, res) => {
             }
 
             const payload = JSON.stringify({
-                title: isReplyForThisUser
+                title: isPriorityMention
                     ? `Reply in ${audienceTitle}`
                     : `LightWatch chat — ${audienceTitle}`,
-                body: isReplyForThisUser
+                body: isPriorityMention
                     ? `${saved.handle} replied to your message: ${saved.text}`
                     : `${saved.handle}: ${saved.text}`,
                 url: `/pages/home.html?${deepLinkParams.toString()}`,
-                tag: isReplyForThisUser ? 'chat-reply' : 'chat-message',
+                tag: isPriorityMention ? 'chat-reply' : 'chat-message',
                 requireInteraction: true,
-                vibrate: isReplyForThisUser ? [280, 120, 280] : [240, 120, 240],
+                vibrate: isPriorityMention ? [280, 120, 280] : [240, 120, 240],
                 chatScope: normalizedScope,
-                isReply: isReplyForThisUser
+                isReply: isReplyForThisUser,
+                isMention: isMentionForThisUser
             });
 
             try {
@@ -1006,6 +1053,7 @@ app.get('/lightstatus', async (req, res) => {
     if (!location) return res.status(400).json({ error: 'location required' });
     try {
         const key = normalizeLocation(location).split(',')[0].trim();
+        const keyTitle = titleCaseLocation(key);
         const record = await LightStatus.findOne({ locationKey: key });
         const stats = await getLightStatusStats(key);
         return res.json({
@@ -1022,8 +1070,19 @@ app.get('/lightstatus', async (req, res) => {
 
 app.get('/reports', async (req, res) => {
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 100);
+
+    // Optional scoping — both additive, existing callers with no query
+    // params keep getting the same global feed as before.
+    const query = {};
+    if (req.query.location) {
+        query.locationKey = normalizeLocation(req.query.location).split(',')[0].trim();
+    }
+    if (req.query.userId) {
+        query.userId = req.query.userId;
+    }
+
     try {
-        const events = await LightStatusEvent.find().sort({ reportedAt: -1 }).limit(limit).lean();
+        const events = await LightStatusEvent.find(query).sort({ reportedAt: -1 }).limit(limit).lean();
 
         function titleCaseLocation(key) {
             return key.split(',')[0]
@@ -1065,6 +1124,7 @@ app.post('/lightstatus', async (req, res) => {
 
     try {
         const key = normalizeLocation(location).split(',')[0].trim();
+        const keyTitle = titleCaseLocation(key);
 
         const user = userId ? await User.findById(userId).select('chatHandle') : null;
         const reportedBy = user?.chatHandle || userId || 'anonymous';
@@ -1088,8 +1148,8 @@ app.post('/lightstatus', async (req, res) => {
         // ── Send push notifications to all subscribers at this location ──
         const emoji = status === 'on' ? '💡' : '🌑';
         const payload = JSON.stringify({
-            title: `LightWatch — ${key}`,
-            body: `${emoji} Light is now ${status.toUpperCase()} in ${key}.`,
+            title: `LightWatch — ${keyTitle}`,
+            body: `${emoji} Light is now ${status.toUpperCase()} in ${keyTitle}.`,
             url: '/pages/home.html',
             tag: 'light-status',
             requireInteraction: status === 'off',
@@ -1154,11 +1214,44 @@ app.post('/subscribe', async (req, res) => {
     }
 });
 
-app.patch('/subscribe/preferences', async (req, res) => {
-    const { userId, endpoint, muteGlobalChat } = req.body;
-    if (!userId || !endpoint || typeof muteGlobalChat !== 'boolean') {
-        return res.status(400).json({ error: 'userId, endpoint, and muteGlobalChat are required' });
+app.get('/subscribe/preferences', async (req, res) => {
+    const { userId, endpoint } = req.query;
+    if (!userId || !endpoint) {
+        return res.status(400).json({ error: 'userId and endpoint are required' });
     }
+
+    try {
+        const sub = await PushSubscription.findOne({
+            userId,
+            'subscription.endpoint': endpoint
+        }).select('muteGlobalChat chatMentionsEnabled').lean();
+
+        if (!sub) {
+            return res.status(404).json({ error: 'Subscription not found for this user/device' });
+        }
+
+        return res.json({
+            muteGlobalChat: sub.muteGlobalChat === true,
+            chatMentionsEnabled: sub.chatMentionsEnabled !== false
+        });
+    } catch (err) {
+        console.error('Get subscribe preferences error:', err.message);
+        return res.status(500).json({ error: 'Server error fetching preferences' });
+    }
+});
+
+app.patch('/subscribe/preferences', async (req, res) => {
+    const { userId, endpoint, muteGlobalChat, chatMentionsEnabled } = req.body;
+    const hasMuteUpdate = typeof muteGlobalChat === 'boolean';
+    const hasMentionsUpdate = typeof chatMentionsEnabled === 'boolean';
+
+    if (!userId || !endpoint || (!hasMuteUpdate && !hasMentionsUpdate)) {
+        return res.status(400).json({ error: 'userId, endpoint, and at least one of muteGlobalChat/chatMentionsEnabled are required' });
+    }
+
+    const update = {};
+    if (hasMuteUpdate) update.muteGlobalChat = muteGlobalChat;
+    if (hasMentionsUpdate) update.chatMentionsEnabled = chatMentionsEnabled;
 
     try {
         const updated = await PushSubscription.findOneAndUpdate(
@@ -1166,7 +1259,7 @@ app.patch('/subscribe/preferences', async (req, res) => {
                 userId,
                 'subscription.endpoint': endpoint
             },
-            { muteGlobalChat },
+            update,
             { new: true }
         );
 
@@ -1174,7 +1267,11 @@ app.patch('/subscribe/preferences', async (req, res) => {
             return res.status(404).json({ error: 'Subscription not found for this user/device' });
         }
 
-        return res.json({ success: true, muteGlobalChat: updated.muteGlobalChat });
+        return res.json({
+            success: true,
+            muteGlobalChat: updated.muteGlobalChat,
+            chatMentionsEnabled: updated.chatMentionsEnabled
+        });
     } catch (err) {
         console.error('Subscribe preferences error:', err.message);
         return res.status(500).json({ error: 'Server error saving preferences' });
@@ -1285,8 +1382,9 @@ app.post('/admin/push-test', verifyAdminToken, async (req, res) => {
             return res.status(404).json({ error: 'No subscribers found for this location' });
         }
 
+        const keyTitle = titleCaseLocation(key);
         const payload = JSON.stringify({
-            title: title || `LightWatch test — ${key}`,
+            title: title || `LightWatch test — ${keyTitle}`,
             body: body || 'Testing heads-up push behavior on this device.',
             url: url || '/pages/home.html',
             tag: tag || `test-${Date.now()}`,
