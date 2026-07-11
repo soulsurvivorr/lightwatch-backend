@@ -117,11 +117,35 @@ const pushSubscriptionSchema = new mongoose.Schema({
 });
 pushSubscriptionSchema.index({ 'subscription.endpoint': 1 }, { unique: true });
 
+// Lightweight product-analytics events — one document per client-side event.
+// Kept intentionally generic (a handful of typed events) rather than a table
+// per metric, since the volume here is small (Kumasi-only, per home.js) and
+// this lets the admin dashboard derive new breakdowns later without a schema
+// change. See getTopSearchedAreas/getReportsPerDay/etc. below for how each
+// dashboard metric is computed from these events.
+const analyticsEventSchema = new mongoose.Schema({
+    type: { type: String, enum: ['search', 'screen_view', 'app_open', 'exit'], required: true },
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    // Anonymous per-device id (localStorage-based) so signed-out activity —
+    // and returning-device behavior — can still be counted.
+    deviceId: { type: String },
+    sessionId: { type: String },
+    screen: { type: String },       // e.g. "home", "chat", "reports"
+    query: { type: String },        // raw search text, for 'search' events
+    locationKey: { type: String },  // normalized location, for 'search' events
+    durationMs: { type: Number },   // time spent on `screen`, for 'exit'/'screen_view' events
+    createdAt: { type: Date, default: Date.now }
+});
+analyticsEventSchema.index({ type: 1, createdAt: -1 });
+analyticsEventSchema.index({ screen: 1, createdAt: -1 });
+analyticsEventSchema.index({ deviceId: 1, createdAt: -1 });
+
 const User             = mongoose.model('User', userSchema);
 const Chat             = mongoose.model('Chat', chatSchema);
 const LightStatus      = mongoose.model('LightStatus', lightStatusSchema);
 const LightStatusEvent = mongoose.model('LightStatusEvent', lightStatusEventSchema);
 const PushSubscription = mongoose.model('PushSubscription', pushSubscriptionSchema);
+const AnalyticsEvent    = mongoose.model('AnalyticsEvent', analyticsEventSchema);
 
 console.log("MY SERVER FILE IS RUNNING");
 
@@ -848,6 +872,40 @@ app.post('/chats', async (req, res) => {
     }
 });
 
+// ---- ANALYTICS: track a client-side event (public, best-effort) ----
+// Called from the app via sendBeacon/fetch — see analytics.js. Never blocks
+// or errors loudly on the client's behalf; a dropped analytics event should
+// never affect the actual product experience.
+const ANALYTICS_EVENT_TYPES = ['search', 'screen_view', 'app_open', 'exit'];
+app.post('/analytics/track', async (req, res) => {
+    try {
+        const { type, userId, deviceId, sessionId, screen, query, locationKey, durationMs } = req.body || {};
+
+        if (!ANALYTICS_EVENT_TYPES.includes(type)) {
+            return res.status(400).json({ error: 'Invalid event type' });
+        }
+
+        const doc = { type };
+        if (screen) doc.screen = String(screen).slice(0, 60);
+        if (query) doc.query = String(query).slice(0, 140);
+        if (locationKey) doc.locationKey = normalizeLocation(locationKey).split(',')[0].trim();
+        if (deviceId) doc.deviceId = String(deviceId).slice(0, 80);
+        if (sessionId) doc.sessionId = String(sessionId).slice(0, 80);
+        if (typeof durationMs === 'number' && durationMs >= 0 && durationMs < 6 * 60 * 60 * 1000) {
+            doc.durationMs = Math.round(durationMs);
+        }
+        if (userId && mongoose.Types.ObjectId.isValid(userId)) doc.userId = userId;
+
+        await AnalyticsEvent.create(doc);
+        return res.status(204).end();
+    } catch (err) {
+        console.error('Analytics track error:', err.message);
+        // Still 204 — a broken analytics call should never surface as an
+        // error to the client or retry-loop.
+        return res.status(204).end();
+    }
+});
+
 // ---- ADMIN LOGIN ----
 app.post('/admin/login', (req, res) => {
     const { password } = req.body;
@@ -996,6 +1054,145 @@ app.get('/admin/summary', verifyAdminToken, async (req, res) => {
     } catch (err) {
         console.error('Admin summary error:', err.message);
         return res.status(500).json({ error: 'Server error fetching summary' });
+    }
+});
+
+// ---- ANALYTICS HELPERS ----
+// Small, dependency-free aggregation over AnalyticsEvent + LightStatusEvent.
+// These pull the relevant window into memory and reduce in JS rather than
+// leaning entirely on Mongo pipelines — simple to read and plenty fast at
+// LightWatch's current (Kumasi-only) scale. If this ever needs to run over
+// months of data, the day-bucketing here is the part to move into a
+// pre-aggregated rollup collection instead.
+
+function dayKey(date) {
+    return new Date(date).toISOString().slice(0, 10); // "YYYY-MM-DD", UTC
+}
+
+function buildEmptyDaySeries(since, days, extraKeys = []) {
+    const series = [];
+    for (let i = 0; i < days; i++) {
+        const d = new Date(since.getTime() + i * 86400000);
+        const row = { date: dayKey(d) };
+        extraKeys.forEach(k => { row[k] = 0; });
+        series.push(row);
+    }
+    return series;
+}
+
+async function getTopSearchedAreas(since, limit = 10) {
+    const results = await AnalyticsEvent.aggregate([
+        { $match: { type: 'search', createdAt: { $gte: since } } },
+        { $project: { area: { $ifNull: ['$locationKey', '$query'] } } },
+        { $match: { area: { $ne: null } } },
+        { $group: { _id: '$area', count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+        { $limit: limit }
+    ]);
+    return results.map(r => ({ location: titleCaseLocation(r._id), count: r.count }));
+}
+
+async function getReportsPerDay(since, days) {
+    const events = await LightStatusEvent.find({ reportedAt: { $gte: since } }).select('reportedAt').lean();
+    const series = buildEmptyDaySeries(since, days, ['count']);
+    const byDay = new Map(series.map(row => [row.date, row]));
+    events.forEach(e => {
+        const row = byDay.get(dayKey(e.reportedAt));
+        if (row) row.count += 1;
+    });
+    return series;
+}
+
+async function getDailyReturningUsers(since, days) {
+    // Look back further than the requested window so "returning" can be
+    // judged against real history, not just the first day shown.
+    const lookbackStart = new Date(since.getTime() - 60 * 24 * 60 * 60 * 1000);
+    const events = await AnalyticsEvent.find({
+        type: { $in: ['app_open', 'screen_view'] },
+        createdAt: { $gte: lookbackStart }
+    }).select('userId deviceId createdAt').lean();
+
+    const actorFirstSeenDay = new Map(); // actor -> earliest day string seen in lookback
+    const dayToActors = new Map();       // day string -> Set(actor)
+
+    events.forEach(e => {
+        const actor = e.userId ? String(e.userId) : (e.deviceId || null);
+        if (!actor) return;
+        const day = dayKey(e.createdAt);
+        if (!actorFirstSeenDay.has(actor) || day < actorFirstSeenDay.get(actor)) {
+            actorFirstSeenDay.set(actor, day);
+        }
+        if (!dayToActors.has(day)) dayToActors.set(day, new Set());
+        dayToActors.get(day).add(actor);
+    });
+
+    const series = buildEmptyDaySeries(since, days, ['new', 'returning', 'total']);
+    series.forEach(row => {
+        const actorsToday = dayToActors.get(row.date) || new Set();
+        actorsToday.forEach(actor => {
+            if (actorFirstSeenDay.get(actor) === row.date) row.new += 1;
+            else row.returning += 1;
+        });
+        row.total = actorsToday.size;
+    });
+    return series;
+}
+
+async function getScreenTimeStats(since) {
+    const results = await AnalyticsEvent.aggregate([
+        { $match: { type: 'screen_view', createdAt: { $gte: since }, durationMs: { $exists: true, $gt: 0 } } },
+        { $group: { _id: '$screen', avgDurationMs: { $avg: '$durationMs' }, views: { $sum: 1 } } },
+        { $match: { _id: { $ne: null } } },
+        { $sort: { avgDurationMs: -1 } }
+    ]);
+    return results.map(r => ({
+        screen: r._id,
+        avgSeconds: Math.round((r.avgDurationMs / 1000) * 10) / 10,
+        views: r.views
+    }));
+}
+
+async function getDropOffScreens(since, limit = 8) {
+    // Relies on the client firing an 'exit' event with the current screen
+    // right before the tab/app closes (see analytics.js). Comes back empty
+    // until a page is wired up to send that event.
+    const results = await AnalyticsEvent.aggregate([
+        { $match: { type: 'exit', createdAt: { $gte: since }, screen: { $exists: true, $ne: null } } },
+        { $group: { _id: '$screen', count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+        { $limit: limit }
+    ]);
+    const total = results.reduce((sum, r) => sum + r.count, 0) || 1;
+    return results.map(r => ({ screen: r._id, count: r.count, pct: Math.round((r.count / total) * 1000) / 10 }));
+}
+
+// ---- ADMIN: Analytics overview (protected) ----
+app.get('/admin/analytics/overview', verifyAdminToken, async (req, res) => {
+    try {
+        const days = Math.min(Math.max(parseInt(req.query.days, 10) || 14, 1), 60);
+        const since = new Date();
+        since.setUTCHours(0, 0, 0, 0);
+        since.setUTCDate(since.getUTCDate() - (days - 1));
+
+        const [topSearchedAreas, reportsPerDay, dailyReturningUsers, screenTime, dropOff] = await Promise.all([
+            getTopSearchedAreas(since, 10),
+            getReportsPerDay(since, days),
+            getDailyReturningUsers(since, days),
+            getScreenTimeStats(since),
+            getDropOffScreens(since, 8)
+        ]);
+
+        return res.json({
+            rangeDays: days,
+            topSearchedAreas,
+            reportsPerDay,
+            dailyReturningUsers,
+            screenTime,
+            dropOff
+        });
+    } catch (err) {
+        console.error('Admin analytics overview error:', err.message);
+        return res.status(500).json({ error: 'Server error building analytics overview' });
     }
 });
 
