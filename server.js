@@ -243,21 +243,36 @@ function escapeRegex(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// Same "close enough" rule GET /chats has always used for local scope:
+// exact match, or either string containing the other (handles e.g.
+// "Bantama, Kumasi" vs "Bantama Market, Kumasi" being treated as the
+// same neighborhood). Both inputs should already be normalizeLocation()'d.
+function locationsFuzzyMatch(a, b) {
+    if (!a || !b) return false;
+    return a === b || a.includes(b) || b.includes(a);
+}
+
 // ---- TYPING INDICATOR (in-memory only — never touches Mongo) ----
 // Chat is polling-based (no sockets), so "typing" is just a fast
 // heartbeat: clients POST while they have text in the box, and GET
-// to see who else in the same room is doing the same right now.
-// Keyed by "scope:locationKey" -> Map<userId, { handle, lastTypedAt }>.
+// to see who else nearby is doing the same right now.
+// One Map per scope ('local' / 'global') -> Map<userId, { handle,
+// locationKey, lastTypedAt }>. Local-scope reads filter that map down
+// with locationsFuzzyMatch() — same rule GET /chats uses — rather than
+// keying rooms by exact location, since two accounts can have slightly
+// different (but "same neighborhood") location strings that already
+// see each other's messages via that fuzzy match.
 // Entries are pruned lazily on read/write against TYPING_TTL_MS, so
 // nothing needs a background timer to stay clean, and a crashed tab
 // (no explicit "stopped typing" call) self-clears within the TTL.
 // NOTE: this is process-local. Fine on a single Render instance; if
 // this ever scales to multiple instances, it needs Redis instead.
-const typingByRoom = new Map();
+const typingByScope = new Map(); // 'local' | 'global' -> Map<userId, entry>
 const TYPING_TTL_MS = 4000;
 
-function typingRoomKey(scope, locationKey) {
-    return `${scope}:${locationKey}`;
+function getTypingRoom(scope) {
+    if (!typingByScope.has(scope)) typingByScope.set(scope, new Map());
+    return typingByScope.get(scope);
 }
 
 function pruneTypingRoom(room) {
@@ -775,8 +790,7 @@ app.get('/chats', async (req, res) => {
             const normalizedLocation = normalizeLocation(location);
             const filtered = localChats.filter(chat => {
                 const chatLoc = normalizeLocation(chat.location || chat.locationKey || '');
-                if (!chatLoc) return false;
-                return chatLoc === normalizedLocation || chatLoc.includes(normalizedLocation) || normalizedLocation.includes(chatLoc);
+                return locationsFuzzyMatch(chatLoc, normalizedLocation);
             });
             return res.json(filtered);
         }
@@ -941,12 +955,10 @@ app.post('/chats/typing', (req, res) => {
         return res.status(400).json({ error: "Missing user, handle, or location" });
     }
 
-    const locationKey = normalizedScope === 'global' ? 'global' : normalizeLocation(location);
-    const key = typingRoomKey(normalizedScope, locationKey);
-
-    if (!typingByRoom.has(key)) typingByRoom.set(key, new Map());
-    typingByRoom.get(key).set(String(userId), {
+    const room = getTypingRoom(normalizedScope);
+    room.set(String(userId), {
         handle: String(handle).slice(0, 40),
+        locationKey: normalizedScope === 'global' ? 'global' : normalizeLocation(location),
         lastTypedAt: Date.now()
     });
 
@@ -954,12 +966,9 @@ app.post('/chats/typing', (req, res) => {
 });
 
 app.delete('/chats/typing', (req, res) => {
-    const { userId, scope, location } = req.body || {};
+    const { userId, scope } = req.body || {};
     const normalizedScope = (scope || 'local').toString().toLowerCase() === 'global' ? 'global' : 'local';
-    const locationKey = normalizedScope === 'global' ? 'global' : normalizeLocation(location);
-    const key = typingRoomKey(normalizedScope, locationKey);
-
-    typingByRoom.get(key)?.delete(String(userId || ''));
+    getTypingRoom(normalizedScope).delete(String(userId || ''));
     return res.status(204).end();
 });
 
@@ -970,15 +979,16 @@ app.get('/chats/typing', (req, res) => {
         return res.json([]);
     }
 
-    const locationKey = normalizedScope === 'global' ? 'global' : normalizeLocation(location);
-    const key = typingRoomKey(normalizedScope, locationKey);
-    const room = typingByRoom.get(key);
-    if (!room) return res.json([]);
-
+    const room = getTypingRoom(normalizedScope);
     pruneTypingRoom(room);
+
+    const normalizedLocation = normalizedScope === 'global' ? 'global' : normalizeLocation(location);
 
     const typers = [...room.entries()]
         .filter(([id]) => id !== String(userId || ''))
+        .filter(([, entry]) =>
+            normalizedScope === 'global' || locationsFuzzyMatch(entry.locationKey, normalizedLocation)
+        )
         .sort((a, b) => a[1].lastTypedAt - b[1].lastTypedAt)
         .map(([id, entry]) => ({ userId: id, handle: entry.handle }));
 
