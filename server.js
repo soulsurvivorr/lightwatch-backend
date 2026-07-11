@@ -166,7 +166,7 @@ const LOGO_URL = `${PUBLIC_BASE_URL}/logo.png`;
 
 app.use((req, res, next) => {
 
-    const noisyRoutes = [
+    const noisyGetRoutes = [
         '/lightstatus',
         '/user/',
         '/chats'
@@ -174,9 +174,14 @@ app.use((req, res, next) => {
 
     const isNoisyGet =
         req.method === 'GET' &&
-        noisyRoutes.some(route => req.url.startsWith(route));
+        noisyGetRoutes.some(route => req.url.startsWith(route));
 
-    if (!isNoisyGet) {
+    // The typing heartbeat fires every ~2s per active typist in both
+    // directions (POST to ping, DELETE to clear) — noisy the same way
+    // the GET polls above are, just not a GET.
+    const isTypingRoute = req.url.startsWith('/chats/typing');
+
+    if (!isNoisyGet && !isTypingRoute) {
         console.log(req.method, req.url);
     }
 
@@ -236,6 +241,30 @@ function titleCaseLocation(value) {
 
 function escapeRegex(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// ---- TYPING INDICATOR (in-memory only — never touches Mongo) ----
+// Chat is polling-based (no sockets), so "typing" is just a fast
+// heartbeat: clients POST while they have text in the box, and GET
+// to see who else in the same room is doing the same right now.
+// Keyed by "scope:locationKey" -> Map<userId, { handle, lastTypedAt }>.
+// Entries are pruned lazily on read/write against TYPING_TTL_MS, so
+// nothing needs a background timer to stay clean, and a crashed tab
+// (no explicit "stopped typing" call) self-clears within the TTL.
+// NOTE: this is process-local. Fine on a single Render instance; if
+// this ever scales to multiple instances, it needs Redis instead.
+const typingByRoom = new Map();
+const TYPING_TTL_MS = 4000;
+
+function typingRoomKey(scope, locationKey) {
+    return `${scope}:${locationKey}`;
+}
+
+function pruneTypingRoom(room) {
+    const cutoff = Date.now() - TYPING_TTL_MS;
+    for (const [userId, entry] of room) {
+        if (entry.lastTypedAt < cutoff) room.delete(userId);
+    }
 }
 
 async function getLightStatusStats(locationKey) {
@@ -898,6 +927,62 @@ app.post('/chats', async (req, res) => {
         console.error("Post chat error:", err.message);
         return res.status(500).json({ error: "Server error saving chat" });
     }
+});
+
+// ---- CHAT TYPING INDICATOR ----
+// POST: "I'm typing" heartbeat, sent every ~2s while there's unsent
+// text in the box. DELETE: "I stopped" (send/blur/cleared input) so
+// the indicator can disappear immediately instead of waiting out the
+// TTL. GET: who's currently typing in this room, excluding yourself.
+app.post('/chats/typing', (req, res) => {
+    const { userId, handle, scope, location } = req.body || {};
+    const normalizedScope = (scope || 'local').toString().toLowerCase() === 'global' ? 'global' : 'local';
+    if (!userId || !handle || (normalizedScope === 'local' && !location)) {
+        return res.status(400).json({ error: "Missing user, handle, or location" });
+    }
+
+    const locationKey = normalizedScope === 'global' ? 'global' : normalizeLocation(location);
+    const key = typingRoomKey(normalizedScope, locationKey);
+
+    if (!typingByRoom.has(key)) typingByRoom.set(key, new Map());
+    typingByRoom.get(key).set(String(userId), {
+        handle: String(handle).slice(0, 40),
+        lastTypedAt: Date.now()
+    });
+
+    return res.status(204).end();
+});
+
+app.delete('/chats/typing', (req, res) => {
+    const { userId, scope, location } = req.body || {};
+    const normalizedScope = (scope || 'local').toString().toLowerCase() === 'global' ? 'global' : 'local';
+    const locationKey = normalizedScope === 'global' ? 'global' : normalizeLocation(location);
+    const key = typingRoomKey(normalizedScope, locationKey);
+
+    typingByRoom.get(key)?.delete(String(userId || ''));
+    return res.status(204).end();
+});
+
+app.get('/chats/typing', (req, res) => {
+    const { userId, scope, location } = req.query;
+    const normalizedScope = (scope || 'local').toString().toLowerCase() === 'global' ? 'global' : 'local';
+    if (normalizedScope === 'local' && !location) {
+        return res.json([]);
+    }
+
+    const locationKey = normalizedScope === 'global' ? 'global' : normalizeLocation(location);
+    const key = typingRoomKey(normalizedScope, locationKey);
+    const room = typingByRoom.get(key);
+    if (!room) return res.json([]);
+
+    pruneTypingRoom(room);
+
+    const typers = [...room.entries()]
+        .filter(([id]) => id !== String(userId || ''))
+        .sort((a, b) => a[1].lastTypedAt - b[1].lastTypedAt)
+        .map(([id, entry]) => ({ userId: id, handle: entry.handle }));
+
+    return res.json(typers);
 });
 
 // ---- ANALYTICS: track a client-side event (public, best-effort) ----
