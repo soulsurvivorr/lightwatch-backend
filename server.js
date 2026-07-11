@@ -302,11 +302,12 @@ const pendingVerificationSchema = new mongoose.Schema({
 pendingVerificationSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 const PendingVerification = mongoose.model('PendingVerification', pendingVerificationSchema);
 
-const OTP_LENGTH       = 4;                 // matches the 4-box UI on verification.html
+const OTP_LENGTH       = 6;                 // 6-digit numeric code — verification.html's
+                                             // boxes/inputs need to match this count
 const OTP_EXPIRY_MS    = 10 * 60 * 1000;    // codes are valid for 10 minutes
 const OTP_MAX_ATTEMPTS = 5;                 // lock the code after 5 wrong tries
 
-// ── Generate a random numeric code, e.g. "4839" ────────────────
+// ── Generate a random numeric code, e.g. "483920" ────────────────
 function generateOtpCode(length = OTP_LENGTH) {
     let code = '';  
     for (let i = 0; i < length; i++) {
@@ -369,10 +370,9 @@ function buildOtpEmailHtml(code) {
             <!-- OTP code -->
             <tr>
               <td align="center" style="padding:0 32px 24px 32px;">
-                <div style="display:inline-block; padding:16px 32px; background:linear-gradient(135deg,#f4c95d,#5b8def); border-radius:10px;">
-                  <span style="font-size:32px; font-weight:700; letter-spacing:8px; color:#0a0e1a;">
-                    ${code}
-                  </span>
+                <p style="margin:0 0 10px 0; font-size:13px; font-weight:600; letter-spacing:0.2px; color:#6b7280; text-transform:uppercase;">Your LightWatch verification code</p>
+                <div style="display:inline-block; padding:18px 36px; background:linear-gradient(135deg,#f4c95d,#5b8def); border-radius:10px;">
+                  <span style="font-size:38px; font-weight:700; letter-spacing:6px; color:#0a0e1a; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">${code}</span>
                 </div>
                 <p style="margin:16px 0 0 0; font-size:13px; color:#6b7280;">
                   This code expires in 10 minutes.
