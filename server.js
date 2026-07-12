@@ -937,7 +937,8 @@ app.post('/chats', async (req, res) => {
                 vibrate: isPriorityMention ? [280, 120, 280] : [240, 120, 240],
                 chatScope: normalizedScope,
                 isReply: isReplyForThisUser,
-                isMention: isMentionForThisUser
+                isMention: isMentionForThisUser,
+                tone: 'chat'
             });
 
             try {
@@ -1528,7 +1529,9 @@ app.post('/lightstatus', async (req, res) => {
             url: '/pages/home.html',
             tag: 'light-status',
             requireInteraction: status === 'off',
-            vibrate: status === 'off' ? [300, 120, 300, 120, 300] : [180, 90, 180]
+            vibrate: status === 'off' ? [300, 120, 300, 120, 300] : [180, 90, 180],
+            status,
+            tone: status === 'on' ? 'power-on' : 'power-off'
         });
 
         const subscribers = await PushSubscription.find({ location: key });
@@ -1566,7 +1569,9 @@ app.post('/lightstatus', async (req, res) => {
                 url: '/pages/home.html',
                 tag: 'secondary-light-status',
                 requireInteraction: status === 'off',
-                vibrate: status === 'off' ? [300, 120, 300, 120, 300] : [180, 90, 180]
+                vibrate: status === 'off' ? [300, 120, 300, 120, 300] : [180, 90, 180],
+                status,
+                tone: status === 'on' ? 'power-on' : 'power-off'
             });
 
             const secondarySubscribers = await PushSubscription.find({ secondaryLocationKey: key });
@@ -1848,7 +1853,8 @@ app.post('/admin/push-test', verifyAdminToken, async (req, res) => {
         vibrate,
         image,
         icon,
-        badge
+        badge,
+        tone
     } = req.body || {};
 
     if (!location) {
@@ -1873,7 +1879,8 @@ app.post('/admin/push-test', verifyAdminToken, async (req, res) => {
             vibrate: Array.isArray(vibrate) ? vibrate : [300, 120, 300, 120, 300],
             image: image || undefined,
             icon: icon || undefined,
-            badge: badge || undefined
+            badge: badge || undefined,
+            tone: tone || undefined // 'power-on' | 'power-off' | 'chat' — omit to hear the legacy fallback tone
         });
 
         const pushPromises = subscribers.map(async sub => {
