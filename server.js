@@ -95,6 +95,11 @@ const chatSchema = new mongoose.Schema({
     },
     location: { type: String, required: true },
     locationKey: { type: String, required: true },
+    // Who has seen this message (excluding the author). Used to show a
+    // "seen" indicator on the sender's own bubble — cleared from view
+    // client-side (not from this array) once a reply targets the
+    // message, so we keep the raw read history here regardless.
+    seenBy: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], default: [] },
     createdAt: { type: Date, default: Date.now }
 });
 
@@ -119,6 +124,13 @@ const pushSubscriptionSchema = new mongoose.Schema({
     location:     { type: String, required: true }, // normalised location key
     muteGlobalChat: { type: Boolean, default: false },
     chatMentionsEnabled: { type: Boolean, default: true },
+    // Second location this device wants "status changed" alerts for.
+    // null/unset = not watching a second location. Set/cleared from the
+    // "Notify me here" toggle on the second-location panel (home.js) via
+    // PATCH /subscribe/preferences. Looked up directly by the
+    // POST /lightstatus handler whenever a location's status flips.
+    secondaryLocationKey:   { type: String, default: null },
+    secondaryLocationLabel: { type: String, default: null },
     subscription: { type: Object, required: true }, // full browser push subscription object
     createdAt:    { type: Date, default: Date.now }
 });
@@ -950,6 +962,34 @@ app.post('/chats', async (req, res) => {
     }
 });
 
+// ---- CHAT READ RECEIPTS ----
+// Marks a batch of messages as seen by the requesting user. Called by
+// the client whenever other people's messages scroll into view. Never
+// marks the caller's own messages (a $ne guard, not just client trust)
+// and is idempotent via $addToSet, so re-sending the same ids is safe.
+app.post('/chats/seen', async (req, res) => {
+    const { userId, chatIds } = req.body || {};
+    if (!userId || !Array.isArray(chatIds) || chatIds.length === 0) {
+        return res.status(400).json({ error: 'Missing userId or chatIds' });
+    }
+
+    const validIds = chatIds.filter(id => mongoose.Types.ObjectId.isValid(id));
+    if (!validIds.length) {
+        return res.json({ updated: 0 });
+    }
+
+    try {
+        const result = await Chat.updateMany(
+            { _id: { $in: validIds }, userId: { $ne: userId } },
+            { $addToSet: { seenBy: userId } }
+        );
+        return res.json({ updated: result.modifiedCount ?? 0 });
+    } catch (err) {
+        console.error('Mark chats seen error:', err.message);
+        return res.status(500).json({ error: 'Server error marking chats seen' });
+    }
+});
+
 // ---- CHAT TYPING INDICATOR ----
 // POST: "I'm typing" heartbeat, sent every ~2s while there's unsent
 // text in the box. DELETE: "I stopped" (send/blur/cleared input) so
@@ -1456,6 +1496,14 @@ app.post('/lightstatus', async (req, res) => {
         const user = userId ? await User.findById(userId).select('chatHandle') : null;
         const reportedBy = user?.chatHandle || userId || 'anonymous';
 
+        // Captured before the upsert so we can tell whether this report
+        // actually *changed* the status, vs. just re-confirming the same
+        // one — secondary-location watchers should only be pinged on a
+        // real flip, not on every single report.
+        const previous = await LightStatus.findOne({ locationKey: key }).select('status').lean();
+        const previousStatus = previous?.status || null;
+        const statusChanged = previousStatus !== null && previousStatus !== status;
+
         const record = await LightStatus.findOneAndUpdate(
             { locationKey: key },
             { status, reportedBy, reportedAt: new Date() },
@@ -1505,6 +1553,44 @@ app.post('/lightstatus', async (req, res) => {
         // Don't block the response waiting for pushes
         Promise.allSettled(pushPromises);
 
+        // ── Send push to anyone watching this as a SECOND location ──
+        // Only on a genuine change, and to a completely separate
+        // subscriber set (secondaryLocationKey, not location) so someone
+        // watching Bantama as their primary and Adum as their second gets
+        // exactly one push per real event, worded appropriately for each.
+        if (statusChanged) {
+            const secondaryEmoji = status === 'on' ? '💡' : '🌑';
+            const secondaryPayload = JSON.stringify({
+                title: `Second location — ${keyTitle}`,
+                body: `${secondaryEmoji} ${keyTitle} just changed to ${status.toUpperCase()}.`,
+                url: '/pages/home.html',
+                tag: 'secondary-light-status',
+                requireInteraction: status === 'off',
+                vibrate: status === 'off' ? [300, 120, 300, 120, 300] : [180, 90, 180]
+            });
+
+            const secondarySubscribers = await PushSubscription.find({ secondaryLocationKey: key });
+            console.log(`Sending secondary-location push to ${secondarySubscribers.length} subscriber(s) watching ${key}`);
+
+            const secondaryPushPromises = secondarySubscribers.map(async sub => {
+                try {
+                    await webpush.sendNotification(sub.subscription, secondaryPayload, {
+                        urgency: 'high',
+                        TTL: 60
+                    });
+                } catch (err) {
+                    if (err.statusCode === 410) {
+                        await PushSubscription.deleteOne({ _id: sub._id });
+                        console.log('Removed stale subscription:', sub._id);
+                    } else {
+                        console.error('Secondary-location push error:', err.statusCode, err.body, err.message);
+                    }
+                }
+            });
+
+            Promise.allSettled(secondaryPushPromises);
+        }
+
         return res.json(record);
     } catch (err) {
         console.error('Light status error:', err.message);
@@ -1551,7 +1637,7 @@ app.get('/subscribe/preferences', async (req, res) => {
         const sub = await PushSubscription.findOne({
             userId,
             'subscription.endpoint': endpoint
-        }).select('muteGlobalChat chatMentionsEnabled').lean();
+        }).select('muteGlobalChat chatMentionsEnabled secondaryLocationKey secondaryLocationLabel').lean();
 
         if (!sub) {
             return res.status(404).json({ error: 'Subscription not found for this user/device' });
@@ -1559,7 +1645,9 @@ app.get('/subscribe/preferences', async (req, res) => {
 
         return res.json({
             muteGlobalChat: sub.muteGlobalChat === true,
-            chatMentionsEnabled: sub.chatMentionsEnabled !== false
+            chatMentionsEnabled: sub.chatMentionsEnabled !== false,
+            secondaryLocationKey: sub.secondaryLocationKey || null,
+            secondaryLocationLabel: sub.secondaryLocationLabel || null
         });
     } catch (err) {
         console.error('Get subscribe preferences error:', err.message);
@@ -1568,17 +1656,29 @@ app.get('/subscribe/preferences', async (req, res) => {
 });
 
 app.patch('/subscribe/preferences', async (req, res) => {
-    const { userId, endpoint, muteGlobalChat, chatMentionsEnabled } = req.body;
+    const { userId, endpoint, muteGlobalChat, chatMentionsEnabled, secondaryLocation } = req.body;
     const hasMuteUpdate = typeof muteGlobalChat === 'boolean';
     const hasMentionsUpdate = typeof chatMentionsEnabled === 'boolean';
+    // secondaryLocation is a tri-state: a non-empty string sets the watch,
+    // null explicitly clears it, undefined means "not part of this update".
+    const hasSecondaryUpdate = secondaryLocation !== undefined;
 
-    if (!userId || !endpoint || (!hasMuteUpdate && !hasMentionsUpdate)) {
-        return res.status(400).json({ error: 'userId, endpoint, and at least one of muteGlobalChat/chatMentionsEnabled are required' });
+    if (!userId || !endpoint || (!hasMuteUpdate && !hasMentionsUpdate && !hasSecondaryUpdate)) {
+        return res.status(400).json({ error: 'userId, endpoint, and at least one of muteGlobalChat/chatMentionsEnabled/secondaryLocation are required' });
     }
 
     const update = {};
     if (hasMuteUpdate) update.muteGlobalChat = muteGlobalChat;
     if (hasMentionsUpdate) update.chatMentionsEnabled = chatMentionsEnabled;
+    if (hasSecondaryUpdate) {
+        if (secondaryLocation) {
+            update.secondaryLocationKey = normalizeLocation(secondaryLocation).split(',')[0].trim();
+            update.secondaryLocationLabel = String(secondaryLocation).trim();
+        } else {
+            update.secondaryLocationKey = null;
+            update.secondaryLocationLabel = null;
+        }
+    }
 
     try {
         const updated = await PushSubscription.findOneAndUpdate(
@@ -1597,7 +1697,8 @@ app.patch('/subscribe/preferences', async (req, res) => {
         return res.json({
             success: true,
             muteGlobalChat: updated.muteGlobalChat,
-            chatMentionsEnabled: updated.chatMentionsEnabled
+            chatMentionsEnabled: updated.chatMentionsEnabled,
+            secondaryLocationKey: updated.secondaryLocationKey || null
         });
     } catch (err) {
         console.error('Subscribe preferences error:', err.message);
