@@ -23,6 +23,23 @@ if (!process.env.ADMIN_PASSWORD) {
     console.warn("WARNING: ADMIN_PASSWORD not set in environment. Using an insecure default. Set it on Render.");
 }
 
+// ── Dev/testing login bypass (regular USER app — NOT the admin console) ──
+// This is separate from ADMIN_PASSWORD above. It exists so an admin/dev
+// can sign in and out of the ordinary consumer app (the same flow every
+// other user goes through — login.js -> verification.js) for back-and-forth
+// testing without needing access to a real inbox or phone. When someone
+// signs up/signs in/resends with this exact contact, the server uses a
+// fixed code and skips actually sending an email/SMS — nothing goes out
+// for it, ever. It does NOT grant admin-console access on its own; it's
+// just a normal user account. Override via env vars, or set
+// DEV_LOGIN_EMAIL to an empty string to disable the bypass entirely.
+const DEV_LOGIN_EMAIL = process.env.DEV_LOGIN_EMAIL;
+const DEV_LOGIN_CODE  = process.env.DEV_LOGIN_CODE;
+
+function isDevLoginContact(emailPhone) {
+    return !!DEV_LOGIN_EMAIL && emailPhone === DEV_LOGIN_EMAIL;
+}
+
 if (!MONGO_URI) {
     console.error("FATAL: MONGODB_URI environment variable is not set.");
     process.exit(1);
@@ -599,13 +616,17 @@ app.post('/signup', async (req, res) => {
             return res.status(400).json({ error: "Account already exists" });
         }
 
-        const code = generateOtpCode();
+        const code = isDevLoginContact(emailPhone) ? DEV_LOGIN_CODE : generateOtpCode();
 
-        try {
-            await sendOtp(emailPhone, code, name);
-        } catch (sendErr) {
-            console.error("Failed to send signup OTP:", sendErr.message);
-            return res.status(500).json({ error: "Could not send verification code. Please try again." });
+        if (isDevLoginContact(emailPhone)) {
+            console.log(`[DEV LOGIN BYPASS] Signup code for ${emailPhone} is ${code} — not actually sent.`);
+        } else {
+            try {
+                await sendOtp(emailPhone, code, name);
+            } catch (sendErr) {
+                console.error("Failed to send signup OTP:", sendErr.message);
+                return res.status(500).json({ error: "Could not send verification code. Please try again." });
+            }
         }
 
         await PendingVerification.findOneAndUpdate(
@@ -651,13 +672,17 @@ app.post('/signin', async (req, res) => {
             await foundUser.save();
         }
 
-        const code = generateOtpCode();
+        const code = isDevLoginContact(emailPhone) ? DEV_LOGIN_CODE : generateOtpCode();
 
-        try {
-            await sendOtp(emailPhone, code, foundUser.name);
-        } catch (sendErr) {
-            console.error("Failed to send signin OTP:", sendErr.message);
-            return res.status(500).json({ error: "Could not send verification code. Please try again." });
+        if (isDevLoginContact(emailPhone)) {
+            console.log(`[DEV LOGIN BYPASS] Signin code for ${emailPhone} is ${code} — not actually sent.`);
+        } else {
+            try {
+                await sendOtp(emailPhone, code, foundUser.name);
+            } catch (sendErr) {
+                console.error("Failed to send signin OTP:", sendErr.message);
+                return res.status(500).json({ error: "Could not send verification code. Please try again." });
+            }
         }
 
         await PendingVerification.findOneAndUpdate(
@@ -768,7 +793,7 @@ app.post('/resend', async (req, res) => {
         return res.status(400).json({ error: "No pending verification for this contact. Please start again." });
     }
 
-    const code = generateOtpCode();
+    const code = isDevLoginContact(emailPhone) ? DEV_LOGIN_CODE : generateOtpCode();
 
     // Same name the original code's email used — from the signup form
     // data still sitting on the pending doc, or looked back up for an
@@ -781,11 +806,15 @@ app.post('/resend', async (req, res) => {
         name = existingUser?.name;
     }
 
-    try {
-        await sendOtp(emailPhone, code, name);
-    } catch (sendErr) {
-        console.error("Failed to resend OTP:", sendErr.message);
-        return res.status(500).json({ error: "Could not send verification code. Please try again." });
+    if (isDevLoginContact(emailPhone)) {
+        console.log(`[DEV LOGIN BYPASS] Resent code for ${emailPhone} is ${code} — not actually sent.`);
+    } else {
+        try {
+            await sendOtp(emailPhone, code, name);
+        } catch (sendErr) {
+            console.error("Failed to resend OTP:", sendErr.message);
+            return res.status(500).json({ error: "Could not send verification code. Please try again." });
+        }
     }
 
     pending.code = code;
