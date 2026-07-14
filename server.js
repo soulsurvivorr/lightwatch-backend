@@ -12,13 +12,16 @@ const webpush = require('web-push');
 const MONGO_URI = process.env.MONGODB_URI;
 const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key-change-this";
 
-// Admin sign-in uses the same email + code UX as everyone else, but both
-// sides are fixed/hardcoded rather than a real inbox + random code: admin
-// has no live email account and doesn't need one. Nothing is ever sent
-// anywhere for this — the "code" just has to match ADMIN_OTP_CODE.
-// Override either via env vars if you want a different identity/code.
-const ADMIN_EMAIL     = (process.env.ADMIN_EMAIL || "sarkdev@gmail.com").toLowerCase().trim();
-const ADMIN_OTP_CODE  = process.env.ADMIN_OTP_CODE || "5687";
+// Admin sign-in is a single password check against ADMIN_PASSWORD — no
+// email/OTP step, since the admin console has no live inbox and doesn't
+// need one. Set ADMIN_PASSWORD on Render (or in your .env locally); the
+// fallback below only exists so the app still boots without one, and a
+// clear warning is logged so it's never mistaken for a real deployment.
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "changeme-set-ADMIN_PASSWORD";
+
+if (!process.env.ADMIN_PASSWORD) {
+    console.warn("WARNING: ADMIN_PASSWORD not set in environment. Using an insecure default. Set it on Render.");
+}
 
 if (!MONGO_URI) {
     console.error("FATAL: MONGODB_URI environment variable is not set.");
@@ -1081,11 +1084,11 @@ app.post('/analytics/track', async (req, res) => {
     }
 });
 
-// ---- ADMIN LOGIN (fixed email + fixed code, same shape as user OTP) ----
-// In-memory lockout so the fixed 4-digit code can't just be brute-forced
-// straight through — resets on server restart, which is fine here since
-// this only protects the admin console, not user accounts.
-let adminCodeAttempts = 0;
+// ---- ADMIN LOGIN (single password, checked against ADMIN_PASSWORD) ----
+// In-memory lockout so the password can't just be brute-forced straight
+// through — resets on server restart, which is fine here since this only
+// protects the admin console, not user accounts.
+let adminLoginAttempts = 0;
 let adminLockedUntil = 0;
 const ADMIN_MAX_ATTEMPTS = 5;
 const ADMIN_LOCKOUT_MS = 10 * 60 * 1000;
@@ -1094,42 +1097,25 @@ function adminLockoutRemaining() {
     return Math.max(0, adminLockedUntil - Date.now());
 }
 
-// Step 1: "send" the code. Nothing actually goes out — this just checks
-// the email matches and hands back a masked contact string so the UI can
-// show "Enter the code we sent to sar***@gmail.com" like every other
-// verification screen in the app.
-app.post('/admin/request-code', (req, res) => {
-    const emailPhone = (req.body.emailPhone || '').toLowerCase().trim();
-
-    if (adminLockoutRemaining() > 0) {
-        return res.status(429).json({ error: `Too many attempts. Try again in ${Math.ceil(adminLockoutRemaining() / 60000)}m.` });
-    }
-    if (emailPhone !== ADMIN_EMAIL) {
-        return res.status(401).json({ error: 'Not authorized' });
-    }
-    return res.json({ maskedContact: maskContact(ADMIN_EMAIL) });
-});
-
-// Step 2: verify the fixed code and issue the admin JWT.
-app.post('/admin/verify-code', (req, res) => {
-    const emailPhone = (req.body.emailPhone || '').toLowerCase().trim();
-    const code = (req.body.code || '').trim();
+// Single-step: verify the password and issue the admin JWT.
+app.post('/admin/login', (req, res) => {
+    const password = (req.body.password || '').trim();
 
     if (adminLockoutRemaining() > 0) {
         return res.status(429).json({ error: `Too many attempts. Try again in ${Math.ceil(adminLockoutRemaining() / 60000)}m.` });
     }
 
-    if (emailPhone !== ADMIN_EMAIL || code !== ADMIN_OTP_CODE) {
-        adminCodeAttempts += 1;
-        if (adminCodeAttempts >= ADMIN_MAX_ATTEMPTS) {
+    if (!password || password !== ADMIN_PASSWORD) {
+        adminLoginAttempts += 1;
+        if (adminLoginAttempts >= ADMIN_MAX_ATTEMPTS) {
             adminLockedUntil = Date.now() + ADMIN_LOCKOUT_MS;
-            adminCodeAttempts = 0;
+            adminLoginAttempts = 0;
             return res.status(429).json({ error: 'Too many incorrect attempts. Locked for 10 minutes.' });
         }
-        return res.status(401).json({ error: 'Incorrect code' });
+        return res.status(401).json({ error: 'Incorrect password' });
     }
 
-    adminCodeAttempts = 0;
+    adminLoginAttempts = 0;
     const token = jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: '24h' });
     return res.json({ token });
 });
@@ -2050,5 +2036,63 @@ app.post('/admin/push-test', verifyAdminToken, async (req, res) => {
     } catch (err) {
         console.error('Admin push-test route error:', err.message);
         return res.status(500).json({ error: 'Server error sending test push' });
+    }
+});
+
+// ---- ADMIN: BROADCAST — push a message to every subscriber in the app ----
+// Unlike /admin/push-test (one location) this ignores location entirely
+// and fans out to every PushSubscription in the collection, labeled as
+// coming from "LightWatch Admin" — the same sender label used for
+// admin-pushed light-status updates.
+app.post('/admin/broadcast', verifyAdminToken, async (req, res) => {
+    const { title, body, url } = req.body || {};
+
+    if (!body || !String(body).trim()) {
+        return res.status(400).json({ error: 'Message text is required' });
+    }
+
+    try {
+        const subscribers = await PushSubscription.find({});
+        console.log(`Broadcasting admin message to ${subscribers.length} subscriber(s)`);
+
+        const payload = JSON.stringify({
+            title: title && String(title).trim() ? String(title).trim() : 'LightWatch Admin',
+            body: String(body).trim(),
+            url: url || '/pages/home.html',
+            tag: `admin-broadcast-${Date.now()}`,
+            requireInteraction: true,
+            vibrate: [280, 120, 280, 120, 280],
+            tone: 'chat'
+        });
+
+        const pushPromises = subscribers.map(async sub => {
+            try {
+                await webpush.sendNotification(sub.subscription, payload, {
+                    urgency: 'high',
+                    TTL: 60
+                });
+                return { ok: true };
+            } catch (err) {
+                if (err.statusCode === 410) {
+                    await PushSubscription.deleteOne({ _id: sub._id });
+                    return { ok: false, stale: true };
+                }
+                console.error('Admin broadcast push error:', err.statusCode, err.body, err.message);
+                return { ok: false, statusCode: err.statusCode || 500 };
+            }
+        });
+
+        const settled = await Promise.all(pushPromises);
+        const sentCount = settled.filter(x => x.ok).length;
+        const staleCount = settled.filter(x => x.stale).length;
+
+        return res.json({
+            subscribers: subscribers.length,
+            sentCount,
+            staleRemoved: staleCount
+        });
+    } catch (err) {
+        console.error('Admin broadcast route error:', err.message);
+        return res.status(500).json({ error: 'Server error sending broadcast' });
     }
 });
