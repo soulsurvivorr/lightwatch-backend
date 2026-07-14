@@ -33,8 +33,8 @@ if (!process.env.ADMIN_PASSWORD) {
 // for it, ever. It does NOT grant admin-console access on its own; it's
 // just a normal user account. Override via env vars, or set
 // DEV_LOGIN_EMAIL to an empty string to disable the bypass entirely.
-const DEV_LOGIN_EMAIL = process.env.DEV_LOGIN_EMAIL;
-const DEV_LOGIN_CODE  = process.env.DEV_LOGIN_CODE;
+const DEV_LOGIN_EMAIL = (process.env.DEV_LOGIN_EMAIL || "").toLowerCase().trim();
+const DEV_LOGIN_CODE  = (process.env.DEV_LOGIN_CODE || "").trim();
 
 function isDevLoginContact(emailPhone) {
     return !!DEV_LOGIN_EMAIL && emailPhone === DEV_LOGIN_EMAIL;
