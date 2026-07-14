@@ -10,8 +10,15 @@ const webpush = require('web-push');
 
 // MONGODB CONNECTION
 const MONGO_URI = process.env.MONGODB_URI;
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin123";
 const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key-change-this";
+
+// Admin sign-in uses the same email + code UX as everyone else, but both
+// sides are fixed/hardcoded rather than a real inbox + random code: admin
+// has no live email account and doesn't need one. Nothing is ever sent
+// anywhere for this — the "code" just has to match ADMIN_OTP_CODE.
+// Override either via env vars if you want a different identity/code.
+const ADMIN_EMAIL     = (process.env.ADMIN_EMAIL || "sarkdev@gmail.com").toLowerCase().trim();
+const ADMIN_OTP_CODE  = process.env.ADMIN_OTP_CODE || "5687";
 
 if (!MONGO_URI) {
     console.error("FATAL: MONGODB_URI environment variable is not set.");
@@ -20,9 +27,6 @@ if (!MONGO_URI) {
 
 if (!process.env.JWT_SECRET) {
     console.warn("WARNING: JWT_SECRET not set in environment. Using default (insecure). Set it on Render.");
-}
-if (!process.env.ADMIN_PASSWORD) {
-    console.warn("WARNING: ADMIN_PASSWORD not set in environment. Using default. Set it on Render.");
 }
 
 // VAPID setup for push notifications
@@ -1077,12 +1081,55 @@ app.post('/analytics/track', async (req, res) => {
     }
 });
 
-// ---- ADMIN LOGIN ----
-app.post('/admin/login', (req, res) => {
-    const { password } = req.body;
-    if (!password || password !== ADMIN_PASSWORD) {
-        return res.status(401).json({ error: "Incorrect password" });
+// ---- ADMIN LOGIN (fixed email + fixed code, same shape as user OTP) ----
+// In-memory lockout so the fixed 4-digit code can't just be brute-forced
+// straight through — resets on server restart, which is fine here since
+// this only protects the admin console, not user accounts.
+let adminCodeAttempts = 0;
+let adminLockedUntil = 0;
+const ADMIN_MAX_ATTEMPTS = 5;
+const ADMIN_LOCKOUT_MS = 10 * 60 * 1000;
+
+function adminLockoutRemaining() {
+    return Math.max(0, adminLockedUntil - Date.now());
+}
+
+// Step 1: "send" the code. Nothing actually goes out — this just checks
+// the email matches and hands back a masked contact string so the UI can
+// show "Enter the code we sent to sar***@gmail.com" like every other
+// verification screen in the app.
+app.post('/admin/request-code', (req, res) => {
+    const emailPhone = (req.body.emailPhone || '').toLowerCase().trim();
+
+    if (adminLockoutRemaining() > 0) {
+        return res.status(429).json({ error: `Too many attempts. Try again in ${Math.ceil(adminLockoutRemaining() / 60000)}m.` });
     }
+    if (emailPhone !== ADMIN_EMAIL) {
+        return res.status(401).json({ error: 'Not authorized' });
+    }
+    return res.json({ maskedContact: maskContact(ADMIN_EMAIL) });
+});
+
+// Step 2: verify the fixed code and issue the admin JWT.
+app.post('/admin/verify-code', (req, res) => {
+    const emailPhone = (req.body.emailPhone || '').toLowerCase().trim();
+    const code = (req.body.code || '').trim();
+
+    if (adminLockoutRemaining() > 0) {
+        return res.status(429).json({ error: `Too many attempts. Try again in ${Math.ceil(adminLockoutRemaining() / 60000)}m.` });
+    }
+
+    if (emailPhone !== ADMIN_EMAIL || code !== ADMIN_OTP_CODE) {
+        adminCodeAttempts += 1;
+        if (adminCodeAttempts >= ADMIN_MAX_ATTEMPTS) {
+            adminLockedUntil = Date.now() + ADMIN_LOCKOUT_MS;
+            adminCodeAttempts = 0;
+            return res.status(429).json({ error: 'Too many incorrect attempts. Locked for 10 minutes.' });
+        }
+        return res.status(401).json({ error: 'Incorrect code' });
+    }
+
+    adminCodeAttempts = 0;
     const token = jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: '24h' });
     return res.json({ token });
 });
@@ -1221,7 +1268,23 @@ app.get('/admin/summary', verifyAdminToken, async (req, res) => {
         const chatCount    = await Chat.countDocuments();
         const newChats24h  = await Chat.countDocuments({ createdAt: { $gte: oneDayAgo } });
 
-        return res.json({ userCount, newUsers24h, chatCount, newChats24h });
+        // Real "active locations" count — union of everywhere a status has
+        // been set, chatted about, or lived in, computed server-side.
+        // (Previously the dashboard derived this only from whatever chats
+        // happened to be loaded client-side, which undercounts locations
+        // that have a status but no chat activity yet.)
+        const [statusLocationKeys, chatLocationKeys, userCities] = await Promise.all([
+            LightStatus.distinct('locationKey'),
+            Chat.distinct('locationKey'),
+            User.distinct('city')
+        ]);
+        const locationSet = new Set([
+            ...statusLocationKeys,
+            ...chatLocationKeys,
+            ...userCities.map(c => normalizeLocation(c).split(',')[0].trim())
+        ].filter(Boolean));
+
+        return res.json({ userCount, newUsers24h, chatCount, newChats24h, locationsTracked: locationSet.size });
     } catch (err) {
         console.error('Admin summary error:', err.message);
         return res.status(500).json({ error: 'Server error fetching summary' });
@@ -1484,62 +1547,104 @@ app.get('/reports', async (req, res) => {
     }
 });
 
-// POST /lightstatus  { location, status, userId }
-app.post('/lightstatus', async (req, res) => {
-    const { location, status, userId } = req.body;
-    if (!location || !status) return res.status(400).json({ error: 'location and status required' });
-    if (!['on', 'off'].includes(status)) return res.status(400).json({ error: 'status must be on or off' });
+// ── Shared core of a light-status change: upsert LightStatus, log a
+// LightStatusEvent, and push to every subscriber — used identically by
+// the public user-report route below AND the admin push route, so an
+// admin-set status shows up on users' home pages (poll + push) exactly
+// the same way a real user report does. `reportedByOverride` lets the
+// admin route label events as "LightWatch Admin" instead of a handle. ──
+async function applyLightStatusUpdate(rawLocation, status, { userId = null, reportedByOverride = null } = {}) {
+    const key = normalizeLocation(rawLocation).split(',')[0].trim();
+    const keyTitle = titleCaseLocation(key);
 
-    try {
-        const key = normalizeLocation(location).split(',')[0].trim();
-        const keyTitle = titleCaseLocation(key);
-
+    let reportedBy = reportedByOverride;
+    if (!reportedBy) {
         const user = userId ? await User.findById(userId).select('chatHandle') : null;
-        const reportedBy = user?.chatHandle || userId || 'anonymous';
+        reportedBy = user?.chatHandle || userId || 'anonymous';
+    }
 
-        // Captured before the upsert so we can tell whether this report
-        // actually *changed* the status, vs. just re-confirming the same
-        // one — secondary-location watchers should only be pinged on a
-        // real flip, not on every single report.
-        const previous = await LightStatus.findOne({ locationKey: key }).select('status').lean();
-        const previousStatus = previous?.status || null;
-        const statusChanged = previousStatus !== null && previousStatus !== status;
+    // Captured before the upsert so we can tell whether this report
+    // actually *changed* the status, vs. just re-confirming the same
+    // one — secondary-location watchers should only be pinged on a
+    // real flip, not on every single report.
+    const previous = await LightStatus.findOne({ locationKey: key }).select('status').lean();
+    const previousStatus = previous?.status || null;
+    const statusChanged = previousStatus !== null && previousStatus !== status;
 
-        const record = await LightStatus.findOneAndUpdate(
-            { locationKey: key },
-            { status, reportedBy, reportedAt: new Date() },
-            { upsert: true, new: true }
-        );
+    const record = await LightStatus.findOneAndUpdate(
+        { locationKey: key },
+        { status, reportedBy, reportedAt: new Date() },
+        { upsert: true, new: true }
+    );
 
-        await LightStatusEvent.create({
-            locationKey: key,
-            status,
-            reportedBy,
-            userId: userId || undefined,
-            reportedAt: new Date()
-        });
+    await LightStatusEvent.create({
+        locationKey: key,
+        status,
+        reportedBy,
+        userId: userId || undefined,
+        reportedAt: new Date()
+    });
 
-        console.log(`Light status updated: ${key} => ${status}`);
+    console.log(`Light status updated: ${key} => ${status} (by ${reportedBy})`);
 
-        // ── Send push notifications to all subscribers at this location ──
-        const emoji = status === 'on' ? '💡' : '🌑';
-        const payload = JSON.stringify({
-            title: `LightWatch — ${keyTitle}`,
-            body: `${emoji} Light is now ${status.toUpperCase()} in ${keyTitle}.`,
+    // ── Send push notifications to all subscribers at this location ──
+    const emoji = status === 'on' ? '💡' : '🌑';
+    const payload = JSON.stringify({
+        title: `LightWatch — ${keyTitle}`,
+        body: `${emoji} Light is now ${status.toUpperCase()} in ${keyTitle}.`,
+        url: '/pages/home.html',
+        tag: 'light-status',
+        requireInteraction: status === 'off',
+        vibrate: status === 'off' ? [300, 120, 300, 120, 300] : [180, 90, 180],
+        status,
+        tone: status === 'on' ? 'power-on' : 'power-off'
+    });
+
+    const subscribers = await PushSubscription.find({ location: key });
+    console.log(`Sending push to ${subscribers.length} subscriber(s) at ${key}`);
+
+    const pushPromises = subscribers.map(async sub => {
+        try {
+            await webpush.sendNotification(sub.subscription, payload, {
+                urgency: 'high',
+                TTL: 60
+            });
+        } catch (err) {
+            if (err.statusCode === 410) {
+                await PushSubscription.deleteOne({ _id: sub._id });
+                console.log('Removed stale subscription:', sub._id);
+            } else {
+                console.error('Push send error:', err.statusCode, err.body, err.message);
+            }
+        }
+    });
+
+    // Don't block the response waiting for pushes
+    Promise.allSettled(pushPromises);
+
+    // ── Send push to anyone watching this as a SECOND location ──
+    // Only on a genuine change, and to a completely separate
+    // subscriber set (secondaryLocationKey, not location) so someone
+    // watching Bantama as their primary and Adum as their second gets
+    // exactly one push per real event, worded appropriately for each.
+    if (statusChanged) {
+        const secondaryPayload = JSON.stringify({
+            title: `Second location — ${keyTitle}`,
+            body: `${emoji} ${keyTitle} just changed to ${status.toUpperCase()}.`,
             url: '/pages/home.html',
-            tag: 'light-status',
+            tag: 'secondary-light-status',
             requireInteraction: status === 'off',
             vibrate: status === 'off' ? [300, 120, 300, 120, 300] : [180, 90, 180],
             status,
             tone: status === 'on' ? 'power-on' : 'power-off'
         });
 
-        const subscribers = await PushSubscription.find({ location: key });
-        console.log(`Sending push to ${subscribers.length} subscriber(s) at ${key}`);
+        const secondarySubscribers = await PushSubscription.find({ secondaryLocationKey: key });
+        console.log(`Sending secondary-location push to ${secondarySubscribers.length} subscriber(s) watching ${key}`);
 
-        const pushPromises = subscribers.map(async sub => {
+        const secondaryPushPromises = secondarySubscribers.map(async sub => {
             try {
-                await webpush.sendNotification(sub.subscription, payload, {
+                await webpush.sendNotification(sub.subscription, secondaryPayload, {
                     urgency: 'high',
                     TTL: 60
                 });
@@ -1548,58 +1653,90 @@ app.post('/lightstatus', async (req, res) => {
                     await PushSubscription.deleteOne({ _id: sub._id });
                     console.log('Removed stale subscription:', sub._id);
                 } else {
-                    console.error('Push send error:', err.statusCode, err.body, err.message);
+                    console.error('Secondary-location push error:', err.statusCode, err.body, err.message);
                 }
             }
         });
 
-        // Don't block the response waiting for pushes
-        Promise.allSettled(pushPromises);
+        Promise.allSettled(secondaryPushPromises);
+    }
 
-        // ── Send push to anyone watching this as a SECOND location ──
-        // Only on a genuine change, and to a completely separate
-        // subscriber set (secondaryLocationKey, not location) so someone
-        // watching Bantama as their primary and Adum as their second gets
-        // exactly one push per real event, worded appropriately for each.
-        if (statusChanged) {
-            const secondaryEmoji = status === 'on' ? '💡' : '🌑';
-            const secondaryPayload = JSON.stringify({
-                title: `Second location — ${keyTitle}`,
-                body: `${secondaryEmoji} ${keyTitle} just changed to ${status.toUpperCase()}.`,
-                url: '/pages/home.html',
-                tag: 'secondary-light-status',
-                requireInteraction: status === 'off',
-                vibrate: status === 'off' ? [300, 120, 300, 120, 300] : [180, 90, 180],
-                status,
-                tone: status === 'on' ? 'power-on' : 'power-off'
-            });
+    return { record, key, keyTitle, statusChanged };
+}
 
-            const secondarySubscribers = await PushSubscription.find({ secondaryLocationKey: key });
-            console.log(`Sending secondary-location push to ${secondarySubscribers.length} subscriber(s) watching ${key}`);
+// POST /lightstatus  { location, status, userId }
+app.post('/lightstatus', async (req, res) => {
+    const { location, status, userId } = req.body;
+    if (!location || !status) return res.status(400).json({ error: 'location and status required' });
+    if (!['on', 'off'].includes(status)) return res.status(400).json({ error: 'status must be on or off' });
 
-            const secondaryPushPromises = secondarySubscribers.map(async sub => {
-                try {
-                    await webpush.sendNotification(sub.subscription, secondaryPayload, {
-                        urgency: 'high',
-                        TTL: 60
-                    });
-                } catch (err) {
-                    if (err.statusCode === 410) {
-                        await PushSubscription.deleteOne({ _id: sub._id });
-                        console.log('Removed stale subscription:', sub._id);
-                    } else {
-                        console.error('Secondary-location push error:', err.statusCode, err.body, err.message);
-                    }
-                }
-            });
-
-            Promise.allSettled(secondaryPushPromises);
-        }
-
+    try {
+        const { record } = await applyLightStatusUpdate(location, status, { userId });
         return res.json(record);
     } catch (err) {
         console.error('Light status error:', err.message);
         return res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// ---- ADMIN: set/push a location's light status (protected) ----
+// Goes through the exact same LightStatus/LightStatusEvent/push pipeline
+// as a real user report, so it lands on users' home pages automatically
+// (next poll of GET /lightstatus, plus an immediate push to subscribers)
+// with no separate sync path for admin to keep in mind.
+app.post('/admin/lightstatus', verifyAdminToken, async (req, res) => {
+    const { location, status } = req.body;
+    if (!location || !status) return res.status(400).json({ error: 'location and status required' });
+    if (!['on', 'off'].includes(status)) return res.status(400).json({ error: 'status must be on or off' });
+
+    try {
+        const { record, keyTitle } = await applyLightStatusUpdate(location, status, { reportedByOverride: 'LightWatch Admin' });
+        return res.json({ ...record.toObject(), locationLabel: keyTitle });
+    } catch (err) {
+        console.error('Admin light status error:', err.message);
+        return res.status(500).json({ error: 'Server error updating light status' });
+    }
+});
+
+// ---- ADMIN: known locations + current status (protected) ----
+// Union of every location that already has a status record and every
+// city a user actually lives in, so admin can push a status for a
+// location that's never had a report yet, not just ones already seen.
+app.get('/admin/locations', verifyAdminToken, async (req, res) => {
+    try {
+        const [statuses, userCities] = await Promise.all([
+            LightStatus.find().lean(),
+            User.distinct('city')
+        ]);
+
+        const map = new Map();
+        statuses.forEach(s => {
+            map.set(s.locationKey, {
+                locationKey: s.locationKey,
+                label: titleCaseLocation(s.locationKey),
+                status: s.status,
+                reportedBy: s.reportedBy || null,
+                reportedAt: s.reportedAt || null
+            });
+        });
+        userCities.forEach(city => {
+            const key = normalizeLocation(city).split(',')[0].trim();
+            if (key && !map.has(key)) {
+                map.set(key, {
+                    locationKey: key,
+                    label: titleCaseLocation(key),
+                    status: 'unknown',
+                    reportedBy: null,
+                    reportedAt: null
+                });
+            }
+        });
+
+        const locations = [...map.values()].sort((a, b) => a.label.localeCompare(b.label));
+        return res.json(locations);
+    } catch (err) {
+        console.error('Admin locations error:', err.message);
+        return res.status(500).json({ error: 'Server error fetching locations' });
     }
 });
 
