@@ -7,6 +7,7 @@ const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const webpush = require('web-push');
+const admin = require('firebase-admin');
 
 // MONGODB CONNECTION
 const MONGO_URI = process.env.MONGODB_URI;
@@ -59,6 +60,31 @@ if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
     console.log("Web push VAPID configured.");
 } else {
     console.warn("WARNING: VAPID keys not set. Push notifications will not work.");
+}
+
+// ── Firebase Admin setup for FCM (native Android push) ──────────────
+// The native app can't use web-push (Android System WebView has no
+// PushManager — see notification.js's isNativeAndroidApp() branch), so
+// Android devices register an FCM token instead of a web PushSubscription
+// (POST /subscribe/fcm), and get notified via admin.messaging() below
+// instead of webpush.sendNotification(). Browser/PWA users are
+// unaffected — they keep going through the VAPID path above.
+//
+// FIREBASE_SERVICE_ACCOUNT_KEY should be the full service-account JSON
+// (Firebase console → Project settings → Service accounts → Generate
+// new private key), stored as a single-line string in the env var.
+let fcmEnabled = false;
+if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
+    try {
+        const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+        admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+        fcmEnabled = true;
+        console.log("Firebase Admin (FCM) configured.");
+    } catch (err) {
+        console.error("FIREBASE_SERVICE_ACCOUNT_KEY is set but invalid JSON:", err.message);
+    }
+} else {
+    console.warn("WARNING: FIREBASE_SERVICE_ACCOUNT_KEY not set. Native Android push notifications will not work.");
 }
 
 // Log a masked version of the URI so we can confirm which form is being used (no secrets printed)
@@ -155,10 +181,30 @@ const pushSubscriptionSchema = new mongoose.Schema({
     // POST /lightstatus handler whenever a location's status flips.
     secondaryLocationKey:   { type: String, default: null },
     secondaryLocationLabel: { type: String, default: null },
-    subscription: { type: Object, required: true }, // full browser push subscription object
+    // 'web'     — browser/PWA subscriber, delivered via web-push (VAPID).
+    // 'android' — native app subscriber, delivered via FCM.
+    // Kept in the SAME collection (rather than a separate one) so every
+    // existing query here (by location, by secondaryLocationKey, by
+    // userId) automatically reaches both kinds of subscriber without
+    // being duplicated — sendPushToSubscribers() below is what branches
+    // per-row on this field.
+    platform:     { type: String, enum: ['web', 'android'], default: 'web' },
+    // Full browser push subscription object — required for 'web' rows,
+    // absent for 'android' rows.
+    subscription: { type: Object, required: false },
+    // FCM registration token — required for 'android' rows, absent for
+    // 'web' rows. A device gets a new token occasionally (app
+    // reinstall, data clear, token rotation); re-registering just
+    // upserts on this field, same as web-push re-subscribing.
+    fcmToken:     { type: String, default: null },
     createdAt:    { type: Date, default: Date.now }
 });
-pushSubscriptionSchema.index({ 'subscription.endpoint': 1 }, { unique: true });
+// sparse: true on both — a row only ever populates ONE of these two
+// identifiers depending on `platform`, and without sparse:true, Mongo
+// would treat every row missing a given field as sharing the same
+// "null" index value and reject the second insert as a duplicate.
+pushSubscriptionSchema.index({ 'subscription.endpoint': 1 }, { unique: true, sparse: true });
+pushSubscriptionSchema.index({ fcmToken: 1 }, { unique: true, sparse: true });
 
 // Lightweight product-analytics events — one document per client-side event.
 // Kept intentionally generic (a handful of typed events) rather than a table
@@ -960,7 +1006,7 @@ app.post('/chats', async (req, res) => {
                 deepLinkParams.set('replyToChatId', String(replyTo.chatId));
             }
 
-            const payload = JSON.stringify({
+            const payload = {
                 title: isPriorityMention
                     ? `Reply in ${audienceTitle}`
                     : `LightWatch chat — ${audienceTitle}`,
@@ -975,21 +1021,9 @@ app.post('/chats', async (req, res) => {
                 isReply: isReplyForThisUser,
                 isMention: isMentionForThisUser,
                 tone: 'chat'
-            });
+            };
 
-            try {
-                await webpush.sendNotification(sub.subscription, payload, {
-                    urgency: 'high',
-                    TTL: 60
-                });
-            } catch (err) {
-                if (err.statusCode === 410) {
-                    await PushSubscription.deleteOne({ _id: sub._id });
-                    console.log('Removed stale subscription:', sub._id);
-                } else {
-                    console.error('Chat push send error:', err.statusCode, err.body, err.message);
-                }
-            }
+            await sendPushToOne(sub, payload);
         });
         Promise.allSettled(pushPromises);
         return res.status(201).json(chatObj);
@@ -1562,6 +1596,92 @@ app.get('/reports', async (req, res) => {
     }
 });
 
+// ── Unified push sender — web-push (VAPID) for platform:'web' rows,
+//    FCM for platform:'android' rows. Every existing call site that
+//    used to call webpush.sendNotification(sub.subscription, payload)
+//    directly now goes through this instead, so every push (chat,
+//    status change, secondary-location, admin test/broadcast) reaches
+//    both browser and native subscribers without duplicating the
+//    platform-branch logic five times.
+//
+//    `notification` is a plain object: { title, body, url, tag,
+//    requireInteraction, vibrate, status, tone }. Web-push gets the
+//    whole thing JSON-stringified as-is (service-worker.js already
+//    expects exactly that shape). FCM's `data` payload must be
+//    flat string values only, so everything gets String()-coerced;
+//    `notification.title`/`body` also go in FCM's native `notification`
+//    block so Android shows a real system notification automatically
+//    even while the app is backgrounded or killed — data fields ride
+//    along for when the app is in the foreground and
+//    notification.js's pushNotificationReceived listener wants them.
+async function sendPushToSubscribers(subscribers, notification) {
+    const results = await Promise.allSettled(subscribers.map(sub => sendPushToOne(sub, notification)));
+    return results;
+}
+
+async function sendPushToOne(sub, notification) {
+    if (sub.platform === 'android') {
+        return sendFcmToOne(sub, notification);
+    }
+    return sendWebPushToOne(sub, notification);
+}
+
+async function sendWebPushToOne(sub, notification) {
+    try {
+        await webpush.sendNotification(sub.subscription, JSON.stringify(notification), {
+            urgency: 'high',
+            TTL: 60
+        });
+        return { ok: true };
+    } catch (err) {
+        if (err.statusCode === 410) {
+            await PushSubscription.deleteOne({ _id: sub._id });
+            console.log('Removed stale web-push subscription:', sub._id);
+            return { ok: false, stale: true };
+        }
+        console.error('Web-push send error:', err.statusCode, err.body, err.message);
+        return { ok: false, statusCode: err.statusCode || 500 };
+    }
+}
+
+async function sendFcmToOne(sub, notification) {
+    if (!fcmEnabled) return { ok: false, statusCode: 503 };
+    if (!sub.fcmToken) return { ok: false, statusCode: 400 };
+
+    try {
+        await admin.messaging().send({
+            token: sub.fcmToken,
+            notification: {
+                title: notification.title,
+                body: notification.body
+            },
+            data: Object.fromEntries(
+                Object.entries(notification)
+                    .filter(([, v]) => v !== undefined && v !== null)
+                    .map(([k, v]) => [k, Array.isArray(v) ? JSON.stringify(v) : String(v)])
+            ),
+            android: {
+                priority: 'high',
+                notification: {
+                    tag: notification.tag || undefined
+                }
+            }
+        });
+        return { ok: true };
+    } catch (err) {
+        // Token is no longer valid (app uninstalled, data cleared, etc.)
+        // — same cleanup role the web-push 410 branch plays above.
+        if (err.code === 'messaging/registration-token-not-registered' ||
+            err.code === 'messaging/invalid-registration-token') {
+            await PushSubscription.deleteOne({ _id: sub._id });
+            console.log('Removed stale FCM token:', sub._id);
+            return { ok: false, stale: true };
+        }
+        console.error('FCM send error:', err.code || err.message);
+        return { ok: false, statusCode: 500 };
+    }
+}
+
 // ── Shared core of a light-status change: upsert LightStatus, log a
 // LightStatusEvent, and push to every subscriber — used identically by
 // the public user-report route below AND the admin push route, so an
@@ -1604,7 +1724,7 @@ async function applyLightStatusUpdate(rawLocation, status, { userId = null, repo
 
     // ── Send push notifications to all subscribers at this location ──
     const emoji = status === 'on' ? '💡' : '🌑';
-    const payload = JSON.stringify({
+    const payload = {
         title: `LightWatch — ${keyTitle}`,
         body: `${emoji} Light is now ${status.toUpperCase()} in ${keyTitle}.`,
         url: '/pages/home.html',
@@ -1613,29 +1733,13 @@ async function applyLightStatusUpdate(rawLocation, status, { userId = null, repo
         vibrate: status === 'off' ? [300, 120, 300, 120, 300] : [180, 90, 180],
         status,
         tone: status === 'on' ? 'power-on' : 'power-off'
-    });
+    };
 
     const subscribers = await PushSubscription.find({ location: key });
     console.log(`Sending push to ${subscribers.length} subscriber(s) at ${key}`);
 
-    const pushPromises = subscribers.map(async sub => {
-        try {
-            await webpush.sendNotification(sub.subscription, payload, {
-                urgency: 'high',
-                TTL: 60
-            });
-        } catch (err) {
-            if (err.statusCode === 410) {
-                await PushSubscription.deleteOne({ _id: sub._id });
-                console.log('Removed stale subscription:', sub._id);
-            } else {
-                console.error('Push send error:', err.statusCode, err.body, err.message);
-            }
-        }
-    });
-
     // Don't block the response waiting for pushes
-    Promise.allSettled(pushPromises);
+    sendPushToSubscribers(subscribers, payload);
 
     // ── Send push to anyone watching this as a SECOND location ──
     // Only on a genuine change, and to a completely separate
@@ -1643,7 +1747,7 @@ async function applyLightStatusUpdate(rawLocation, status, { userId = null, repo
     // watching Bantama as their primary and Adum as their second gets
     // exactly one push per real event, worded appropriately for each.
     if (statusChanged) {
-        const secondaryPayload = JSON.stringify({
+        const secondaryPayload = {
             title: `Second location — ${keyTitle}`,
             body: `${emoji} ${keyTitle} just changed to ${status.toUpperCase()}.`,
             url: '/pages/home.html',
@@ -1652,28 +1756,12 @@ async function applyLightStatusUpdate(rawLocation, status, { userId = null, repo
             vibrate: status === 'off' ? [300, 120, 300, 120, 300] : [180, 90, 180],
             status,
             tone: status === 'on' ? 'power-on' : 'power-off'
-        });
+        };
 
         const secondarySubscribers = await PushSubscription.find({ secondaryLocationKey: key });
         console.log(`Sending secondary-location push to ${secondarySubscribers.length} subscriber(s) watching ${key}`);
 
-        const secondaryPushPromises = secondarySubscribers.map(async sub => {
-            try {
-                await webpush.sendNotification(sub.subscription, secondaryPayload, {
-                    urgency: 'high',
-                    TTL: 60
-                });
-            } catch (err) {
-                if (err.statusCode === 410) {
-                    await PushSubscription.deleteOne({ _id: sub._id });
-                    console.log('Removed stale subscription:', sub._id);
-                } else {
-                    console.error('Secondary-location push error:', err.statusCode, err.body, err.message);
-                }
-            }
-        });
-
-        Promise.allSettled(secondaryPushPromises);
+        sendPushToSubscribers(secondarySubscribers, secondaryPayload);
     }
 
     return { record, key, keyTitle, statusChanged };
@@ -1771,6 +1859,7 @@ app.post('/subscribe', async (req, res) => {
             {
                 userId,
                 location: locationKey,
+                platform: 'web',
                 subscription,
                 $setOnInsert: { muteGlobalChat: false }
             },
@@ -1781,6 +1870,40 @@ app.post('/subscribe', async (req, res) => {
     } catch (err) {
         console.error('Subscribe error:', err.message);
         return res.status(500).json({ error: 'Server error saving subscription' });
+    }
+});
+
+// POST /subscribe/fcm  { userId, location, fcmToken }
+// Native-Android equivalent of POST /subscribe above — same upsert
+// pattern, keyed on fcmToken instead of subscription.endpoint since
+// there's no web-push subscription object on this platform at all
+// (see notification.js's isNativeAndroidApp() branch for why).
+app.post('/subscribe/fcm', async (req, res) => {
+    const { userId, location, fcmToken } = req.body;
+
+    if (!userId || !fcmToken || !location) {
+        return res.status(400).json({ error: 'userId, location, and fcmToken required' });
+    }
+
+    try {
+        const locationKey = normalizeLocation(location).split(',')[0].trim();
+
+        await PushSubscription.findOneAndUpdate(
+            { fcmToken },
+            {
+                userId,
+                location: locationKey,
+                platform: 'android',
+                fcmToken,
+                $setOnInsert: { muteGlobalChat: false }
+            },
+            { upsert: true, new: true }
+        );
+
+        return res.json({ success: true });
+    } catch (err) {
+        console.error('FCM subscribe error:', err.message);
+        return res.status(500).json({ error: 'Server error saving FCM token' });
     }
 });
 
@@ -2022,7 +2145,7 @@ app.post('/admin/push-test', verifyAdminToken, async (req, res) => {
         }
 
         const keyTitle = titleCaseLocation(key);
-        const payload = JSON.stringify({
+        const payload = {
             title: title || `LightWatch test — ${keyTitle}`,
             body: body || 'Testing heads-up push behavior on this device.',
             url: url || '/pages/home.html',
@@ -2033,24 +2156,9 @@ app.post('/admin/push-test', verifyAdminToken, async (req, res) => {
             icon: icon || undefined,
             badge: badge || undefined,
             tone: tone || undefined // 'power-on' | 'power-off' | 'chat' — omit to hear the legacy fallback tone
-        });
+        };
 
-        const pushPromises = subscribers.map(async sub => {
-            try {
-                await webpush.sendNotification(sub.subscription, payload, {
-                    urgency: 'high',
-                    TTL: 60
-                });
-                return { ok: true };
-            } catch (err) {
-                if (err.statusCode === 410) {
-                    await PushSubscription.deleteOne({ _id: sub._id });
-                    return { ok: false, stale: true };
-                }
-                console.error('Admin push test error:', err.statusCode, err.body, err.message);
-                return { ok: false, statusCode: err.statusCode || 500 };
-            }
-        });
+        const pushPromises = subscribers.map(sub => sendPushToOne(sub, payload));
 
         const settled = await Promise.all(pushPromises);
         const sentCount = settled.filter(x => x.ok).length;
@@ -2084,7 +2192,7 @@ app.post('/admin/broadcast', verifyAdminToken, async (req, res) => {
         const subscribers = await PushSubscription.find({});
         console.log(`Broadcasting admin message to ${subscribers.length} subscriber(s)`);
 
-        const payload = JSON.stringify({
+        const payload = {
             title: title && String(title).trim() ? String(title).trim() : 'LightWatch Admin',
             body: String(body).trim(),
             url: url || '/pages/home.html',
@@ -2092,24 +2200,9 @@ app.post('/admin/broadcast', verifyAdminToken, async (req, res) => {
             requireInteraction: true,
             vibrate: [280, 120, 280, 120, 280],
             tone: 'chat'
-        });
+        };
 
-        const pushPromises = subscribers.map(async sub => {
-            try {
-                await webpush.sendNotification(sub.subscription, payload, {
-                    urgency: 'high',
-                    TTL: 60
-                });
-                return { ok: true };
-            } catch (err) {
-                if (err.statusCode === 410) {
-                    await PushSubscription.deleteOne({ _id: sub._id });
-                    return { ok: false, stale: true };
-                }
-                console.error('Admin broadcast push error:', err.statusCode, err.body, err.message);
-                return { ok: false, statusCode: err.statusCode || 500 };
-            }
-        });
+        const pushPromises = subscribers.map(sub => sendPushToOne(sub, payload));
 
         const settled = await Promise.all(pushPromises);
         const sentCount = settled.filter(x => x.ok).length;
