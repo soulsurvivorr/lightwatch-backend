@@ -1648,6 +1648,21 @@ async function sendFcmToOne(sub, notification) {
     if (!fcmEnabled) return { ok: false, statusCode: 503 };
     if (!sub.fcmToken) return { ok: false, statusCode: 400 };
 
+    // Maps to the channels created natively in MainActivity.java
+    // (createNotificationChannels()) — each one has its own custom
+    // sound baked in at creation time, so this is what makes a
+    // power-on push actually ring differently from a power-off push
+    // or a chat push, instead of Android's single default tone.
+    // `sound` (the raw resource name, no extension) is the fallback
+    // for Android <8 devices, which have no channel system at all —
+    // channelId is silently ignored there and this is what applies
+    // instead.
+    let soundResource = 'lw_chat';
+    if (notification.tone === 'power-on') soundResource = 'lw_power_on';
+    else if (notification.tone === 'power-off') soundResource = 'lw_power_off';
+    else if (notification.tone === 'chat') soundResource = 'lw_chat';
+    const channelId = soundResource; // channel IDs in MainActivity.java match these 1:1
+
     try {
         await admin.messaging().send({
             token: sub.fcmToken,
@@ -1663,7 +1678,9 @@ async function sendFcmToOne(sub, notification) {
             android: {
                 priority: 'high',
                 notification: {
-                    tag: notification.tag || undefined
+                    tag: notification.tag || undefined,
+                    channelId,
+                    sound: soundResource
                 }
             }
         });
