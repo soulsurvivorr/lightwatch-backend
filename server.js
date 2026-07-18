@@ -1679,8 +1679,8 @@ async function sendFcmToOne(sub, notification) {
                 priority: 'high',
                 notification: {
                     tag: notification.tag || undefined,
-                   // channelId,
-                  //  sound: soundResource
+                    channelId,
+                    sound: soundResource
                 }
             }
         });
