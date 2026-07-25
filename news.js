@@ -49,8 +49,8 @@ const rssParser = new Parser({
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0; +https://lightwatch-backend.onrender.com)' }
 });
 
-// A handful of these feeds ship genuinely malformed XML. Two recurring
-// causes, both from Ghanaian outlets running WordPress/Joomla feed
+// A handful of these feeds ship genuinely malformed XML. Three recurring
+// causes, all from Ghanaian outlets running WordPress/Joomla feed
 // generators that were clearly built against HTML tolerance, not strict
 // XML:
 //   1. Common named HTML entities (&mdash; &nbsp; &rsquo; etc.) — valid
@@ -59,9 +59,26 @@ const rssParser = new Parser({
 //   2. Bare/valueless HTML attributes leaking into the feed (e.g.
 //      <img ... allowfullscreen>) — valid HTML, invalid XML, and shows
 //      up as "Attribute without value".
+//   3. Unclosed HTML "void" elements (<br>, <img ...>, <hr> etc. with
+//      no trailing "/") embedded in a <description>/<content:encoded>
+//      body. XML has no concept of an element that never needs a
+//      closing tag, so a strict parser treats the next real closing
+//      tag it hits (e.g. the </p> after a stray <br>) as unmatched —
+//      exactly the "Unexpected close tag" errors ECG and GhanaWeb throw.
+//      Self-closing every void element (<br /> instead of <br>) before
+//      parsing fixes this without touching genuinely paired tags.
 // Rather than lose the whole feed over one bad headline or embedded
-// snippet, fetch the raw text ourselves and repair both before handing
-// it to the parser.
+// snippet, fetch the raw text ourselves and repair all three before
+// handing it to the parser.
+// NOTE: "link" and "source" are HTML void elements but are deliberately
+// left OFF this list — RSS/Atom itself uses <link>...</link> and
+// <source url="...">...</source> as ordinary elements with real text
+// content, so self-closing a bare <link> or <source> at the feed's own
+// structural level would corrupt the feed (turns its real closing tag
+// into an "unexpected close tag" itself). The elements below don't
+// collide with any RSS/Atom vocabulary, so they're safe to always
+// self-close wherever they show up, structural or embedded-HTML.
+const VOID_ELEMENTS = /^(area|base|br|col|embed|hr|img|input|meta|param|track|wbr)$/i;
 const HTML_ENTITY_MAP = {
     nbsp: '\u00A0', mdash: '\u2014', ndash: '\u2013', hellip: '\u2026',
     lsquo: '\u2018', rsquo: '\u2019', ldquo: '\u201C', rdquo: '\u201D',
@@ -89,11 +106,17 @@ function sanitizeFeedXml(xml) {
     // allowfullscreen> — by giving them an empty value. Only touches
     // attribute POSITIONS within a tag; well-formed name="value" pairs
     // (the vast majority) are matched but left untouched by the lookahead.
+    // Same pass also self-closes unclosed void elements (cause #3 above):
+    // any <br|img|hr|...> tag that isn't already self-closed gets a
+    // trailing "/" added. Only matches opening tags (the tagName capture
+    // requires a letter right after "<", so "</p>" etc. are never
+    // touched) and only ever adds a slash for tags on the void list —
+    // ordinary paired elements (<p>, <div>, ...) are left exactly as-is.
     out = out.replace(/<([a-zA-Z][\w:-]*)((?:\s+[a-zA-Z_:][\w:.-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'))?)*)\s*(\/?)\s*>/g,
         (match, tagName, attrs, selfClose) => {
-            if (!attrs) return match;
-            const fixed = attrs.replace(/(\s+)([a-zA-Z_:][\w:.-]*)(?!\s*=)(?=\s|$)/g, '$1$2=""');
-            return `<${tagName}${fixed}${selfClose ? ' /' : ''}>`;
+            const fixed = attrs ? attrs.replace(/(\s+)([a-zA-Z_:][\w:.-]*)(?!\s*=)(?=\s|$)/g, '$1$2=""') : '';
+            const needsSelfClose = selfClose || VOID_ELEMENTS.test(tagName);
+            return `<${tagName}${fixed}${needsSelfClose ? ' /' : ''}>`;
         });
 
     return out;
@@ -140,7 +163,12 @@ const NEWS_SOURCES = [
     { name: 'GhanaWeb',       icon: '📰', official: false, type: 'rss', url: 'https://www.ghanaweb.com/GhanaHomePage/NewsArchive/rss.xml' },
     // Was 'https://www.modernghana.com/rss/news.xml' — wrong host/path.
     // Confirmed current URL straight from modernghana.com/rssfeed/.
-    { name: 'Modern Ghana',   icon: '📰', official: false, type: 'rss', url: 'https://rss.modernghana.com/news.xml' }
+    { name: 'Modern Ghana',   icon: '📰', official: false, type: 'rss', url: 'https://rss.modernghana.com/news.xml' },
+    // New sources added to widen coverage — both confirmed live (real
+    // rss+xml / WordPress feed content, not a 404 or parked-domain page)
+    // before being added here.
+    { name: 'AdomOnline',        icon: '📰', official: false, type: 'rss', url: 'https://www.adomonline.com/feed' },
+    { name: 'Ghana Business News', icon: '📰', official: false, type: 'rss', url: 'https://www.ghanabusinessnews.com/feed/' }
 ];
 
 // ---- Relevance keyword allowlist -----------------------------
@@ -155,9 +183,26 @@ const NEWS_KEYWORDS = [
     'power rationing', 'load management', 'distribution network'
 ];
 
+// Compiled once. Word-boundary matching, NOT plain substring matching —
+// this matters because several keywords here are short abbreviations
+// ("purc", "ecg") that would otherwise match as a SUBSTRING of an
+// unrelated ordinary word. Confirmed real-world false positive: 'purc'
+// (meant to catch "PURC", the utility regulator) was matching inside
+// "purchase"/"purchasing" — which let completely unrelated stories
+// (a doctor buying hospital equipment, a condom-vending-machine
+// article, a road-infrastructure funding story) sail through the
+// allowlist just because they contained the word "purchase" somewhere.
+// \b...\b anchors each keyword to real word boundaries, so "purc"
+// matches only the standalone word "PURC", never "purchase". Multi-word
+// phrases are unaffected — the space between words is already a word
+// boundary on both sides.
+const NEWS_KEYWORD_REGEX = new RegExp(
+    '\\b(' + NEWS_KEYWORDS.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')\\b',
+    'i'
+);
+
 function isRelevantArticle(text) {
-    const t = text.toLowerCase();
-    return NEWS_KEYWORDS.some(k => t.includes(k));
+    return NEWS_KEYWORD_REGEX.test(text);
 }
 
 function detectCategory(text) {
