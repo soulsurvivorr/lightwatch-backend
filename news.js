@@ -302,21 +302,33 @@ module.exports = function initNewsSystem(app, deps) {
 
     // ---- Fetchers -----------------------------------------------
     async function fetchRssSource(source) {
+        let items = [];
         try {
             const feed = await rssParser.parseURL(source.url);
-            const items = feed.items || [];
-            for (const item of items.slice(0, 25)) {
-                await storeArticle({
-                    title: item.title,
-                    summary: item.contentSnippet || item.content || item.summary || '',
-                    url: item.link,
-                    imageUrl: extractImageFromRssItem(item),
-                    publishedAt: item.isoDate ? new Date(item.isoDate) : new Date()
-                }, source);
-            }
+            items = feed.items || [];
         } catch (err) {
-            console.error(`[news] RSS fetch failed for ${source.name}:`, err.message);
+            // This is the #1 thing to check first if news isn't showing up —
+            // a feed URL that's moved/changed shows up here as a 404/parse
+            // error, distinct from "fetched fine but nothing was relevant"
+            // below.
+            console.error(`[news] RSS fetch FAILED for ${source.name} (${source.url}): ${err.message}`);
+            return { fetched: 0, stored: 0 };
         }
+
+        let stored = 0;
+        for (const item of items.slice(0, 25)) {
+            const doc = await storeArticle({
+                title: item.title,
+                summary: item.contentSnippet || item.content || item.summary || '',
+                url: item.link,
+                imageUrl: extractImageFromRssItem(item),
+                publishedAt: item.isoDate ? new Date(item.isoDate) : new Date()
+            }, source);
+            if (doc) stored++;
+        }
+
+        console.log(`[news] ${source.name}: fetched ${items.length} item(s), stored ${stored} new (rest were off-topic, duplicates, or already stored).`);
+        return { fetched: items.length, stored };
     }
 
     // ECG doesn't publish RSS, so its "Media Centre / News & Events"
@@ -327,53 +339,84 @@ module.exports = function initNewsSystem(app, deps) {
     // filter in storeArticle() means a stale/broken selector just
     // yields nothing useful rather than bad data reaching users.
     async function scrapeEcgSite(source) {
+        let html;
         try {
             const res = await fetch(source.url, {
                 headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0)' }
             });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const html = await res.text();
-            const $ = cheerio.load(html);
-
-            const candidates = $('.blog .item, .items-leading, .item-page, .blog-item, article');
-            const items = [];
-
-            candidates.each((_, el) => {
-                const $el = $(el);
-                const headingEl = $el.find('h2 a, h3 a, h2, h3').first();
-                const title = headingEl.text().trim();
-                let href = headingEl.is('a') ? headingEl.attr('href') : $el.find('a').first().attr('href');
-                if (!title || !href) return;
-                href = resolveUrl(href, source.url);
-                if (!href) return;
-
-                const summary = $el.find('p').first().text().trim();
-                const imgSrc = $el.find('img').first().attr('src');
-                const imageUrl = imgSrc ? resolveUrl(imgSrc, source.url) : null;
-
-                items.push({ title, summary, url: href, imageUrl, publishedAt: new Date() });
-            });
-
-            // De-dupe within this single scrape pass (the same story can
-            // appear in more than one listing block on the page).
-            const seen = new Set();
-            for (const item of items) {
-                if (seen.has(item.url)) continue;
-                seen.add(item.url);
-                await storeArticle(item, source);
-            }
+            html = await res.text();
         } catch (err) {
-            console.error('[news] ECG site scrape failed:', err.message);
+            // A ReferenceError here ("fetch is not defined") means the
+            // Node runtime is older than 18 and has no global fetch —
+            // check `node -v` on the host if you see that specific message.
+            console.error(`[news] ECG site fetch FAILED (${source.url}): ${err.message}`);
+            return { fetched: 0, stored: 0 };
         }
+
+        const $ = cheerio.load(html);
+        const candidates = $('.blog .item, .items-leading, .item-page, .blog-item, article');
+        const items = [];
+
+        candidates.each((_, el) => {
+            const $el = $(el);
+            const headingEl = $el.find('h2 a, h3 a, h2, h3').first();
+            const title = headingEl.text().trim();
+            let href = headingEl.is('a') ? headingEl.attr('href') : $el.find('a').first().attr('href');
+            if (!title || !href) return;
+            href = resolveUrl(href, source.url);
+            if (!href) return;
+
+            const summary = $el.find('p').first().text().trim();
+            const imgSrc = $el.find('img').first().attr('src');
+            const imageUrl = imgSrc ? resolveUrl(imgSrc, source.url) : null;
+
+            items.push({ title, summary, url: href, imageUrl, publishedAt: new Date() });
+        });
+
+        // If the fetch succeeded (HTML came back) but the selectors above
+        // found zero candidate blocks, that's a near-certain sign ECG's
+        // page markup no longer matches these selectors — worth checking
+        // `curl <url>` and inspecting the actual HTML structure.
+        if (items.length === 0) {
+            console.warn(`[news] ECG: page fetched (${html.length} bytes) but 0 article blocks matched the selectors — the site's markup may have changed.`);
+            return { fetched: 0, stored: 0 };
+        }
+
+        // De-dupe within this single scrape pass (the same story can
+        // appear in more than one listing block on the page).
+        const seen = new Set();
+        let stored = 0;
+        for (const item of items) {
+            if (seen.has(item.url)) continue;
+            seen.add(item.url);
+            const doc = await storeArticle(item, source);
+            if (doc) stored++;
+        }
+
+        console.log(`[news] ECG: found ${items.length} candidate item(s), stored ${stored} new.`);
+        return { fetched: items.length, stored };
     }
+
+    // Kept around so GET /admin/news/refresh (and anyone poking at this
+    // from a debugger) can see exactly what the last cycle did per
+    // source, without having to go dig through log history.
+    let lastFetchStats = null;
 
     async function runNewsFetchCycle() {
         console.log('[news] Fetch cycle starting...');
+        const stats = { startedAt: new Date(), sources: {} };
+
         for (const source of NEWS_SOURCES) {
-            if (source.type === 'rss') await fetchRssSource(source);
-            else if (source.type === 'scrape-ecg') await scrapeEcgSite(source);
+            let result;
+            if (source.type === 'rss') result = await fetchRssSource(source);
+            else if (source.type === 'scrape-ecg') result = await scrapeEcgSite(source);
+            stats.sources[source.name] = result || { fetched: 0, stored: 0 };
         }
-        console.log('[news] Fetch cycle complete.');
+
+        stats.finishedAt = new Date();
+        lastFetchStats = stats;
+        console.log('[news] Fetch cycle complete:', JSON.stringify(stats.sources));
     }
 
     // ---- Scheduler ------------------------------------------------
@@ -432,11 +475,19 @@ module.exports = function initNewsSystem(app, deps) {
         try {
             await runNewsFetchCycle();
             const totalArticles = await NewsArticle.countDocuments();
-            return res.json({ success: true, totalArticles });
+            return res.json({ success: true, totalArticles, lastFetchStats });
         } catch (err) {
             console.error('Admin news refresh error:', err.message);
             return res.status(500).json({ error: 'Server error refreshing news' });
         }
+    });
+
+    // GET version too — same verifyAdminToken (Bearer JWT in the
+    // Authorization header, same as every other /admin/* route) but
+    // read-only, for a quick status check without triggering a fetch.
+    app.get('/admin/news/status', verifyAdminToken, async (req, res) => {
+        const totalArticles = await NewsArticle.countDocuments();
+        return res.json({ totalArticles, lastFetchStats, sources: NEWS_SOURCES.map(s => ({ name: s.name, url: s.url, type: s.type })) });
     });
 
     app.delete('/admin/news', verifyAdminToken, async (req, res) => {
