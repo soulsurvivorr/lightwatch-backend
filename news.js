@@ -86,13 +86,14 @@ const HTML_ENTITY_MAP = {
     eacute: '\u00E9', egrave: '\u00E8', agrave: '\u00E0', ccedil: '\u00E7'
 };
 
-// Stack-based tag balancer — see cause #4 in sanitizeFeedXml() below for
-// why this needs an actual stack rather than a regex substitution.
-// Walks every tag in the string in order; a closing tag matching the
-// top of the stack pops normally, one matching something DEEPER in the
-// stack force-closes everything above it too (flattening the crossed
-// structure), and one matching NOTHING currently open is dropped as a
-// stray. Anything still open when the string ends gets auto-closed.
+// Stack-based tag balancer for a single isolated snippet of embedded
+// article HTML (never the whole document — see scopeToArticleFields()
+// below for why). Walks every tag in the string in order; a closing
+// tag matching the top of the stack pops normally, one matching
+// something DEEPER in the stack force-closes everything above it too
+// (flattening the crossed structure), and one matching NOTHING
+// currently open is dropped as a stray. Anything still open when the
+// string ends gets auto-closed.
 function repairCrossedTags(xml) {
     const tagPattern = /<\/?([a-zA-Z][\w:-]*)\b[^>]*?(\/)?>/g;
     const stack = [];
@@ -127,6 +128,87 @@ function repairCrossedTags(xml) {
     return result;
 }
 
+// Runs the tag-STRUCTURE repairs (bare-attribute fix, void-element
+// self-close, crossed-tag repair) on one already-isolated, already-
+// confirmed-non-CDATA snippet. Entity/ampersand fixing happens
+// separately, globally, in sanitizeFeedXml() below — see the comment
+// there for why that one isn't scoped the same way.
+function repairEmbeddedHtml(snippet) {
+    let out = snippet;
+
+    // Repair bare/valueless attributes (e.g. <img ... allowfullscreen>)
+    // and self-close unclosed void elements in the same pass — see
+    // causes #2 and #3 in sanitizeFeedXml() below.
+    out = out.replace(/<([a-zA-Z][\w:-]*)((?:\s+[a-zA-Z_:][\w:.-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'))?)*)\s*(\/?)\s*>/g,
+        (match, tagName, attrs, selfClose) => {
+            const fixed = attrs ? attrs.replace(/(\s+)([a-zA-Z_:][\w:.-]*)(?!\s*=)(?=\s|$)/g, '$1$2=""') : '';
+            const needsSelfClose = selfClose || VOID_ELEMENTS.test(tagName);
+            return `<${tagName}${fixed}${needsSelfClose ? ' /' : ''}>`;
+        });
+
+    return repairCrossedTags(out);
+}
+
+// Finds every <description>...</description> and <content:encoded>...
+// </content:encoded> element and repairs ONLY the embedded HTML inside
+// each one, in isolation — never the document as a whole. This matters
+// for two reasons, both confirmed as real regressions from an earlier,
+// document-wide version of this pass:
+//   1. CDATA safety — WordPress feeds (MyJoyOnline, Modern Ghana, ...)
+//      wrap this same messy embedded HTML in <![CDATA[...]]>, which
+//      means the XML parser already treats it as opaque text and never
+//      tries to interpret it as tags at all. Running tag-repair logic
+//      over CDATA content doesn't just waste effort, it actively risks
+//      corrupting the feed. A field whose content starts with
+//      "<![CDATA[" is left 100% untouched here.
+//   2. No cross-item leakage — a stack-based repair needs an actual
+//      stack, and running ONE stack across the entire document meant a
+//      stray/unclosed tag inside one article's description could leave
+//      phantom state that then misinterprets the NEXT article's real
+//      <item>/<title>/<link> structure, or the feed's own <link>/
+//      <source> elements. Scoping each field to its own isolated stack
+//      makes that class of bug impossible by construction — one
+//      article's messy HTML can never affect another's, or the feed's
+//      own scaffolding, no matter how broken it is.
+// Everything outside these two field types (the actual RSS/Atom
+// scaffolding: rss/channel/item/title/link/pubDate/guid/source/...) is
+// always generator-produced and well-formed — it never needs repair
+// and is left completely untouched here.
+function scopeToArticleFields(xml) {
+    return xml.replace(
+        /(<(?:description|content:encoded)\b[^>]*>)([\s\S]*?)(<\/(?:description|content:encoded)>)/g,
+        (fullMatch, openTag, inner, closeTag) => {
+            if (inner.trimStart().startsWith('<![CDATA[')) return fullMatch; // opaque to XML — leave alone
+            return openTag + repairEmbeddedHtml(inner) + closeTag;
+        }
+    );
+}
+
+// A handful of these feeds ship genuinely malformed XML. Four recurring
+// causes, all from Ghanaian outlets running WordPress/Joomla feed
+// generators:
+//   1. Common named HTML entities (&mdash; &nbsp; &rsquo; etc.) — valid
+//      in HTML, but NOT among XML's five predefined entities, so a
+//      strict parser errors out exactly like it would on a raw "&".
+//      This can appear ANYWHERE text runs in the feed (a headline's
+//      <title> uses em-dashes just as often as a <description> does),
+//      so — unlike causes #2-4 below — this fix runs globally, over
+//      the whole document. That's safe even inside CDATA or a plain
+//      title: decoding "&mdash;" to a real em-dash, or escaping a
+//      stray "&", never changes tag structure, only character content.
+//   2. Bare/valueless HTML attributes (e.g. <img ... allowfullscreen>)
+//      — valid HTML, invalid XML ("Attribute without value").
+//   3. Unclosed HTML "void" elements (<br>, <img ...>, <hr> etc. with
+//      no trailing "/") — the next real closing tag (e.g. the </p>
+//      after a stray <br>) reads as unmatched ("Unexpected close tag").
+//   4. Genuinely CROSSED (overlapping) tags, e.g. <b>text<p>more</b>
+//      </p> — real paired tags nested in an order browsers silently
+//      auto-correct but XML never tolerates, common in copy-pasted
+//      Word/Google-Docs content.
+// Causes #2-4 are all tag-STRUCTURE repairs, and unlike #1 they are
+// scoped to non-CDATA <description>/<content:encoded> fields only, via
+// scopeToArticleFields() above — see that function's comment for why
+// running them document-wide was a real, confirmed regression.
 function sanitizeFeedXml(xml) {
     let out = String(xml || '');
 
@@ -143,38 +225,7 @@ function sanitizeFeedXml(xml) {
     // (numeric entities and the 5 XML-predefined ones are left alone).
     out = out.replace(/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;');
 
-    // Repair bare/valueless attributes inside tags — e.g. <img ...
-    // allowfullscreen> — by giving them an empty value. Only touches
-    // attribute POSITIONS within a tag; well-formed name="value" pairs
-    // (the vast majority) are matched but left untouched by the lookahead.
-    // Same pass also self-closes unclosed void elements (cause #3 above):
-    // any <br|img|hr|...> tag that isn't already self-closed gets a
-    // trailing "/" added. Only matches opening tags (the tagName capture
-    // requires a letter right after "<", so "</p>" etc. are never
-    // touched) and only ever adds a slash for tags on the void list —
-    // ordinary paired elements (<p>, <div>, ...) are left exactly as-is.
-    out = out.replace(/<([a-zA-Z][\w:-]*)((?:\s+[a-zA-Z_:][\w:.-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'))?)*)\s*(\/?)\s*>/g,
-        (match, tagName, attrs, selfClose) => {
-            const fixed = attrs ? attrs.replace(/(\s+)([a-zA-Z_:][\w:.-]*)(?!\s*=)(?=\s|$)/g, '$1$2=""') : '';
-            const needsSelfClose = selfClose || VOID_ELEMENTS.test(tagName);
-            return `<${tagName}${fixed}${needsSelfClose ? ' /' : ''}>`;
-        });
-
-    // Cause #4 — genuinely CROSSED (overlapping) tags, e.g.
-    // <b>text<p>more</b></p>. This is distinct from the unclosed-void-
-    // element case above: these are real paired tags, just nested in an
-    // order browsers silently auto-correct but XML never tolerates —
-    // extremely common when article text is copy-pasted from Word/
-    // Google Docs into WordPress/Joomla. A regex substitution can't fix
-    // this (it requires tracking actual nesting), so repairCrossedTags()
-    // below walks the tag stream with a stack and, whenever a closing
-    // tag doesn't match what's currently open, closes everything down
-    // to its real match instead (dropping it entirely if no match is
-    // open at all). This doesn't preserve the original's visual nesting
-    // — but nothing downstream needs that: descriptions are stripped to
-    // plain text via stripHtml() right after parsing, so "parses
-    // successfully" is the only bar this needs to clear.
-    out = repairCrossedTags(out);
+    out = scopeToArticleFields(out);
 
     return out;
 }
