@@ -49,6 +49,20 @@ const rssParser = new Parser({
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0; +https://lightwatch-backend.onrender.com)' }
 });
 
+// A handful of these feeds ship genuinely malformed XML — most
+// commonly a raw "&" in a headline that was never escaped to
+// "&amp;", which makes strict XML parsers (rss-parser included)
+// bail out entirely with something like "Invalid character in
+// entity name". Rather than lose the whole feed over one bad
+// headline, fetch the raw text ourselves and repair stray
+// ampersands before handing it to the parser. This only touches
+// "&" that ISN'T already part of a valid entity (&amp; &lt; &gt;
+// &quot; &apos; or a numeric &#123; / &#x1F;) — so already-correct
+// escaping is left alone.
+function sanitizeFeedXml(xml) {
+    return String(xml || '').replace(/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;');
+}
+
 // ---- Sources ------------------------------------------------
 // `official: true` is reserved for ECG's own site — that's the
 // flag the /news route and the frontend use to always surface
@@ -66,9 +80,15 @@ const NEWS_SOURCES = [
     },
     { name: 'Citi News',      icon: '📰', official: false, type: 'rss', url: 'https://citinewsroom.com/feed/' },
     { name: 'MyJoyOnline',    icon: '📰', official: false, type: 'rss', url: 'https://www.myjoyonline.com/feed/' },
-    { name: 'Graphic Online', icon: '📰', official: false, type: 'rss', url: 'https://www.graphic.com.gh/feed' },
+    // Was 'https://www.graphic.com.gh/feed' — 404s now. Graphic's Joomla
+    // feed generator lives at this path instead (same pattern as their
+    // per-section feeds, e.g. /features/features.feed?type=rss). Worth
+    // double-checking in a browser if this ever goes quiet again.
+    { name: 'Graphic Online', icon: '📰', official: false, type: 'rss', url: 'https://www.graphic.com.gh/news.feed?type=rss' },
     { name: 'GhanaWeb',       icon: '📰', official: false, type: 'rss', url: 'https://www.ghanaweb.com/GhanaHomePage/NewsArchive/rss.xml' },
-    { name: 'Modern Ghana',   icon: '📰', official: false, type: 'rss', url: 'https://www.modernghana.com/rss/news.xml' }
+    // Was 'https://www.modernghana.com/rss/news.xml' — wrong host/path.
+    // Confirmed current URL straight from modernghana.com/rssfeed/.
+    { name: 'Modern Ghana',   icon: '📰', official: false, type: 'rss', url: 'https://rss.modernghana.com/news.xml' }
 ];
 
 // ---- Relevance keyword allowlist -----------------------------
@@ -304,7 +324,16 @@ module.exports = function initNewsSystem(app, deps) {
     async function fetchRssSource(source) {
         let items = [];
         try {
-            const feed = await rssParser.parseURL(source.url);
+            // Fetch raw text ourselves (instead of rssParser.parseURL, which
+            // fetches AND parses in one step) so malformed XML can be
+            // repaired before it ever reaches the strict parser — see
+            // sanitizeFeedXml() above.
+            const res = await fetch(source.url, {
+                headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0)' }
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const rawXml = await res.text();
+            const feed = await rssParser.parseString(sanitizeFeedXml(rawXml));
             items = feed.items || [];
         } catch (err) {
             // This is the #1 thing to check first if news isn't showing up —
@@ -379,7 +408,18 @@ module.exports = function initNewsSystem(app, deps) {
         // page markup no longer matches these selectors — worth checking
         // `curl <url>` and inspecting the actual HTML structure.
         if (items.length === 0) {
-            console.warn(`[news] ECG: page fetched (${html.length} bytes) but 0 article blocks matched the selectors — the site's markup may have changed.`);
+            // A response under ~2KB is almost certainly NOT the real page
+            // (the actual News & Events page is tens of KB) — far more
+            // likely a bot-detection/challenge page, a redirect stub, or a
+            // WAF block of Render's outbound IP. Log the actual body in
+            // that case so it's obvious which one we're dealing with,
+            // rather than assuming "markup changed" and chasing selectors
+            // that were never the problem.
+            if (html.length < 2000) {
+                console.warn(`[news] ECG: page fetched but only ${html.length} bytes back — likely blocked/challenged rather than a markup change. Body: ${html.slice(0, 500)}`);
+            } else {
+                console.warn(`[news] ECG: page fetched (${html.length} bytes) but 0 article blocks matched the selectors — the site's markup may have changed.`);
+            }
             return { fetched: 0, stored: 0 };
         }
 
