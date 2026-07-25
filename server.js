@@ -18,7 +18,7 @@ const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key-change-this";
 // need one. Set ADMIN_PASSWORD on Render (or in your .env locally); the
 // fallback below only exists so the app still boots without one, and a
 // clear warning is logged so it's never mistaken for a real deployment.
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "changeme-set-ADMIN_PASSWORD";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
 if (!process.env.ADMIN_PASSWORD) {
     console.warn("WARNING: ADMIN_PASSWORD not set in environment. Using an insecure default. Set it on Render.");
@@ -244,10 +244,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Serves /public/logo.png etc. at https://<your-render-domain>/logo.png
-// so it can be referenced by an absolute URL inside emails (Brevo needs
-// a public URL for images — it does not support cid: inline images).
-app.use(express.static('public'));
+// Serves frontend files from the frontend folder during development
+// In production, copy built frontend files to a 'public' folder or adjust path
+app.use(express.static('../frontend'));
 
 // Set this to your real Render URL (e.g. https://lightwatch-api.onrender.com)
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://lightwatch-backend.onrender.com';
@@ -1013,7 +1012,7 @@ app.post('/chats', async (req, res) => {
                 body: isPriorityMention
                     ? `${saved.handle} replied to your message: ${saved.text}`
                     : `${saved.handle}: ${saved.text}`,
-                url: `/pages/home.html?${deepLinkParams.toString()}`,
+                url: `/chat?${deepLinkParams.toString()}`,
                 tag: isPriorityMention ? 'chat-reply' : 'chat-message',
                 requireInteraction: true,
                 vibrate: isPriorityMention ? [280, 120, 280] : [240, 120, 240],
@@ -2097,6 +2096,21 @@ app.delete('/user/:id/secondary-location', async (req, res) => {
     }
 });
 
+// ── News system (news.js) — RSS + ECG-site fetcher, keyword
+//    filter/dedupe, scheduled background refresh, and GET /news. Wired
+//    in last, since it just needs app + the models/helpers already
+//    defined above; see news.js's header comment for the full picture. ──
+require('./news')(app, {
+    mongoose,
+    PushSubscription,
+    User,
+    sendPushToSubscribers,
+    normalizeLocation,
+    titleCaseLocation,
+    escapeRegex,
+    verifyAdminToken
+});
+
 // ---- HEALTH CHECK ----
 app.get('/', (req, res) => {
     const dbState = mongoose.connection.readyState;
@@ -2105,6 +2119,11 @@ app.get('/', (req, res) => {
         status: "LightWatch backend is running",
         mongodb: states[dbState] || 'unknown'
     });
+});
+
+// SPA routing: serve index.html for all non-API routes
+app.get('*', (req, res) => {
+    res.sendFile(__dirname + '/../frontend/index.html');
 });
 
 // START

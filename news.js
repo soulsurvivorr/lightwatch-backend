@@ -1,0 +1,453 @@
+// ============================================================
+//  NEWS.JS — Official electricity-news system for LightWatch
+//
+//  Self-contained module: owns its own Mongoose schema/model,
+//  the background fetch scheduler, and the public GET /news
+//  route. Wired into server.js with a single call:
+//
+//      require('./news')(app, {
+//          mongoose, PushSubscription, User,
+//          sendPushToSubscribers, normalizeLocation,
+//          titleCaseLocation, escapeRegex, verifyAdminToken
+//      });
+//
+//  WHAT IT DOES
+//   1. Every NEWS_FETCH_INTERVAL_MS (default 20 min, well inside
+//      the requested 15–30 min window) it polls a list of trusted
+//      Ghanaian media RSS feeds plus ECG's own "News & Events"
+//      page (scraped — ECG doesn't publish an RSS feed).
+//   2. Every candidate item is filtered against an electricity-
+//      related keyword allowlist (ECG, GRIDCo, outages, tariffs,
+//      maintenance, etc.) — anything that doesn't match is
+//      dropped before it ever reaches the database.
+//   3. Duplicates are rejected two ways: an exact articleUrl
+//      match (same story re-fetched next cycle) and a fuzzy
+//      title match against anything stored in the last 3 days
+//      (same story picked up by two outlets).
+//   4. Surviving articles are stored with a normalized set of
+//      "mentioned locations" — matched against the same location
+//      keys LightWatch already tracks (every PushSubscription's
+//      location/secondaryLocationKey, every User's city). Any
+//      match fires a push notification to devices watching that
+//      location, through the exact same sendPushToSubscribers()
+//      pipeline lightstatus/chat pushes already use.
+//   5. GET /news returns the stored feed, ECG articles always
+//      sorted first (isOfficial), then newest first.
+//
+//  DEPENDENCIES (new): rss-parser, cheerio.
+//      npm install rss-parser cheerio --save
+//  Node 18+ is assumed for global fetch() (Render's default
+//  runtime already ships 18+). If running on an older Node,
+//  swap the fetch() call in scrapeEcgSite() for node-fetch.
+// ============================================================
+
+const Parser = require('rss-parser');
+const cheerio = require('cheerio');
+
+const rssParser = new Parser({
+    timeout: 15000,
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0; +https://lightwatch-backend.onrender.com)' }
+});
+
+// ---- Sources ------------------------------------------------
+// `official: true` is reserved for ECG's own site — that's the
+// flag the /news route and the frontend use to always surface
+// ECG's own announcements first. Media RSS URLs occasionally
+// move when an outlet re-platforms; if a feed starts 404ing,
+// fetchRssSource() just logs and skips it rather than crashing
+// the whole cycle, so one dead feed never takes the others down.
+const NEWS_SOURCES = [
+    {
+        name: 'ECG',
+        icon: '⚡',
+        official: true,
+        type: 'scrape-ecg',
+        url: 'https://ecg.com.gh/index.php/en/media-centre/news-events'
+    },
+    { name: 'Citi News',      icon: '📰', official: false, type: 'rss', url: 'https://citinewsroom.com/feed/' },
+    { name: 'MyJoyOnline',    icon: '📰', official: false, type: 'rss', url: 'https://www.myjoyonline.com/feed/' },
+    { name: 'Graphic Online', icon: '📰', official: false, type: 'rss', url: 'https://www.graphic.com.gh/feed' },
+    { name: 'GhanaWeb',       icon: '📰', official: false, type: 'rss', url: 'https://www.ghanaweb.com/GhanaHomePage/NewsArchive/rss.xml' },
+    { name: 'Modern Ghana',   icon: '📰', official: false, type: 'rss', url: 'https://www.modernghana.com/rss/news.xml' }
+];
+
+// ---- Relevance keyword allowlist -----------------------------
+const NEWS_KEYWORDS = [
+    'ecg', 'electricity company of ghana', 'gridco', 'ghana grid company',
+    'power outage', 'power cut', 'blackout', 'load shedding', 'dumsor',
+    'electricity tariff', 'tariff hike', 'transformer', 'feeder fault',
+    'feeder', 'substation', 'power restoration', 'power supply',
+    'electricity supply', 'planned maintenance', 'network maintenance',
+    'prepaid meter', 'purc', 'national grid', 'power interruption',
+    'electricity bill', 'energy commission', 'power crisis', 'electricity',
+    'power rationing', 'load management', 'distribution network'
+];
+
+function isRelevantArticle(text) {
+    const t = text.toLowerCase();
+    return NEWS_KEYWORDS.some(k => t.includes(k));
+}
+
+function detectCategory(text) {
+    const t = text.toLowerCase();
+    if (/(restor|back on|resum|reconnect)/.test(t)) return 'restoration';
+    if (/(maintenance|upgrade|scheduled|planned outage|planned works)/.test(t)) return 'maintenance';
+    if (/(tariff|price hike|bill increase|surcharge)/.test(t)) return 'tariff';
+    if (/(outage|fault|blackout|power cut|interruption|dumsor|load shedding)/.test(t)) return 'outage';
+    return 'general';
+}
+
+// Cheap normalized-title key for cross-source duplicate detection —
+// lowercase, strip punctuation, collapse whitespace, keep the first
+// ~12 significant words (enough to catch "ECG explains outage in
+// Kumasi" vs "ECG explains outage in Kumasi — Citi News" without
+// needing a full similarity algorithm).
+function titleDedupeKey(title) {
+    return title
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .split(' ')
+        .slice(0, 12)
+        .join(' ');
+}
+
+function stripHtml(html) {
+    return String(html || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function extractImageFromRssItem(item) {
+    if (item.enclosure && item.enclosure.url) return item.enclosure.url;
+    const html = item['content:encoded'] || item.content || item.summary || '';
+    const match = /<img[^>]+src="([^"]+)"/i.exec(html);
+    return match ? match[1] : null;
+}
+
+function resolveUrl(maybeRelative, base) {
+    if (!maybeRelative) return null;
+    try { return new URL(maybeRelative, base).toString(); }
+    catch { return null; }
+}
+
+module.exports = function initNewsSystem(app, deps) {
+    const {
+        mongoose,
+        PushSubscription,
+        User,
+        sendPushToSubscribers,
+        normalizeLocation,
+        titleCaseLocation,
+        escapeRegex,
+        verifyAdminToken
+    } = deps;
+
+    // ---- Schema / model --------------------------------------
+    const newsArticleSchema = new mongoose.Schema({
+        title:        { type: String, required: true },
+        summary:      { type: String, default: '' },
+        imageUrl:     { type: String, default: null },
+        sourceName:   { type: String, required: true },
+        sourceIcon:   { type: String, default: '📰' },
+        isOfficial:   { type: Boolean, default: false }, // true only for ECG's own site
+        category:     { type: String, enum: ['maintenance', 'outage', 'tariff', 'restoration', 'general'], default: 'general' },
+        articleUrl:   { type: String, required: true, unique: true },
+        dedupeKey:    { type: String, required: true },
+        publishedAt:  { type: Date, required: true },
+        fetchedAt:    { type: Date, default: Date.now },
+        // Location keys (same normalized form as PushSubscription.location)
+        // found mentioned in the title/summary text.
+        mentionedLocations: { type: [String], default: [] },
+        // Which of those locations have already had a push sent for this
+        // article — guards against double-notifying if the article gets
+        // touched again by a later fetch cycle for any reason.
+        notifiedLocations:  { type: [String], default: [] }
+    });
+    newsArticleSchema.index({ publishedAt: -1 });
+    newsArticleSchema.index({ isOfficial: -1, publishedAt: -1 });
+    newsArticleSchema.index({ dedupeKey: 1, publishedAt: -1 });
+    newsArticleSchema.index({ mentionedLocations: 1 });
+
+    const NewsArticle = mongoose.models.NewsArticle || mongoose.model('NewsArticle', newsArticleSchema);
+
+    // ---- Location matching ------------------------------------
+    // Reuses the same location vocabulary LightWatch already has —
+    // every device's primary/secondary watched location, plus every
+    // signed-up user's home city — rather than maintaining a separate
+    // hardcoded gazetteer of Ghanaian place names.
+    async function getKnownLocationKeys() {
+        const [subLocations, secondaryLocations, userCities] = await Promise.all([
+            PushSubscription.distinct('location'),
+            PushSubscription.distinct('secondaryLocationKey'),
+            User.distinct('city')
+        ]);
+
+        const keys = new Set();
+        [...subLocations, ...secondaryLocations, ...userCities].forEach(loc => {
+            if (!loc) return;
+            const key = normalizeLocation(loc).split(',')[0].trim();
+            // Skip very short keys (e.g. stray single letters) to avoid
+            // noisy false-positive matches inside unrelated words.
+            if (key && key.length >= 3) keys.add(key);
+        });
+        return [...keys];
+    }
+
+    function findMentionedLocations(text, knownKeys) {
+        const t = normalizeLocation(text);
+        if (!t) return [];
+        return knownKeys.filter(key => {
+            const re = new RegExp(`\\b${escapeRegex(key)}\\b`, 'i');
+            return re.test(t);
+        });
+    }
+
+    async function notifyLocationMentions(article, locationKeys) {
+        if (!locationKeys.length) return;
+        try {
+            const subscribers = await PushSubscription.find({ location: { $in: locationKeys } });
+            if (!subscribers.length) return;
+
+            const displayLocation = titleCaseLocation(locationKeys[0]);
+            const payload = {
+                title: `LightWatch News — ${displayLocation}`,
+                body: article.title,
+                url: '/pages/chat.html',
+                tag: `news-${article._id}`,
+                requireInteraction: false,
+                vibrate: [200, 90, 200],
+                image: article.imageUrl || undefined,
+                tone: 'chat'
+            };
+
+            console.log(`[news] Notifying ${subscribers.length} subscriber(s) — "${article.title}" mentions ${locationKeys.join(', ')}`);
+            await sendPushToSubscribers(subscribers, payload);
+
+            await NewsArticle.updateOne(
+                { _id: article._id },
+                { $addToSet: { notifiedLocations: { $each: locationKeys } } }
+            );
+        } catch (err) {
+            console.error('[news] Location-mention push error:', err.message);
+        }
+    }
+
+    // ---- Store (with relevance filter + dedupe) ----------------
+    async function storeArticle(raw, source) {
+        const title = String(raw.title || '').trim();
+        const articleUrl = raw.url;
+        if (!title || !articleUrl) return null;
+
+        const summary = stripHtml(raw.summary || '').slice(0, 500) || title;
+        const combinedText = `${title} ${summary}`;
+
+        if (!isRelevantArticle(combinedText)) return null;
+
+        // Exact-URL duplicate (this story, already stored).
+        const existing = await NewsArticle.findOne({ articleUrl }).select('_id').lean();
+        if (existing) return null;
+
+        // Cross-source near-duplicate (same story, different outlet)
+        // within the last 3 days.
+        const dedupeKey = titleDedupeKey(title);
+        const cutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+        const nearDuplicate = await NewsArticle.findOne({
+            dedupeKey,
+            publishedAt: { $gte: cutoff }
+        }).select('_id isOfficial').lean();
+
+        // If a non-official outlet already has this story but ECG's own
+        // version just came in, prefer keeping ECG's — replace rather
+        // than skip, so official framing wins over a re-hash.
+        if (nearDuplicate) {
+            if (source.official && !nearDuplicate.isOfficial) {
+                await NewsArticle.deleteOne({ _id: nearDuplicate._id });
+            } else {
+                return null;
+            }
+        }
+
+        const knownKeys = await getKnownLocationKeys();
+        const mentionedLocations = findMentionedLocations(combinedText, knownKeys);
+
+        let doc;
+        try {
+            doc = await NewsArticle.create({
+                title,
+                summary,
+                imageUrl: raw.imageUrl || null,
+                sourceName: source.name,
+                sourceIcon: source.icon,
+                isOfficial: !!source.official,
+                category: detectCategory(combinedText),
+                articleUrl,
+                dedupeKey,
+                publishedAt: raw.publishedAt instanceof Date && !isNaN(raw.publishedAt) ? raw.publishedAt : new Date(),
+                mentionedLocations
+            });
+        } catch (err) {
+            // Unique-index race (two cycles overlapping, or the same URL
+            // appearing twice in one feed) — not a real error, just skip.
+            if (err.code === 11000) return null;
+            throw err;
+        }
+
+        if (mentionedLocations.length) {
+            // Don't block the fetch cycle waiting on push delivery.
+            notifyLocationMentions(doc, mentionedLocations);
+        }
+
+        return doc;
+    }
+
+    // ---- Fetchers -----------------------------------------------
+    async function fetchRssSource(source) {
+        try {
+            const feed = await rssParser.parseURL(source.url);
+            const items = feed.items || [];
+            for (const item of items.slice(0, 25)) {
+                await storeArticle({
+                    title: item.title,
+                    summary: item.contentSnippet || item.content || item.summary || '',
+                    url: item.link,
+                    imageUrl: extractImageFromRssItem(item),
+                    publishedAt: item.isoDate ? new Date(item.isoDate) : new Date()
+                }, source);
+            }
+        } catch (err) {
+            console.error(`[news] RSS fetch failed for ${source.name}:`, err.message);
+        }
+    }
+
+    // ECG doesn't publish RSS, so its "Media Centre / News & Events"
+    // page is scraped directly. Selectors target the common Joomla
+    // blog-listing markup that page uses; kept loose (several
+    // fallback selectors) since a template tweak on ECG's end is far
+    // more likely to break a scraper than an RSS feed. The keyword
+    // filter in storeArticle() means a stale/broken selector just
+    // yields nothing useful rather than bad data reaching users.
+    async function scrapeEcgSite(source) {
+        try {
+            const res = await fetch(source.url, {
+                headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0)' }
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const html = await res.text();
+            const $ = cheerio.load(html);
+
+            const candidates = $('.blog .item, .items-leading, .item-page, .blog-item, article');
+            const items = [];
+
+            candidates.each((_, el) => {
+                const $el = $(el);
+                const headingEl = $el.find('h2 a, h3 a, h2, h3').first();
+                const title = headingEl.text().trim();
+                let href = headingEl.is('a') ? headingEl.attr('href') : $el.find('a').first().attr('href');
+                if (!title || !href) return;
+                href = resolveUrl(href, source.url);
+                if (!href) return;
+
+                const summary = $el.find('p').first().text().trim();
+                const imgSrc = $el.find('img').first().attr('src');
+                const imageUrl = imgSrc ? resolveUrl(imgSrc, source.url) : null;
+
+                items.push({ title, summary, url: href, imageUrl, publishedAt: new Date() });
+            });
+
+            // De-dupe within this single scrape pass (the same story can
+            // appear in more than one listing block on the page).
+            const seen = new Set();
+            for (const item of items) {
+                if (seen.has(item.url)) continue;
+                seen.add(item.url);
+                await storeArticle(item, source);
+            }
+        } catch (err) {
+            console.error('[news] ECG site scrape failed:', err.message);
+        }
+    }
+
+    async function runNewsFetchCycle() {
+        console.log('[news] Fetch cycle starting...');
+        for (const source of NEWS_SOURCES) {
+            if (source.type === 'rss') await fetchRssSource(source);
+            else if (source.type === 'scrape-ecg') await scrapeEcgSite(source);
+        }
+        console.log('[news] Fetch cycle complete.');
+    }
+
+    // ---- Scheduler ------------------------------------------------
+    // 15–30 min window as requested; default sits in the middle of it.
+    const NEWS_FETCH_INTERVAL_MS = Number(process.env.NEWS_FETCH_INTERVAL_MS) || 20 * 60 * 1000;
+
+    // Give Mongo a moment to finish connecting before the first run,
+    // then settle into the regular interval.
+    setTimeout(() => { runNewsFetchCycle().catch(err => console.error('[news] Initial fetch failed:', err.message)); }, 10000);
+    setInterval(() => { runNewsFetchCycle().catch(err => console.error('[news] Scheduled fetch failed:', err.message)); }, NEWS_FETCH_INTERVAL_MS);
+
+    // ---- Routes -----------------------------------------------------
+    // GET /news — latest articles, ECG's own announcements pinned first.
+    app.get('/news', async (req, res) => {
+        const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 100);
+
+        const query = {};
+        if (req.query.category) query.category = req.query.category;
+        if (req.query.official === 'true') query.isOfficial = true;
+        if (req.query.location) {
+            query.mentionedLocations = normalizeLocation(req.query.location).split(',')[0].trim();
+        }
+        if (req.query.before) {
+            const beforeDate = new Date(req.query.before);
+            if (!isNaN(beforeDate)) query.publishedAt = { $lt: beforeDate };
+        }
+
+        try {
+            const articles = await NewsArticle.find(query)
+                .sort({ isOfficial: -1, publishedAt: -1 })
+                .limit(limit)
+                .lean();
+
+            return res.json(articles.map(a => ({
+                id: a._id,
+                title: a.title,
+                summary: a.summary,
+                image: a.imageUrl,
+                source: a.sourceName,
+                sourceIcon: a.sourceIcon,
+                isOfficial: a.isOfficial,
+                category: a.category,
+                publishedAt: a.publishedAt,
+                url: a.articleUrl,
+                locations: a.mentionedLocations
+            })));
+        } catch (err) {
+            console.error('News fetch error:', err.message);
+            return res.status(500).json({ error: 'Server error fetching news' });
+        }
+    });
+
+    // ---- Admin: manual refresh + cleanup (mirrors the existing
+    // admin/* route conventions elsewhere in server.js) -------------
+    app.post('/admin/news/refresh', verifyAdminToken, async (req, res) => {
+        try {
+            await runNewsFetchCycle();
+            const totalArticles = await NewsArticle.countDocuments();
+            return res.json({ success: true, totalArticles });
+        } catch (err) {
+            console.error('Admin news refresh error:', err.message);
+            return res.status(500).json({ error: 'Server error refreshing news' });
+        }
+    });
+
+    app.delete('/admin/news', verifyAdminToken, async (req, res) => {
+        try {
+            await NewsArticle.deleteMany({});
+            return res.json({ success: true });
+        } catch (err) {
+            console.error('Admin news clear error:', err.message);
+            return res.status(500).json({ error: 'Server error clearing news' });
+        }
+    });
+
+    return { NewsArticle, runNewsFetchCycle };
+};
