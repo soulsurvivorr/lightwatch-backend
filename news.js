@@ -86,6 +86,47 @@ const HTML_ENTITY_MAP = {
     eacute: '\u00E9', egrave: '\u00E8', agrave: '\u00E0', ccedil: '\u00E7'
 };
 
+// Stack-based tag balancer — see cause #4 in sanitizeFeedXml() below for
+// why this needs an actual stack rather than a regex substitution.
+// Walks every tag in the string in order; a closing tag matching the
+// top of the stack pops normally, one matching something DEEPER in the
+// stack force-closes everything above it too (flattening the crossed
+// structure), and one matching NOTHING currently open is dropped as a
+// stray. Anything still open when the string ends gets auto-closed.
+function repairCrossedTags(xml) {
+    const tagPattern = /<\/?([a-zA-Z][\w:-]*)\b[^>]*?(\/)?>/g;
+    const stack = [];
+    let result = '';
+    let lastIndex = 0;
+    let match;
+    while ((match = tagPattern.exec(xml)) !== null) {
+        const full = match[0];
+        const name = match[1].toLowerCase();
+        const selfClose = match[2];
+        const isClosing = full[1] === '/';
+
+        result += xml.slice(lastIndex, match.index);
+        lastIndex = tagPattern.lastIndex;
+
+        if (isClosing) {
+            const stackIdx = stack.lastIndexOf(name);
+            if (stackIdx === -1) continue; // stray closing tag, no match open — drop it
+            for (let i = stack.length - 1; i >= stackIdx; i--) {
+                result += `</${stack[i]}>`;
+            }
+            stack.length = stackIdx;
+        } else {
+            result += full;
+            if (!selfClose) stack.push(name);
+        }
+    }
+    result += xml.slice(lastIndex);
+    for (let i = stack.length - 1; i >= 0; i--) {
+        result += `</${stack[i]}>`;
+    }
+    return result;
+}
+
 function sanitizeFeedXml(xml) {
     let out = String(xml || '');
 
@@ -118,6 +159,22 @@ function sanitizeFeedXml(xml) {
             const needsSelfClose = selfClose || VOID_ELEMENTS.test(tagName);
             return `<${tagName}${fixed}${needsSelfClose ? ' /' : ''}>`;
         });
+
+    // Cause #4 — genuinely CROSSED (overlapping) tags, e.g.
+    // <b>text<p>more</b></p>. This is distinct from the unclosed-void-
+    // element case above: these are real paired tags, just nested in an
+    // order browsers silently auto-correct but XML never tolerates —
+    // extremely common when article text is copy-pasted from Word/
+    // Google Docs into WordPress/Joomla. A regex substitution can't fix
+    // this (it requires tracking actual nesting), so repairCrossedTags()
+    // below walks the tag stream with a stack and, whenever a closing
+    // tag doesn't match what's currently open, closes everything down
+    // to its real match instead (dropping it entirely if no match is
+    // open at all). This doesn't preserve the original's visual nesting
+    // — but nothing downstream needs that: descriptions are stripped to
+    // plain text via stripHtml() right after parsing, so "parses
+    // successfully" is the only bar this needs to clear.
+    out = repairCrossedTags(out);
 
     return out;
 }
