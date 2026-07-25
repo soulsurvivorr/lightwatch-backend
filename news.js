@@ -49,18 +49,54 @@ const rssParser = new Parser({
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0; +https://lightwatch-backend.onrender.com)' }
 });
 
-// A handful of these feeds ship genuinely malformed XML — most
-// commonly a raw "&" in a headline that was never escaped to
-// "&amp;", which makes strict XML parsers (rss-parser included)
-// bail out entirely with something like "Invalid character in
-// entity name". Rather than lose the whole feed over one bad
-// headline, fetch the raw text ourselves and repair stray
-// ampersands before handing it to the parser. This only touches
-// "&" that ISN'T already part of a valid entity (&amp; &lt; &gt;
-// &quot; &apos; or a numeric &#123; / &#x1F;) — so already-correct
-// escaping is left alone.
+// A handful of these feeds ship genuinely malformed XML. Two recurring
+// causes, both from Ghanaian outlets running WordPress/Joomla feed
+// generators that were clearly built against HTML tolerance, not strict
+// XML:
+//   1. Common named HTML entities (&mdash; &nbsp; &rsquo; etc.) — valid
+//      in HTML, but NOT among XML's five predefined entities, so a
+//      strict parser errors out exactly like it would on a raw "&".
+//   2. Bare/valueless HTML attributes leaking into the feed (e.g.
+//      <img ... allowfullscreen>) — valid HTML, invalid XML, and shows
+//      up as "Attribute without value".
+// Rather than lose the whole feed over one bad headline or embedded
+// snippet, fetch the raw text ourselves and repair both before handing
+// it to the parser.
+const HTML_ENTITY_MAP = {
+    nbsp: '\u00A0', mdash: '\u2014', ndash: '\u2013', hellip: '\u2026',
+    lsquo: '\u2018', rsquo: '\u2019', ldquo: '\u201C', rdquo: '\u201D',
+    copy: '\u00A9', reg: '\u00AE', trade: '\u2122', deg: '\u00B0',
+    eacute: '\u00E9', egrave: '\u00E8', agrave: '\u00E0', ccedil: '\u00E7'
+};
+
 function sanitizeFeedXml(xml) {
-    return String(xml || '').replace(/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;');
+    let out = String(xml || '');
+
+    // Decode recognized HTML named entities to real characters. Anything
+    // NOT in the map (unknown/rare entity) falls through to the generic
+    // ampersand escape below, same as a truly raw "&".
+    out = out.replace(/&([a-zA-Z][a-zA-Z0-9]{1,10});/g, (m, name) => {
+        const lower = name.toLowerCase();
+        if (['amp', 'lt', 'gt', 'quot', 'apos'].includes(lower)) return m; // already XML-valid, leave alone
+        return HTML_ENTITY_MAP[lower] !== undefined ? HTML_ENTITY_MAP[lower] : m;
+    });
+
+    // Escape any "&" that still isn't part of a valid XML entity
+    // (numeric entities and the 5 XML-predefined ones are left alone).
+    out = out.replace(/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;');
+
+    // Repair bare/valueless attributes inside tags — e.g. <img ...
+    // allowfullscreen> — by giving them an empty value. Only touches
+    // attribute POSITIONS within a tag; well-formed name="value" pairs
+    // (the vast majority) are matched but left untouched by the lookahead.
+    out = out.replace(/<([a-zA-Z][\w:-]*)((?:\s+[a-zA-Z_:][\w:.-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'))?)*)\s*(\/?)\s*>/g,
+        (match, tagName, attrs, selfClose) => {
+            if (!attrs) return match;
+            const fixed = attrs.replace(/(\s+)([a-zA-Z_:][\w:.-]*)(?!\s*=)(?=\s|$)/g, '$1$2=""');
+            return `<${tagName}${fixed}${selfClose ? ' /' : ''}>`;
+        });
+
+    return out;
 }
 
 // ---- Sources ------------------------------------------------
@@ -71,13 +107,29 @@ function sanitizeFeedXml(xml) {
 // fetchRssSource() just logs and skips it rather than crashing
 // the whole cycle, so one dead feed never takes the others down.
 const NEWS_SOURCES = [
+    // Was: scraping https://ecg.com.gh/index.php/en/media-centre/news-events
+    // directly. That path sits behind a bot-check (confirmed: Render's
+    // requests get a 210-byte "sgcaptcha" redirect stub instead of the
+    // real page — an IP-level block, not a selector/markup problem, so
+    // no amount of scraper tweaking will fix it). ECG separately runs a
+    // WordPress blog at ecg.com.gh/blog/ (different software stack, not
+    // behind the same gate) with the same press releases — using its
+    // standard WordPress RSS feed instead. If this ever comes back
+    // empty, check the URL still resolves before assuming it's blocked
+    // too.
     {
         name: 'ECG',
         icon: '⚡',
         official: true,
-        type: 'scrape-ecg',
-        url: 'https://ecg.com.gh/index.php/en/media-centre/news-events'
+        type: 'rss',
+        url: 'https://ecg.com.gh/blog/feed/'
     },
+    // NOTE: this has been seen returning both a 403 and (on other runs) a
+    // malformed-XML parse error — inconsistent behavior consistent with
+    // bot-detection (e.g. Cloudflare) that sometimes challenges Render's
+    // requests and sometimes lets a mangled response through. If it never
+    // recovers, it likely can't be fixed from this hosting IP without a
+    // proxy/rotating-IP service — may be worth dropping if it stays dead.
     { name: 'Citi News',      icon: '📰', official: false, type: 'rss', url: 'https://citinewsroom.com/feed/' },
     { name: 'MyJoyOnline',    icon: '📰', official: false, type: 'rss', url: 'https://www.myjoyonline.com/feed/' },
     // Was 'https://www.graphic.com.gh/feed' — 404s now. Graphic's Joomla
