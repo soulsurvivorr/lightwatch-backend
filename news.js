@@ -229,11 +229,21 @@ const NEWS_SOURCES = [
 ];
 
 // ---- Relevance keyword allowlist -----------------------------
+// NOTE: no bare 'feeder' entry. Confirmed real false positive: a
+// Parliament road-funding story about "feeder roads" (a standard term
+// for rural access roads in Ghana, nothing to do with electricity)
+// matched the allowlist purely because of that word. Unlike the
+// 'purc'/"purchase" bug, word-boundary matching can't fix this one —
+// "feeder" really is a standalone word in both the electrical sense
+// ("11kV feeder") and the roads sense ("feeder roads"), so it's a
+// genuine homonym, not a substring artifact. 'feeder fault' (the
+// actual recurring ECG-outage phrasing) stays, since that compound
+// phrase doesn't collide with the roads usage.
 const NEWS_KEYWORDS = [
     'ecg', 'electricity company of ghana', 'gridco', 'ghana grid company',
     'power outage', 'power cut', 'blackout', 'load shedding', 'dumsor',
     'electricity tariff', 'tariff hike', 'transformer', 'feeder fault',
-    'feeder', 'substation', 'power restoration', 'power supply',
+    'substation', 'power restoration', 'power supply',
     'electricity supply', 'planned maintenance', 'network maintenance',
     'prepaid meter', 'purc', 'national grid', 'power interruption',
     'electricity bill', 'energy commission', 'power crisis', 'electricity',
