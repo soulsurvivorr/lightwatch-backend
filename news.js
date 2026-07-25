@@ -49,8 +49,8 @@ const rssParser = new Parser({
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0; +https://lightwatch-backend.onrender.com)' }
 });
 
-// A handful of these feeds ship genuinely malformed XML. Three recurring
-// causes, all from Ghanaian outlets running WordPress/Joomla feed
+// A handful of these feeds ship genuinely malformed XML. Two recurring
+// causes, both from Ghanaian outlets running WordPress/Joomla feed
 // generators that were clearly built against HTML tolerance, not strict
 // XML:
 //   1. Common named HTML entities (&mdash; &nbsp; &rsquo; etc.) — valid
@@ -59,26 +59,9 @@ const rssParser = new Parser({
 //   2. Bare/valueless HTML attributes leaking into the feed (e.g.
 //      <img ... allowfullscreen>) — valid HTML, invalid XML, and shows
 //      up as "Attribute without value".
-//   3. Unclosed HTML "void" elements (<br>, <img ...>, <hr> etc. with
-//      no trailing "/") embedded in a <description>/<content:encoded>
-//      body. XML has no concept of an element that never needs a
-//      closing tag, so a strict parser treats the next real closing
-//      tag it hits (e.g. the </p> after a stray <br>) as unmatched —
-//      exactly the "Unexpected close tag" errors ECG and GhanaWeb throw.
-//      Self-closing every void element (<br /> instead of <br>) before
-//      parsing fixes this without touching genuinely paired tags.
 // Rather than lose the whole feed over one bad headline or embedded
-// snippet, fetch the raw text ourselves and repair all three before
-// handing it to the parser.
-// NOTE: "link" and "source" are HTML void elements but are deliberately
-// left OFF this list — RSS/Atom itself uses <link>...</link> and
-// <source url="...">...</source> as ordinary elements with real text
-// content, so self-closing a bare <link> or <source> at the feed's own
-// structural level would corrupt the feed (turns its real closing tag
-// into an "unexpected close tag" itself). The elements below don't
-// collide with any RSS/Atom vocabulary, so they're safe to always
-// self-close wherever they show up, structural or embedded-HTML.
-const VOID_ELEMENTS = /^(area|base|br|col|embed|hr|img|input|meta|param|track|wbr)$/i;
+// snippet, fetch the raw text ourselves and repair both before handing
+// it to the parser.
 const HTML_ENTITY_MAP = {
     nbsp: '\u00A0', mdash: '\u2014', ndash: '\u2013', hellip: '\u2026',
     lsquo: '\u2018', rsquo: '\u2019', ldquo: '\u201C', rdquo: '\u201D',
@@ -106,17 +89,11 @@ function sanitizeFeedXml(xml) {
     // allowfullscreen> — by giving them an empty value. Only touches
     // attribute POSITIONS within a tag; well-formed name="value" pairs
     // (the vast majority) are matched but left untouched by the lookahead.
-    // Same pass also self-closes unclosed void elements (cause #3 above):
-    // any <br|img|hr|...> tag that isn't already self-closed gets a
-    // trailing "/" added. Only matches opening tags (the tagName capture
-    // requires a letter right after "<", so "</p>" etc. are never
-    // touched) and only ever adds a slash for tags on the void list —
-    // ordinary paired elements (<p>, <div>, ...) are left exactly as-is.
     out = out.replace(/<([a-zA-Z][\w:-]*)((?:\s+[a-zA-Z_:][\w:.-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'))?)*)\s*(\/?)\s*>/g,
         (match, tagName, attrs, selfClose) => {
-            const fixed = attrs ? attrs.replace(/(\s+)([a-zA-Z_:][\w:.-]*)(?!\s*=)(?=\s|$)/g, '$1$2=""') : '';
-            const needsSelfClose = selfClose || VOID_ELEMENTS.test(tagName);
-            return `<${tagName}${fixed}${needsSelfClose ? ' /' : ''}>`;
+            if (!attrs) return match;
+            const fixed = attrs.replace(/(\s+)([a-zA-Z_:][\w:.-]*)(?!\s*=)(?=\s|$)/g, '$1$2=""');
+            return `<${tagName}${fixed}${selfClose ? ' /' : ''}>`;
         });
 
     return out;
