@@ -1560,6 +1560,12 @@ app.get('/reports', async (req, res) => {
         query.userId = req.query.userId;
     }
 
+    // Opt-in only (?includeCommunity=1) — the Reports page passes this;
+    // other existing callers (e.g. home.js's compact recentReportsList)
+    // don't, and keep getting exactly the LightStatusEvent-only feed
+    // they always have.
+    const includeCommunity = ['1', 'true'].includes(String(req.query.includeCommunity || '').toLowerCase());
+
     try {
         const events = await LightStatusEvent.find(query).sort({ reportedAt: -1 }).limit(limit).lean();
 
@@ -1588,7 +1594,92 @@ app.get('/reports', async (req, res) => {
             };
         });
 
-        return res.json(reports);
+        // ── Community-report additions ──────────────────────────────
+        // Two kinds of chat activity belong in a user's report feed
+        // alongside their light-status events:
+        //   1. Other people's local-scope messages posted in the user's
+        //      OWN location (fuzzy-matched the same way GET /chats
+        //      matches a room), and
+        //   2. Replies — from anyone, in any room — to a message THIS
+        //      user posted, since a reply is relevant to them regardless
+        //      of which location it happened in.
+        // Both require userId (there's no "user's own location/messages"
+        // without one), so this whole block is skipped if it's missing
+        // even when includeCommunity=1 was passed.
+        let communityItems = [];
+        if (includeCommunity && req.query.userId) {
+            const requestingUserId = req.query.userId;
+            const normalizedLocation = req.query.location ? normalizeLocation(req.query.location) : null;
+
+            const [candidateLocationChats, ownChats] = await Promise.all([
+                normalizedLocation
+                    ? Chat.find({ scope: 'local' }).sort({ createdAt: -1 }).limit(200).lean()
+                    : Promise.resolve([]),
+                Chat.find({ userId: requestingUserId }).select('_id').lean()
+            ]);
+
+            const ownChatIdSet = new Set(ownChats.map(c => String(c._id)));
+
+            const matchedLocationChats = normalizedLocation
+                ? candidateLocationChats
+                    .filter(chat => {
+                        if (String(chat.userId) === String(requestingUserId)) return false;
+                        const chatLoc = normalizeLocation(chat.location || chat.locationKey || '');
+                        return locationsFuzzyMatch(chatLoc, normalizedLocation);
+                    })
+                    .slice(0, limit)
+                : [];
+
+            const replyChats = ownChatIdSet.size
+                ? await Chat.find({
+                    'replyTo.chatId': { $in: [...ownChatIdSet] },
+                    userId: { $ne: requestingUserId }
+                }).sort({ createdAt: -1 }).limit(limit).lean()
+                : [];
+
+            const usedChatIds = new Set();
+            const locationItems = matchedLocationChats.map(chat => {
+                usedChatIds.add(String(chat._id));
+                const locName = titleCaseLocation(normalizeLocation(chat.location || chat.locationKey || 'unknown'));
+                return {
+                    id: `chat-${chat._id}`,
+                    location: locName,
+                    title: `New message in ${locName}`,
+                    text: `${chat.handle}: ${chat.text}`.slice(0, 220),
+                    reportedAt: chat.createdAt,
+                    type: 'chat',
+                    chatId: String(chat._id),
+                    chatScope: chat.scope || 'local',
+                    chatLocation: chat.location
+                };
+            });
+
+            // A message can be both "in the user's location" AND "a reply
+            // to them" — don't show it twice; the reply framing wins since
+            // it's the more specific/relevant one.
+            const replyItems = replyChats
+                .filter(chat => !usedChatIds.has(String(chat._id)))
+                .map(chat => ({
+                    id: `reply-${chat._id}`,
+                    location: titleCaseLocation(normalizeLocation(chat.location || chat.locationKey || 'unknown')),
+                    title: `${chat.handle} replied to your message`,
+                    text: chat.text.slice(0, 220),
+                    reportedAt: chat.createdAt,
+                    type: 'reply',
+                    chatId: String(chat._id),
+                    chatScope: chat.scope || 'local',
+                    chatLocation: chat.location,
+                    replyToChatId: chat.replyTo?.chatId || null
+                }));
+
+            communityItems = [...locationItems, ...replyItems];
+        }
+
+        const merged = [...reports, ...communityItems]
+            .sort((a, b) => new Date(b.reportedAt) - new Date(a.reportedAt))
+            .slice(0, limit);
+
+        return res.json(merged);
     } catch (err) {
         console.error('Reports fetch error:', err.message);
         return res.status(500).json({ error: 'Server error fetching reports' });

@@ -332,6 +332,32 @@ function detectCategory(text) {
     return 'general';
 }
 
+// ---- Nationwide-outage detection -----------------------------
+// A handful of phrasings a genuinely country-wide advisory would use —
+// distinct from findMentionedLocations() below, which only matches
+// SPECIFIC place names. A story with zero specific-location hits still
+// deserves to reach every user if it reads as nationwide (e.g. a GRIDCo
+// national-grid fault, or ECG announcing countrywide load management) —
+// this is what lets that case surface, since an empty mentionedLocations
+// array on its own would otherwise mean the article notifies no one.
+// Restricted to the outage/restoration/maintenance categories — a
+// nationwide TARIFF story doesn't belong in an "is the light off"
+// notification, no matter how broad its reach.
+const NATIONWIDE_KEYWORDS = [
+    'nationwide', 'countrywide', 'country-wide', 'across the country',
+    'national grid', 'all regions', 'entire country', 'all 16 regions',
+    'across ghana', 'throughout the country'
+];
+const NATIONWIDE_REGEX = new RegExp(
+    '\\b(' + NATIONWIDE_KEYWORDS.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')\\b',
+    'i'
+);
+
+function isNationwideArticle(text, category) {
+    if (!['outage', 'restoration', 'maintenance'].includes(category)) return false;
+    return NATIONWIDE_REGEX.test(text);
+}
+
 // Cheap normalized-title key for cross-source duplicate detection —
 // lowercase, strip punctuation, collapse whitespace, keep the first
 // ~12 significant words (enough to catch "ECG explains outage in
@@ -396,7 +422,14 @@ module.exports = function initNewsSystem(app, deps) {
         // Which of those locations have already had a push sent for this
         // article — guards against double-notifying if the article gets
         // touched again by a later fetch cycle for any reason.
-        notifiedLocations:  { type: [String], default: [] }
+        notifiedLocations:  { type: [String], default: [] },
+        // A story that reads as country-wide (see isNationwideArticle()
+        // above) rather than tied to specific place names — e.g. a
+        // national-grid fault or a countrywide load-management notice.
+        // These broadcast to every subscriber, not just ones watching a
+        // mentioned location, since by definition there isn't one.
+        isNationwide:       { type: Boolean, default: false },
+        notifiedNationwide: { type: Boolean, default: false }
     });
     newsArticleSchema.index({ publishedAt: -1 });
     newsArticleSchema.index({ isOfficial: -1, publishedAt: -1 });
@@ -467,6 +500,37 @@ module.exports = function initNewsSystem(app, deps) {
         }
     }
 
+    // A nationwide story has no specific location to key off of, so —
+    // unlike notifyLocationMentions() above — this goes to EVERY current
+    // subscriber, the same way a global-scope chat message does.
+    // notifiedNationwide guards this the same way notifiedLocations
+    // guards the per-location push: skip if a later fetch cycle somehow
+    // touches this article again.
+    async function notifyNationwideOutage(article) {
+        try {
+            const subscribers = await PushSubscription.find({});
+            if (!subscribers.length) return;
+
+            const payload = {
+                title: 'LightWatch News — Nationwide',
+                body: article.title,
+                url: '/pages/chat.html',
+                tag: `news-nationwide-${article._id}`,
+                requireInteraction: false,
+                vibrate: [200, 90, 200, 90, 200],
+                image: article.imageUrl || undefined,
+                tone: 'chat'
+            };
+
+            console.log(`[news] Notifying ${subscribers.length} subscriber(s) nationwide — "${article.title}"`);
+            await sendPushToSubscribers(subscribers, payload);
+
+            await NewsArticle.updateOne({ _id: article._id }, { notifiedNationwide: true });
+        } catch (err) {
+            console.error('[news] Nationwide push error:', err.message);
+        }
+    }
+
     // ---- Store (with relevance filter + dedupe) ----------------
     async function storeArticle(raw, source) {
         const title = String(raw.title || '').trim();
@@ -504,6 +568,8 @@ module.exports = function initNewsSystem(app, deps) {
 
         const knownKeys = await getKnownLocationKeys();
         const mentionedLocations = findMentionedLocations(combinedText, knownKeys);
+        const category = detectCategory(combinedText);
+        const nationwide = isNationwideArticle(combinedText, category);
 
         let doc;
         try {
@@ -514,11 +580,12 @@ module.exports = function initNewsSystem(app, deps) {
                 sourceName: source.name,
                 sourceIcon: source.icon,
                 isOfficial: !!source.official,
-                category: detectCategory(combinedText),
+                category,
                 articleUrl,
                 dedupeKey,
                 publishedAt: raw.publishedAt instanceof Date && !isNaN(raw.publishedAt) ? raw.publishedAt : new Date(),
-                mentionedLocations
+                mentionedLocations,
+                isNationwide: nationwide
             });
         } catch (err) {
             // Unique-index race (two cycles overlapping, or the same URL
@@ -530,6 +597,9 @@ module.exports = function initNewsSystem(app, deps) {
         if (mentionedLocations.length) {
             // Don't block the fetch cycle waiting on push delivery.
             notifyLocationMentions(doc, mentionedLocations);
+        }
+        if (nationwide) {
+            notifyNationwideOutage(doc);
         }
 
         return doc;
@@ -687,17 +757,32 @@ module.exports = function initNewsSystem(app, deps) {
     // GET /news — latest articles, ECG's own announcements pinned first.
     app.get('/news', async (req, res) => {
         const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 100);
+        const includeNationwide = ['1', 'true'].includes(String(req.query.includeNationwide || '').toLowerCase());
 
-        const query = {};
-        if (req.query.category) query.category = req.query.category;
-        if (req.query.official === 'true') query.isOfficial = true;
-        if (req.query.location) {
-            query.mentionedLocations = normalizeLocation(req.query.location).split(',')[0].trim();
-        }
+        // Built as $and clauses rather than assigning directly onto one
+        // flat object, since the location+nationwide case needs an $or
+        // alongside whatever else is filtered — a plain object can only
+        // hold one key named "$or".
+        const andClauses = [];
+        if (req.query.category) andClauses.push({ category: req.query.category });
+        if (req.query.official === 'true') andClauses.push({ isOfficial: true });
         if (req.query.before) {
             const beforeDate = new Date(req.query.before);
-            if (!isNaN(beforeDate)) query.publishedAt = { $lt: beforeDate };
+            if (!isNaN(beforeDate)) andClauses.push({ publishedAt: { $lt: beforeDate } });
         }
+
+        if (req.query.location) {
+            const key = normalizeLocation(req.query.location).split(',')[0].trim();
+            andClauses.push(
+                includeNationwide
+                    ? { $or: [{ mentionedLocations: key }, { isNationwide: true }] }
+                    : { mentionedLocations: key }
+            );
+        } else if (includeNationwide) {
+            andClauses.push({ isNationwide: true });
+        }
+
+        const query = andClauses.length ? { $and: andClauses } : {};
 
         try {
             const articles = await NewsArticle.find(query)
@@ -716,7 +801,8 @@ module.exports = function initNewsSystem(app, deps) {
                 category: a.category,
                 publishedAt: a.publishedAt,
                 url: a.articleUrl,
-                locations: a.mentionedLocations
+                locations: a.mentionedLocations,
+                isNationwide: !!a.isNationwide
             })));
         } catch (err) {
             console.error('News fetch error:', err.message);
