@@ -970,25 +970,35 @@ app.get('/chats', async (req, res) => {
     const scope = (req.query.scope || 'local').toString().toLowerCase() === 'global' ? 'global' : 'local';
 
     try {
-        const allChats = await Chat.find().sort({ createdAt: -1 }).limit(500).lean();
+        // Was: Chat.find() (no filter) pulling up to 500 docs of BOTH
+        // scopes on every call, then filtering scope in JS. This is the
+        // single hottest polling route in the app (it's in
+        // NOISY_GET_ROUTES), so pushing the scope filter into the query
+        // lets it use the existing { scope: 1, createdAt: -1 } index and
+        // return only the docs the caller actually wants — same result,
+        // less data read from Mongo and sent over the wire every poll.
+        // scope === 'global' → exact match. scope === 'local' → { $ne: 'global' }
+        // rather than { scope: 'local' }, so this still matches legacy Chat
+        // docs saved before the `scope` field existed (undefined scope was
+        // always treated as local by the old `(chat.scope || 'local')`
+        // fallback) — same result set as before, just filtered in Mongo.
+        const scopeQuery = scope === 'global' ? { scope: 'global' } : { scope: { $ne: 'global' } };
+        const allChats = await Chat.find(scopeQuery).sort({ createdAt: -1 }).limit(500).lean();
 
         if (scope === 'global') {
-            const globalChats = allChats.filter(chat => (chat.scope || 'local') === 'global');
-            return res.json(globalChats);
+            return res.json(allChats);
         }
-
-        const localChats = allChats.filter(chat => (chat.scope || 'local') !== 'global');
 
         if (location) {
             const normalizedLocation = normalizeLocation(location);
-            const filtered = localChats.filter(chat => {
+            const filtered = allChats.filter(chat => {
                 const chatLoc = normalizeLocation(chat.location || chat.locationKey || '');
                 return locationsFuzzyMatch(chatLoc, normalizedLocation);
             });
             return res.json(filtered);
         }
 
-        return res.json(localChats);
+        return res.json(allChats);
     } catch (err) {
         console.error("Get chats error:", err.message);
         return res.status(500).json({ error: "Server error fetching chats" });
@@ -1038,90 +1048,105 @@ app.post('/chats', async (req, res) => {
         const chatObj = saved.toObject();
         chatObj.userId = chatObj.userId.toString();
         console.log('Chat saved:', { id: chatObj._id.toString(), handle: chatObj.handle, location: chatObj.location });
-        const key = normalizeLocation(saved.location).split(',')[0].trim();
-        const isGlobalChat = normalizedScope === 'global';
-        const audienceTitle = isGlobalChat ? 'Everyone' : titleCaseLocation(key);
-        // Neither of these depends on the other's result — fetch both at
-        // the same time instead of sequentially.
-        const [replyTargetChat, subscribers] = await Promise.all([
-            replyTo?.chatId
-                ? Chat.findById(replyTo.chatId).select('userId handle text').lean()
-                : Promise.resolve(null),
-            isGlobalChat
-                ? PushSubscription.find({}).select('userId subscription fcmToken platform chatMentionsEnabled muteGlobalChat').lean()
-                : PushSubscription.find({ location: key }).select('userId subscription fcmToken platform chatMentionsEnabled muteGlobalChat').lean()
-        ]);
-        console.log(`Sending chat push to ${subscribers.length} subscriber(s) at ${audienceTitle}`);
 
-        const recipientUserIds = [...new Set(
-            subscribers
-                .map(sub => sub.userId ? String(sub.userId) : '')
-                .filter(Boolean)
-        )];
-        const recipientUsers = recipientUserIds.length
-            ? await User.find({ _id: { $in: recipientUserIds } }).select('chatHandle').lean()
-            : [];
-        const handleByUserId = new Map(recipientUsers.map(u => [String(u._id), (u.chatHandle || '').toLowerCase()]));
+        // Respond to the client the moment the chat is durably saved.
+        // Everything below (who to notify, whether it's a reply/mention,
+        // sending the actual pushes) is not needed to answer this request
+        // and previously ran BEFORE res.json — meaning every chat send
+        // waited on a PushSubscription.find() (+ a User.find() for
+        // @mention detection) even though the caller never sees that
+        // data. It's moved into a fire-and-forget function below so the
+        // response no longer waits on it. Errors are caught internally
+        // since there's no request left to report them to.
+        res.status(201).json(chatObj);
 
-        const pushPromises = subscribers.map(async sub => {
-            if (sub.userId && String(sub.userId) === String(userId)) {
-                return;
-            }
+        (async () => {
+            const key = normalizeLocation(saved.location).split(',')[0].trim();
+            const isGlobalChat = normalizedScope === 'global';
+            const audienceTitle = isGlobalChat ? 'Everyone' : titleCaseLocation(key);
+            // Neither of these depends on the other's result — fetch both at
+            // the same time instead of sequentially.
+            const [replyTargetChat, subscribers] = await Promise.all([
+                replyTo?.chatId
+                    ? Chat.findById(replyTo.chatId).select('userId handle text').lean()
+                    : Promise.resolve(null),
+                isGlobalChat
+                    ? PushSubscription.find({}).select('userId subscription fcmToken platform chatMentionsEnabled muteGlobalChat').lean()
+                    : PushSubscription.find({ location: key }).select('userId subscription fcmToken platform chatMentionsEnabled muteGlobalChat').lean()
+            ]);
+            console.log(`Sending chat push to ${subscribers.length} subscriber(s) at ${audienceTitle}`);
 
-            const isReplyForThisUser = Boolean(
-                replyTargetChat?.userId && sub.userId &&
-                String(replyTargetChat.userId) === String(sub.userId)
-            );
+            const recipientUserIds = [...new Set(
+                subscribers
+                    .map(sub => sub.userId ? String(sub.userId) : '')
+                    .filter(Boolean)
+            )];
+            const recipientUsers = recipientUserIds.length
+                ? await User.find({ _id: { $in: recipientUserIds } }).select('chatHandle').lean()
+                : [];
+            const handleByUserId = new Map(recipientUsers.map(u => [String(u._id), (u.chatHandle || '').toLowerCase()]));
 
-            const recipientUserId = sub.userId ? String(sub.userId) : '';
-            const recipientHandle = handleByUserId.get(recipientUserId) || '';
-            const isMentionForThisUser = Boolean(
-                recipientHandle &&
-                new RegExp(`(^|\\W)@?${escapeRegex(recipientHandle)}(?=$|\\W)`, 'i').test(saved.text || '')
-            );
-
-            const isPriorityMention = isReplyForThisUser || isMentionForThisUser;
-            const mentionsEnabled = sub.chatMentionsEnabled !== false;
-            const mutedGlobalChat = sub.muteGlobalChat === true;
-
-            if (isGlobalChat) {
-                if (isPriorityMention) {
-                    if (!mentionsEnabled) return;
-                } else if (mutedGlobalChat) {
+            const pushPromises = subscribers.map(async sub => {
+                if (sub.userId && String(sub.userId) === String(userId)) {
                     return;
                 }
-            }
 
-            const deepLinkParams = new URLSearchParams({
-                chatId: String(saved._id),
-                chatScope: normalizedScope,
-                chatLocation: savedLocation
+                const isReplyForThisUser = Boolean(
+                    replyTargetChat?.userId && sub.userId &&
+                    String(replyTargetChat.userId) === String(sub.userId)
+                );
+
+                const recipientUserId = sub.userId ? String(sub.userId) : '';
+                const recipientHandle = handleByUserId.get(recipientUserId) || '';
+                const isMentionForThisUser = Boolean(
+                    recipientHandle &&
+                    new RegExp(`(^|\\W)@?${escapeRegex(recipientHandle)}(?=$|\\W)`, 'i').test(saved.text || '')
+                );
+
+                const isPriorityMention = isReplyForThisUser || isMentionForThisUser;
+                const mentionsEnabled = sub.chatMentionsEnabled !== false;
+                const mutedGlobalChat = sub.muteGlobalChat === true;
+
+                if (isGlobalChat) {
+                    if (isPriorityMention) {
+                        if (!mentionsEnabled) return;
+                    } else if (mutedGlobalChat) {
+                        return;
+                    }
+                }
+
+                const deepLinkParams = new URLSearchParams({
+                    chatId: String(saved._id),
+                    chatScope: normalizedScope,
+                    chatLocation: savedLocation
+                });
+                if (replyTo?.chatId) {
+                    deepLinkParams.set('replyToChatId', String(replyTo.chatId));
+                }
+
+                const payload = {
+                    title: isPriorityMention
+                        ? `Reply in ${audienceTitle}`
+                        : `LightWatch chat — ${audienceTitle}`,
+                    body: isPriorityMention
+                        ? `${saved.handle} replied to your message: ${saved.text}`
+                        : `${saved.handle}: ${saved.text}`,
+                    url: `/chat?${deepLinkParams.toString()}`,
+                    tag: isPriorityMention ? 'chat-reply' : 'chat-message',
+                    requireInteraction: true,
+                    vibrate: isPriorityMention ? [280, 120, 280] : [240, 120, 240],
+                    chatScope: normalizedScope,
+                    isReply: isReplyForThisUser,
+                    isMention: isMentionForThisUser,
+                    tone: 'chat'
+                };
+
+                await sendPushToOne(sub, payload);
             });
-            if (replyTo?.chatId) {
-                deepLinkParams.set('replyToChatId', String(replyTo.chatId));
-            }
-
-            const payload = {
-                title: isPriorityMention
-                    ? `Reply in ${audienceTitle}`
-                    : `LightWatch chat — ${audienceTitle}`,
-                body: isPriorityMention
-                    ? `${saved.handle} replied to your message: ${saved.text}`
-                    : `${saved.handle}: ${saved.text}`,
-                url: `/chat?${deepLinkParams.toString()}`,
-                tag: isPriorityMention ? 'chat-reply' : 'chat-message',
-                requireInteraction: true,
-                vibrate: isPriorityMention ? [280, 120, 280] : [240, 120, 240],
-                chatScope: normalizedScope,
-                isReply: isReplyForThisUser,
-                isMention: isMentionForThisUser,
-                tone: 'chat'
-            };
-
-            await sendPushToOne(sub, payload);
+            await Promise.allSettled(pushPromises);
+        })().catch(err => {
+            console.error('Post-chat notification error:', err.message);
         });
-        Promise.allSettled(pushPromises);
-        return res.status(201).json(chatObj);
     } catch (err) {
         console.error("Post chat error:", err.message);
         return res.status(500).json({ error: "Server error saving chat" });
@@ -1975,46 +2000,58 @@ async function applyLightStatusUpdate(rawLocation, status, { userId = null, repo
     console.log(`Light status updated: ${key} => ${status} (by ${reportedBy})`);
 
     // ── Send push notifications to all subscribers at this location ──
+    // Was: both PushSubscription.find() calls below were awaited before
+    // this function returned, so POST /lightstatus (and the admin
+    // equivalent) sat waiting on those lookups even though `record` was
+    // already final and ready to send back. sendPushToSubscribers()
+    // itself was already fire-and-forget (not awaited) — only the
+    // subscriber lookups were on the blocking path. Wrapped in an
+    // un-awaited async IIFE so the caller gets `record` back immediately
+    // and the lookups + pushes happen after.
     const emoji = status === 'on' ? '💡' : '🌑';
-    const payload = {
-        title: `LightWatch — ${keyTitle}`,
-        body: `${emoji} Light is now ${status.toUpperCase()} in ${keyTitle}.`,
-        url: '/pages/home.html',
-        tag: 'light-status',
-        requireInteraction: status === 'off',
-        vibrate: status === 'off' ? [300, 120, 300, 120, 300] : [180, 90, 180],
-        status,
-        tone: status === 'on' ? 'power-on' : 'power-off'
-    };
+    (async () => {
+        try {
+            const payload = {
+                title: `LightWatch — ${keyTitle}`,
+                body: `${emoji} Light is now ${status.toUpperCase()} in ${keyTitle}.`,
+                url: '/pages/home.html',
+                tag: 'light-status',
+                requireInteraction: status === 'off',
+                vibrate: status === 'off' ? [300, 120, 300, 120, 300] : [180, 90, 180],
+                status,
+                tone: status === 'on' ? 'power-on' : 'power-off'
+            };
 
-    const subscribers = await PushSubscription.find({ location: key }).lean();
-    console.log(`Sending push to ${subscribers.length} subscriber(s) at ${key}`);
+            const subscribers = await PushSubscription.find({ location: key }).lean();
+            console.log(`Sending push to ${subscribers.length} subscriber(s) at ${key}`);
+            sendPushToSubscribers(subscribers, payload);
 
-    // Don't block the response waiting for pushes
-    sendPushToSubscribers(subscribers, payload);
+            // ── Send push to anyone watching this as a SECOND location ──
+            // Only on a genuine change, and to a completely separate
+            // subscriber set (secondaryLocationKey, not location) so someone
+            // watching Bantama as their primary and Adum as their second gets
+            // exactly one push per real event, worded appropriately for each.
+            if (statusChanged) {
+                const secondaryPayload = {
+                    title: `Second location — ${keyTitle}`,
+                    body: `${emoji} ${keyTitle} just changed to ${status.toUpperCase()}.`,
+                    url: '/pages/home.html',
+                    tag: 'secondary-light-status',
+                    requireInteraction: status === 'off',
+                    vibrate: status === 'off' ? [300, 120, 300, 120, 300] : [180, 90, 180],
+                    status,
+                    tone: status === 'on' ? 'power-on' : 'power-off'
+                };
 
-    // ── Send push to anyone watching this as a SECOND location ──
-    // Only on a genuine change, and to a completely separate
-    // subscriber set (secondaryLocationKey, not location) so someone
-    // watching Bantama as their primary and Adum as their second gets
-    // exactly one push per real event, worded appropriately for each.
-    if (statusChanged) {
-        const secondaryPayload = {
-            title: `Second location — ${keyTitle}`,
-            body: `${emoji} ${keyTitle} just changed to ${status.toUpperCase()}.`,
-            url: '/pages/home.html',
-            tag: 'secondary-light-status',
-            requireInteraction: status === 'off',
-            vibrate: status === 'off' ? [300, 120, 300, 120, 300] : [180, 90, 180],
-            status,
-            tone: status === 'on' ? 'power-on' : 'power-off'
-        };
+                const secondarySubscribers = await PushSubscription.find({ secondaryLocationKey: key }).lean();
+                console.log(`Sending secondary-location push to ${secondarySubscribers.length} subscriber(s) watching ${key}`);
 
-        const secondarySubscribers = await PushSubscription.find({ secondaryLocationKey: key }).lean();
-        console.log(`Sending secondary-location push to ${secondarySubscribers.length} subscriber(s) watching ${key}`);
-
-        sendPushToSubscribers(secondarySubscribers, secondaryPayload);
-    }
+                sendPushToSubscribers(secondarySubscribers, secondaryPayload);
+            }
+        } catch (err) {
+            console.error('Light-status notification error:', err.message);
+        }
+    })();
 
     return { record, key, keyTitle, statusChanged };
 }
@@ -2369,6 +2406,18 @@ function startServer(port) {
     const server = app.listen(port, () => {
         console.log(`Server running on port ${port}`);
     });
+
+    // Render's own front-end proxy keeps idle keep-alive connections open
+    // longer than Node's default (server.keepAliveTimeout defaults to 5s).
+    // When the proxy's idle timeout is longer than Node's, the proxy can
+    // reuse a socket in the small window after Node has already decided to
+    // close it, which the client experiences as an occasional slow/reset
+    // request. Raising keepAliveTimeout past a typical proxy idle timeout
+    // avoids that race. headersTimeout must stay a few seconds above
+    // keepAliveTimeout (Node enforces this) so a slow client can still be
+    // cut off. Purely a socket-handling change — no route behavior differs.
+    server.keepAliveTimeout = Number(process.env.KEEP_ALIVE_TIMEOUT_MS) || 65000;
+    server.headersTimeout = server.keepAliveTimeout + 5000;
 
     server.on('error', (err) => {
         if (err.code === 'EADDRINUSE') {

@@ -440,6 +440,12 @@ module.exports = function initNewsSystem(app, deps) {
     newsArticleSchema.index({ publishedAt: -1 });
     newsArticleSchema.index({ isOfficial: -1, publishedAt: -1 });
     newsArticleSchema.index({ dedupeKey: 1, publishedAt: -1 });
+    // GET /news with ?location= filters on mentionedLocations and sorts by
+    // { isOfficial: -1, publishedAt: -1 }. The old single-field
+    // mentionedLocations index below can serve the filter but Mongo still
+    // has to sort the matched set in memory. This compound index lets that
+    // same query use one index for both the filter and the sort.
+    newsArticleSchema.index({ mentionedLocations: 1, isOfficial: -1, publishedAt: -1 });
     newsArticleSchema.index({ mentionedLocations: 1 });
 
     const NewsArticle = mongoose.models.NewsArticle || mongoose.model('NewsArticle', newsArticleSchema);
@@ -774,6 +780,7 @@ module.exports = function initNewsSystem(app, deps) {
 
         stats.finishedAt = new Date();
         lastFetchStats = stats;
+        clearNewsCache();
         console.log('[news] Fetch cycle complete:', JSON.stringify(stats.sources));
     }
 
@@ -786,11 +793,39 @@ module.exports = function initNewsSystem(app, deps) {
     setTimeout(() => { runNewsFetchCycle().catch(err => console.error('[news] Initial fetch failed:', err.message)); }, 10000);
     setInterval(() => { runNewsFetchCycle().catch(err => console.error('[news] Scheduled fetch failed:', err.message)); }, NEWS_FETCH_INTERVAL_MS);
 
+    // ---- In-memory response cache ------------------------------------
+    // GET /news is read-only, called far more often than the data actually
+    // changes (articles only refresh once per NEWS_FETCH_INTERVAL_MS, ~20
+    // min by default), and every client hits it with one of a small set of
+    // query-param combinations (default feed, a specific location, a
+    // category). Caching each distinct query for a short TTL turns repeat
+    // requests into a memory lookup instead of a Mongo round trip, and the
+    // cache is cleared outright whenever a fetch cycle actually writes new
+    // articles — so it can never serve genuinely stale data for longer
+    // than one fetch cycle, and typically clears itself proactively.
+    // Process-local (fine on Render's single instance; would need a shared
+    // cache like Redis if this ever scales to multiple instances).
+    const NEWS_CACHE_TTL_MS = Number(process.env.NEWS_CACHE_TTL_MS) || 60 * 1000;
+    const newsResponseCache = new Map(); // cacheKey -> { expiresAt, body }
+
+    function clearNewsCache() {
+        newsResponseCache.clear();
+    }
+
     // ---- Routes -----------------------------------------------------
     // GET /news — latest articles, ECG's own announcements pinned first.
     app.get('/news', async (req, res) => {
         const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 100);
         const includeNationwide = ['1', 'true'].includes(String(req.query.includeNationwide || '').toLowerCase());
+
+        // Cache key is just the exact query string this caller sent —
+        // identical requests (by far the common case: same filters,
+        // repeated on a poll/refresh) hit the same key.
+        const cacheKey = req.originalUrl;
+        const cached = newsResponseCache.get(cacheKey);
+        if (cached && cached.expiresAt > Date.now()) {
+            return res.json(cached.body);
+        }
 
         // Built as $and clauses rather than assigning directly onto one
         // flat object, since the location+nationwide case needs an $or
@@ -823,7 +858,7 @@ module.exports = function initNewsSystem(app, deps) {
                 .limit(limit)
                 .lean();
 
-            return res.json(articles.map(a => ({
+            const body = articles.map(a => ({
                 id: a._id,
                 title: a.title,
                 summary: a.summary,
@@ -837,7 +872,10 @@ module.exports = function initNewsSystem(app, deps) {
                 locations: a.mentionedLocations,
                 isNationwide: !!a.isNationwide,
                 isAdminPosted: !!a.isAdminPosted
-            })));
+            }));
+
+            newsResponseCache.set(cacheKey, { expiresAt: Date.now() + NEWS_CACHE_TTL_MS, body });
+            return res.json(body);
         } catch (err) {
             console.error('News fetch error:', err.message);
             return res.status(500).json({ error: 'Server error fetching news' });
@@ -919,6 +957,8 @@ module.exports = function initNewsSystem(app, deps) {
                 return res.status(500).json({ error: 'Could not publish article' });
             }
 
+            clearNewsCache();
+
             return res.status(201).json({
                 id: result._id,
                 title: result.title,
@@ -953,6 +993,7 @@ module.exports = function initNewsSystem(app, deps) {
             } else {
                 await NewsArticle.deleteMany({});
             }
+            clearNewsCache();
             return res.json({ success: true });
         } catch (err) {
             console.error('Admin news clear error:', err.message);
