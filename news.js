@@ -479,7 +479,7 @@ module.exports = function initNewsSystem(app, deps) {
     async function notifyLocationMentions(article, locationKeys) {
         if (!locationKeys.length) return;
         try {
-            const subscribers = await PushSubscription.find({ location: { $in: locationKeys } });
+            const subscribers = await PushSubscription.find({ location: { $in: locationKeys } }).lean();
             if (!subscribers.length) return;
 
             const displayLocation = titleCaseLocation(locationKeys[0]);
@@ -514,7 +514,7 @@ module.exports = function initNewsSystem(app, deps) {
     // touches this article again.
     async function notifyNationwideOutage(article) {
         try {
-            const subscribers = await PushSubscription.find({});
+            const subscribers = await PushSubscription.find({}).lean();
             if (!subscribers.length) return;
 
             const payload = {
@@ -553,18 +553,23 @@ module.exports = function initNewsSystem(app, deps) {
 
         if (!opts.skipRelevanceFilter && !isRelevantArticle(combinedText)) return null;
 
-        // Exact-URL duplicate (this story, already stored).
-        const existing = await NewsArticle.findOne({ articleUrl }).select('_id').lean();
-        if (existing) return opts.throwOnDuplicate ? 'duplicate' : null;
-
-        // Cross-source near-duplicate (same story, different outlet)
-        // within the last 3 days.
         const dedupeKey = titleDedupeKey(title);
         const cutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
-        const nearDuplicate = await NewsArticle.findOne({
-            dedupeKey,
-            publishedAt: { $gte: cutoff }
-        }).select('_id isOfficial').lean();
+
+        // Exact-URL duplicate and cross-source near-duplicate are
+        // independent lookups — run them concurrently instead of one
+        // after another.
+        const [existing, nearDuplicate] = await Promise.all([
+            // Exact-URL duplicate (this story, already stored).
+            NewsArticle.findOne({ articleUrl }).select('_id').lean(),
+            // Cross-source near-duplicate (same story, different outlet)
+            // within the last 3 days.
+            NewsArticle.findOne({
+                dedupeKey,
+                publishedAt: { $gte: cutoff }
+            }).select('_id isOfficial').lean()
+        ]);
+        if (existing) return opts.throwOnDuplicate ? 'duplicate' : null;
 
         // If a non-official outlet already has this story but ECG's own
         // version just came in, prefer keeping ECG's — replace rather
@@ -579,7 +584,13 @@ module.exports = function initNewsSystem(app, deps) {
             }
         }
 
-        const knownKeys = await getKnownLocationKeys();
+        // getKnownLocationKeys() runs 3 distinct/aggregate-style queries.
+        // A fetch cycle can call storeArticle() for dozens of articles in
+        // a row, so runNewsFetchCycle() pre-fetches this once and passes
+        // it in via opts.knownKeys — falling back to a fresh fetch here
+        // only for one-off calls (e.g. the admin manual-publish route)
+        // that don't go through the cycle.
+        const knownKeys = opts.knownKeys || await getKnownLocationKeys();
         const mentionedLocations = findMentionedLocations(combinedText, knownKeys);
         const category = raw.category || detectCategory(combinedText);
         const nationwide = isNationwideArticle(combinedText, category);
@@ -620,7 +631,7 @@ module.exports = function initNewsSystem(app, deps) {
     }
 
     // ---- Fetchers -----------------------------------------------
-    async function fetchRssSource(source) {
+    async function fetchRssSource(source, knownKeys) {
         let items = [];
         try {
             // Fetch raw text ourselves (instead of rssParser.parseURL, which
@@ -651,7 +662,7 @@ module.exports = function initNewsSystem(app, deps) {
                 url: item.link,
                 imageUrl: extractImageFromRssItem(item),
                 publishedAt: item.isoDate ? new Date(item.isoDate) : new Date()
-            }, source);
+            }, source, { knownKeys });
             if (doc) stored++;
         }
 
@@ -666,7 +677,7 @@ module.exports = function initNewsSystem(app, deps) {
     // more likely to break a scraper than an RSS feed. The keyword
     // filter in storeArticle() means a stale/broken selector just
     // yields nothing useful rather than bad data reaching users.
-    async function scrapeEcgSite(source) {
+    async function scrapeEcgSite(source, knownKeys) {
         let html;
         try {
             const res = await fetch(source.url, {
@@ -729,7 +740,7 @@ module.exports = function initNewsSystem(app, deps) {
         for (const item of items) {
             if (seen.has(item.url)) continue;
             seen.add(item.url);
-            const doc = await storeArticle(item, source);
+            const doc = await storeArticle(item, source, { knownKeys });
             if (doc) stored++;
         }
 
@@ -746,10 +757,18 @@ module.exports = function initNewsSystem(app, deps) {
         console.log('[news] Fetch cycle starting...');
         const stats = { startedAt: new Date(), sources: {} };
 
+        // getKnownLocationKeys() used to be re-run inside storeArticle()
+        // for every single article — up to 25 per RSS source times
+        // however many sources, all hitting PushSubscription/User with
+        // 3 distinct() queries each. The location vocabulary barely
+        // changes over the few seconds a fetch cycle takes, so fetch it
+        // once here and hand it to every source/article in this cycle.
+        const knownKeys = await getKnownLocationKeys();
+
         for (const source of NEWS_SOURCES) {
             let result;
-            if (source.type === 'rss') result = await fetchRssSource(source);
-            else if (source.type === 'scrape-ecg') result = await scrapeEcgSite(source);
+            if (source.type === 'rss') result = await fetchRssSource(source, knownKeys);
+            else if (source.type === 'scrape-ecg') result = await scrapeEcgSite(source, knownKeys);
             stats.sources[source.name] = result || { fetched: 0, stored: 0 };
         }
 

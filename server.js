@@ -5,6 +5,7 @@ require('dotenv').config();
 const mongoose = require('mongoose');
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression');
 const jwt = require('jsonwebtoken');
 const webpush = require('web-push');
 const admin = require('firebase-admin');
@@ -96,9 +97,19 @@ try {
     console.log('Using MONGO_URI: (masked)');
 }
 
+// NOTE: this is the ONLY mongoose.connect() call in the app — Mongoose
+// manages a single pooled connection for the whole process from here,
+// and every model/query below reuses it automatically. There is no
+// per-request or per-route connect/disconnect anywhere in this file,
+// which is what you want on Render (opening a fresh connection per
+// request is one of the most common Express+Mongo performance bugs).
+// maxPoolSize/minPoolSize just tune how many sockets that single
+// connection is allowed to use concurrently under load.
 mongoose.connect(MONGO_URI, {
     serverSelectionTimeoutMS: 10000,
-    family: 4
+    family: 4,
+    maxPoolSize: Number(process.env.MONGO_MAX_POOL_SIZE) || 10,
+    minPoolSize: Number(process.env.MONGO_MIN_POOL_SIZE) || 1
 })
 .then(() => {
     console.log("MongoDB connected successfully");
@@ -111,8 +122,11 @@ mongoose.connection.on('error', (err) => {
     console.error("MongoDB runtime error:", err.message);
 });
 
-// Enable mongoose debug output to see queries and connection activity in server logs
-mongoose.set('debug', true);
+// Mongoose debug mode logs every single query — extremely useful while
+// developing, but real overhead (extra I/O + string formatting) on every
+// request in production. Only auto-enable it in development; set
+// MONGOOSE_DEBUG=true explicitly if you ever need it on Render too.
+mongoose.set('debug', process.env.MONGOOSE_DEBUG === 'true' || process.env.NODE_ENV === 'development');
 
 // SCHEMAS / MODELS
 const userSchema = new mongoose.Schema({
@@ -132,6 +146,12 @@ const userSchema = new mongoose.Schema({
     },
     createdAt: { type: Date, default: Date.now }
 });
+// emailPhone already gets a unique index for free from `unique: true` above.
+// chatHandle: looked up on every generateUniqueChatHandle() collision check
+// and every /signin. city: read via User.distinct('city') in /admin/summary
+// and /admin/locations.
+userSchema.index({ chatHandle: 1 });
+userSchema.index({ city: 1 });
 
 const chatSchema = new mongoose.Schema({
     // Not required: admin-broadcast messages (see POST /admin/broadcast)
@@ -159,6 +179,24 @@ const chatSchema = new mongoose.Schema({
     seenBy: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], default: [] },
     createdAt: { type: Date, default: Date.now }
 });
+// Every existing Chat query is one of these access patterns — indexes
+// below just make each of them use an index instead of a collection scan:
+//   - GET /chats, GET /admin/chats: sort by createdAt (works for both
+//     scope values since it's a prefix-free sort-only index).
+//   - GET /reports (community items): Chat.find({ scope: 'local' }) sorted
+//     by createdAt.
+//   - GET /reports (admin items): Chat.find({ isAdmin: true }) sorted by
+//     createdAt.
+//   - POST /chats/seen: Chat.updateMany({ _id: { $in }, userId: { $ne } })
+//     — covered by the default _id index, no extra index needed there.
+//   - POST /chats (reply push), GET /reports (replyChats): lookups by
+//     replyTo.chatId.
+//   - GET /user/:id (reportCount... actually chatCount via userId).
+chatSchema.index({ createdAt: -1 });
+chatSchema.index({ scope: 1, createdAt: -1 });
+chatSchema.index({ isAdmin: 1, createdAt: -1 });
+chatSchema.index({ userId: 1 });
+chatSchema.index({ 'replyTo.chatId': 1 });
 
 const lightStatusSchema = new mongoose.Schema({
     locationKey: { type: String, required: true, unique: true },
@@ -174,6 +212,12 @@ const lightStatusEventSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     reportedAt: { type: Date, default: Date.now }
 });
+// getLightStatusStats() and GET /reports filter+sort by locationKey +
+// reportedAt together; GET /admin/reports sorts the whole collection by
+// reportedAt; GET /user/:id counts by userId.
+lightStatusEventSchema.index({ locationKey: 1, reportedAt: -1 });
+lightStatusEventSchema.index({ reportedAt: -1 });
+lightStatusEventSchema.index({ userId: 1 });
 
 // Push subscription — one per device, upserted on endpoint
 const pushSubscriptionSchema = new mongoose.Schema({
@@ -212,6 +256,13 @@ const pushSubscriptionSchema = new mongoose.Schema({
 // "null" index value and reject the second insert as a duplicate.
 pushSubscriptionSchema.index({ 'subscription.endpoint': 1 }, { unique: true, sparse: true });
 pushSubscriptionSchema.index({ fcmToken: 1 }, { unique: true, sparse: true });
+// `location` is filtered on every chat/light-status/news push fan-out
+// (by far the hottest query on this collection). `secondaryLocationKey`
+// backs the second-location watch push. `userId` backs
+// /subscribe/preferences and the admin bulk-delete-by-user cascade.
+pushSubscriptionSchema.index({ location: 1 });
+pushSubscriptionSchema.index({ secondaryLocationKey: 1 });
+pushSubscriptionSchema.index({ userId: 1 });
 
 // Lightweight product-analytics events — one document per client-side event.
 // Kept intentionally generic (a handful of typed events) rather than a table
@@ -248,40 +299,75 @@ console.log("MY SERVER FILE IS RUNNING");
 // APP / MIDDLEWARE
 const app = express();
 
+// compression() gzips every JSON/text response before it goes over the
+// wire. This is the single biggest easy win for a JSON API — chat/report/
+// news list payloads compress especially well. Placed first so it wraps
+// everything after it. `filter` keeps the default behavior (skips
+// already-compressed types, honors Cache-Control: no-transform) but also
+// respects an `x-no-compression` request header, useful for local
+// debugging with curl.
+app.use(compression({
+    filter: (req, res) => {
+        if (req.headers['x-no-compression']) return false;
+        return compression.filter(req, res);
+    }
+}));
+
 app.use(cors());
 app.use(express.json());
 
 // Serves frontend files from the frontend folder during development
 // In production, copy built frontend files to a 'public' folder or adjust path
-app.use(express.static('../frontend'));
+// maxAge adds a Cache-Control header so browsers/CDNs stop re-requesting
+// unchanged static assets (logo, css, js, service-worker) on every load.
+// Purely a response-header change — same files, same routes, same
+// content — so it doesn't affect API functionality at all.
+app.use(express.static('../frontend', {
+    maxAge: process.env.NODE_ENV === 'production' ? '1d' : 0,
+    etag: true
+}));
 
 // Set this to your real Render URL (e.g. https://lightwatch-api.onrender.com)
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://lightwatch-backend.onrender.com';
 const LOGO_URL = `${PUBLIC_BASE_URL}/logo.png`;
 
-app.use((req, res, next) => {
+// ---- REQUEST PERFORMANCE LOGGING ----
+// Times every request end-to-end and logs method, path, status, and
+// duration. Replaces the old "log every non-noisy GET's method+url"
+// middleware — this keeps the same noisy-route filtering (so the
+// polling endpoints don't flood the logs) but now also reports how long
+// each request actually took, which the old version didn't.
+// Toggle: set DISABLE_PERF_LOGGING=true on Render (or anywhere) to turn
+// this off entirely with zero code changes.
+const PERF_LOGGING_ENABLED = process.env.DISABLE_PERF_LOGGING !== 'true';
+const NOISY_GET_ROUTES = ['/lightstatus', '/user/', '/chats'];
 
-    const noisyGetRoutes = [
-        '/lightstatus',
-        '/user/',
-        '/chats'
-    ];
-
-    const isNoisyGet =
-        req.method === 'GET' &&
-        noisyGetRoutes.some(route => req.url.startsWith(route));
-
+function isNoisyRequest(req) {
+    const isNoisyGet = req.method === 'GET' && NOISY_GET_ROUTES.some(route => req.url.startsWith(route));
     // The typing heartbeat fires every ~2s per active typist in both
     // directions (POST to ping, DELETE to clear) — noisy the same way
     // the GET polls above are, just not a GET.
     const isTypingRoute = req.url.startsWith('/chats/typing');
+    return isNoisyGet || isTypingRoute;
+}
 
-    if (!isNoisyGet && !isTypingRoute) {
-        console.log(req.method, req.url);
-    }
+if (PERF_LOGGING_ENABLED) {
+    app.use((req, res, next) => {
+        const noisy = isNoisyRequest(req);
+        const startedAt = process.hrtime.bigint();
 
-    next();
-});
+        // 'finish' fires once the response has actually been sent, so this
+        // measures true end-to-end handler time (including any awaited DB
+        // calls), not just the time to reach this middleware.
+        res.on('finish', () => {
+            if (noisy) return;
+            const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+            console.log(`${req.method} ${req.url} ${res.statusCode} ${durationMs.toFixed(1)}ms`);
+        });
+
+        next();
+    });
+}
 
 // Admin token verification middleware
 function verifyAdminToken(req, res, next) {
@@ -312,7 +398,7 @@ async function generateUniqueChatHandle() {
         const word = HANDLE_WORDS[Math.floor(Math.random() * HANDLE_WORDS.length)];
         const number = Math.floor(Math.random() * 900) + 100;
         const handle = `anon-${word}-${number}`;
-        const existing = await User.findOne({ chatHandle: handle });
+        const existing = await User.findOne({ chatHandle: handle }).select('_id').lean();
         if (!existing) return handle;
     }
 }
@@ -663,7 +749,7 @@ app.post('/signup', async (req, res) => {
     }
 
     try {
-        const exists = await User.findOne({ emailPhone });
+        const exists = await User.findOne({ emailPhone }).select('_id').lean();
         if (exists) {
             return res.status(400).json({ error: "Account already exists" });
         }
@@ -854,7 +940,7 @@ app.post('/resend', async (req, res) => {
     if (pending.type === 'signup') {
         name = pending.userData?.name;
     } else if (pending.type === 'signin') {
-        const existingUser = await User.findById(pending.userId);
+        const existingUser = await User.findById(pending.userId).select('name').lean();
         name = existingUser?.name;
     }
 
@@ -955,13 +1041,16 @@ app.post('/chats', async (req, res) => {
         const key = normalizeLocation(saved.location).split(',')[0].trim();
         const isGlobalChat = normalizedScope === 'global';
         const audienceTitle = isGlobalChat ? 'Everyone' : titleCaseLocation(key);
-        const replyTargetChat = replyTo?.chatId
-            ? await Chat.findById(replyTo.chatId).select('userId handle text').lean()
-            : null;
-
-        const subscribers = isGlobalChat
-            ? await PushSubscription.find({})
-            : await PushSubscription.find({ location: key });
+        // Neither of these depends on the other's result — fetch both at
+        // the same time instead of sequentially.
+        const [replyTargetChat, subscribers] = await Promise.all([
+            replyTo?.chatId
+                ? Chat.findById(replyTo.chatId).select('userId handle text').lean()
+                : Promise.resolve(null),
+            isGlobalChat
+                ? PushSubscription.find({}).select('userId subscription fcmToken platform chatMentionsEnabled muteGlobalChat').lean()
+                : PushSubscription.find({ location: key }).select('userId subscription fcmToken platform chatMentionsEnabled muteGlobalChat').lean()
+        ]);
         console.log(`Sending chat push to ${subscribers.length} subscriber(s) at ${audienceTitle}`);
 
         const recipientUserIds = [...new Set(
@@ -1192,7 +1281,7 @@ app.post('/admin/login', (req, res) => {
 // ---- ADMIN: Recent chats (protected) ----
 app.get('/admin/chats', verifyAdminToken, async (req, res) => {
     try {
-        const recent = await Chat.find().sort({ createdAt: -1 }).limit(100).populate('userId', 'name emailPhone chatHandle');
+        const recent = await Chat.find().sort({ createdAt: -1 }).limit(100).populate('userId', 'name emailPhone chatHandle').lean();
         return res.json(recent);
     } catch (err) {
         console.error('Admin chats error:', err.message);
@@ -1203,7 +1292,7 @@ app.get('/admin/chats', verifyAdminToken, async (req, res) => {
 // ---- ADMIN: All users (protected) ----
 app.get('/admin/users', verifyAdminToken, async (req, res) => {
     try {
-        const users = await User.find().sort({ createdAt: -1 }).select('name emailPhone region city chatHandle createdAt');
+        const users = await User.find().sort({ createdAt: -1 }).select('name emailPhone region city chatHandle createdAt').lean();
         return res.json(users);
     } catch (err) {
         console.error('Admin users error:', err.message);
@@ -1318,10 +1407,14 @@ app.get('/admin/summary', verifyAdminToken, async (req, res) => {
         const now = new Date();
         const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
-        const userCount    = await User.countDocuments();
-        const newUsers24h  = await User.countDocuments({ createdAt: { $gte: oneDayAgo } });
-        const chatCount    = await Chat.countDocuments();
-        const newChats24h  = await Chat.countDocuments({ createdAt: { $gte: oneDayAgo } });
+        // These four counts don't depend on each other — run them
+        // concurrently instead of one at a time.
+        const [userCount, newUsers24h, chatCount, newChats24h] = await Promise.all([
+            User.countDocuments(),
+            User.countDocuments({ createdAt: { $gte: oneDayAgo } }),
+            Chat.countDocuments(),
+            Chat.countDocuments({ createdAt: { $gte: oneDayAgo } })
+        ]);
 
         // Real "active locations" count — union of everywhere a status has
         // been set, chatted about, or lived in, computed server-side.
@@ -1540,8 +1633,12 @@ app.get('/lightstatus', async (req, res) => {
     try {
         const key = normalizeLocation(location).split(',')[0].trim();
         const keyTitle = titleCaseLocation(key);
-        const record = await LightStatus.findOne({ locationKey: key });
-        const stats = await getLightStatusStats(key);
+        // record (current status) and stats (historical aggregation) are
+        // independent reads — fetch them concurrently.
+        const [record, stats] = await Promise.all([
+            LightStatus.findOne({ locationKey: key }).lean(),
+            getLightStatusStats(key)
+        ]);
         return res.json({
             locationKey: key,
             status: record?.status || 'unknown',
@@ -1578,15 +1675,115 @@ app.get('/reports', async (req, res) => {
     // they always have.
     const includeCommunity = ['1', 'true'].includes(String(req.query.includeCommunity || '').toLowerCase());
 
-    try {
-        const events = await LightStatusEvent.find(query).sort({ reportedAt: -1 }).limit(limit).lean();
+    function titleCaseLocation(key) {
+        return key.split(',')[0]
+            .split(' ')
+            .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+            .join(' ');
+    }
 
-        function titleCaseLocation(key) {
-            return key.split(',')[0]
-                .split(' ')
-                .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-                .join(' ');
-        }
+    // ── Community-report additions ──────────────────────────────────
+    // Two kinds of chat activity belong in a user's report feed
+    // alongside their light-status events:
+    //   1. Other people's local-scope messages posted in the user's
+    //      OWN location (fuzzy-matched the same way GET /chats
+    //      matches a room), and
+    //   2. Replies — from anyone, in any room — to a message THIS
+    //      user posted, since a reply is relevant to them regardless
+    //      of which location it happened in.
+    // Both require userId (there's no "user's own location/messages"
+    // without one), so this whole block is skipped if it's missing
+    // even when includeCommunity=1 was passed.
+    async function loadCommunityItems() {
+        if (!(includeCommunity && req.query.userId)) return [];
+
+        const requestingUserId = req.query.userId;
+        const normalizedLocation = req.query.location ? normalizeLocation(req.query.location) : null;
+
+        const [candidateLocationChats, ownChats] = await Promise.all([
+            normalizedLocation
+                ? Chat.find({ scope: 'local' }).sort({ createdAt: -1 }).limit(200).lean()
+                : Promise.resolve([]),
+            Chat.find({ userId: requestingUserId }).select('_id').lean()
+        ]);
+
+        const ownChatIdSet = new Set(ownChats.map(c => String(c._id)));
+
+        const matchedLocationChats = normalizedLocation
+            ? candidateLocationChats
+                .filter(chat => {
+                    if (String(chat.userId) === String(requestingUserId)) return false;
+                    const chatLoc = normalizeLocation(chat.location || chat.locationKey || '');
+                    return locationsFuzzyMatch(chatLoc, normalizedLocation);
+                })
+                .slice(0, limit)
+            : [];
+
+        const replyChats = ownChatIdSet.size
+            ? await Chat.find({
+                'replyTo.chatId': { $in: [...ownChatIdSet] },
+                userId: { $ne: requestingUserId }
+            }).sort({ createdAt: -1 }).limit(limit).lean()
+            : [];
+
+        const usedChatIds = new Set();
+        const locationItems = matchedLocationChats.map(chat => {
+            usedChatIds.add(String(chat._id));
+            const locName = titleCaseLocation(normalizeLocation(chat.location || chat.locationKey || 'unknown'));
+            return {
+                id: `chat-${chat._id}`,
+                location: locName,
+                title: `New message in ${locName}`,
+                text: `${chat.handle}: ${chat.text}`.slice(0, 220),
+                reportedAt: chat.createdAt,
+                type: 'chat',
+                chatId: String(chat._id),
+                chatScope: chat.scope || 'local',
+                chatLocation: chat.location
+            };
+        });
+
+        // A message can be both "in the user's location" AND "a reply
+        // to them" — don't show it twice; the reply framing wins since
+        // it's the more specific/relevant one.
+        const replyItems = replyChats
+            .filter(chat => !usedChatIds.has(String(chat._id)))
+            .map(chat => ({
+                id: `reply-${chat._id}`,
+                location: titleCaseLocation(normalizeLocation(chat.location || chat.locationKey || 'unknown')),
+                title: `${chat.handle} replied to your message`,
+                text: chat.text.slice(0, 220),
+                reportedAt: chat.createdAt,
+                type: 'reply',
+                chatId: String(chat._id),
+                chatScope: chat.scope || 'local',
+                chatLocation: chat.location,
+                replyToChatId: chat.replyTo?.chatId || null
+            }));
+
+        return [...locationItems, ...replyItems];
+    }
+
+    try {
+        // These three groups (light-status events, community chat items,
+        // admin broadcasts) are entirely independent of each other — fetch
+        // them concurrently instead of one after another.
+        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        const [events, communityItems, adminChats] = await Promise.all([
+            LightStatusEvent.find(query).sort({ reportedAt: -1 }).limit(limit).lean(),
+            loadCommunityItems(),
+            // ── Admin broadcasts ────────────────────────────────────
+            // Unlike community items, these are NOT gated behind
+            // includeCommunity/userId/location — an admin broadcast (see
+            // POST /admin/broadcast) is meant for every viewer of the
+            // Reports feed, the same way a LightStatusEvent is.
+            // Recent-only (7 days) so this can't grow into an unbounded
+            // always-fetched list.
+            Chat.find({ isAdmin: true, createdAt: { $gte: sevenDaysAgo } })
+                .sort({ createdAt: -1 })
+                .limit(20)
+                .lean()
+        ]);
 
         const reports = events.map(event => {
             const locationName = titleCaseLocation(event.locationKey || 'unknown');
@@ -1606,99 +1803,6 @@ app.get('/reports', async (req, res) => {
             };
         });
 
-        // ── Community-report additions ──────────────────────────────
-        // Two kinds of chat activity belong in a user's report feed
-        // alongside their light-status events:
-        //   1. Other people's local-scope messages posted in the user's
-        //      OWN location (fuzzy-matched the same way GET /chats
-        //      matches a room), and
-        //   2. Replies — from anyone, in any room — to a message THIS
-        //      user posted, since a reply is relevant to them regardless
-        //      of which location it happened in.
-        // Both require userId (there's no "user's own location/messages"
-        // without one), so this whole block is skipped if it's missing
-        // even when includeCommunity=1 was passed.
-        let communityItems = [];
-        if (includeCommunity && req.query.userId) {
-            const requestingUserId = req.query.userId;
-            const normalizedLocation = req.query.location ? normalizeLocation(req.query.location) : null;
-
-            const [candidateLocationChats, ownChats] = await Promise.all([
-                normalizedLocation
-                    ? Chat.find({ scope: 'local' }).sort({ createdAt: -1 }).limit(200).lean()
-                    : Promise.resolve([]),
-                Chat.find({ userId: requestingUserId }).select('_id').lean()
-            ]);
-
-            const ownChatIdSet = new Set(ownChats.map(c => String(c._id)));
-
-            const matchedLocationChats = normalizedLocation
-                ? candidateLocationChats
-                    .filter(chat => {
-                        if (String(chat.userId) === String(requestingUserId)) return false;
-                        const chatLoc = normalizeLocation(chat.location || chat.locationKey || '');
-                        return locationsFuzzyMatch(chatLoc, normalizedLocation);
-                    })
-                    .slice(0, limit)
-                : [];
-
-            const replyChats = ownChatIdSet.size
-                ? await Chat.find({
-                    'replyTo.chatId': { $in: [...ownChatIdSet] },
-                    userId: { $ne: requestingUserId }
-                }).sort({ createdAt: -1 }).limit(limit).lean()
-                : [];
-
-            const usedChatIds = new Set();
-            const locationItems = matchedLocationChats.map(chat => {
-                usedChatIds.add(String(chat._id));
-                const locName = titleCaseLocation(normalizeLocation(chat.location || chat.locationKey || 'unknown'));
-                return {
-                    id: `chat-${chat._id}`,
-                    location: locName,
-                    title: `New message in ${locName}`,
-                    text: `${chat.handle}: ${chat.text}`.slice(0, 220),
-                    reportedAt: chat.createdAt,
-                    type: 'chat',
-                    chatId: String(chat._id),
-                    chatScope: chat.scope || 'local',
-                    chatLocation: chat.location
-                };
-            });
-
-            // A message can be both "in the user's location" AND "a reply
-            // to them" — don't show it twice; the reply framing wins since
-            // it's the more specific/relevant one.
-            const replyItems = replyChats
-                .filter(chat => !usedChatIds.has(String(chat._id)))
-                .map(chat => ({
-                    id: `reply-${chat._id}`,
-                    location: titleCaseLocation(normalizeLocation(chat.location || chat.locationKey || 'unknown')),
-                    title: `${chat.handle} replied to your message`,
-                    text: chat.text.slice(0, 220),
-                    reportedAt: chat.createdAt,
-                    type: 'reply',
-                    chatId: String(chat._id),
-                    chatScope: chat.scope || 'local',
-                    chatLocation: chat.location,
-                    replyToChatId: chat.replyTo?.chatId || null
-                }));
-
-            communityItems = [...locationItems, ...replyItems];
-        }
-
-        // ── Admin broadcasts ────────────────────────────────────────
-        // Unlike the community items above, these are NOT gated behind
-        // includeCommunity/userId/location — an admin broadcast (see
-        // POST /admin/broadcast) is meant for every viewer of the
-        // Reports feed, the same way a LightStatusEvent is. Recent-only
-        // (7 days) so this can't grow into an unbounded always-fetched
-        // list.
-        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-        const adminChats = await Chat.find({ isAdmin: true, createdAt: { $gte: sevenDaysAgo } })
-            .sort({ createdAt: -1 })
-            .limit(20)
-            .lean();
         const adminItems = adminChats.map(chat => ({
             id: `admin-${chat._id}`,
             title: `📢 ${chat.handle || 'LightWatch Admin'}`,
@@ -1834,17 +1938,23 @@ async function applyLightStatusUpdate(rawLocation, status, { userId = null, repo
     const key = normalizeLocation(rawLocation).split(',')[0].trim();
     const keyTitle = titleCaseLocation(key);
 
+    // The reporter's chatHandle lookup and the "what was the status
+    // before this update" lookup don't depend on each other — fetch both
+    // concurrently instead of waiting on one before starting the other.
+    // (Captured before the upsert so we can tell whether this report
+    // actually *changed* the status, vs. just re-confirming the same
+    // one — secondary-location watchers should only be pinged on a
+    // real flip, not on every single report.)
+    const [user, previous] = await Promise.all([
+        (!reportedByOverride && userId) ? User.findById(userId).select('chatHandle').lean() : Promise.resolve(null),
+        LightStatus.findOne({ locationKey: key }).select('status').lean()
+    ]);
+
     let reportedBy = reportedByOverride;
     if (!reportedBy) {
-        const user = userId ? await User.findById(userId).select('chatHandle') : null;
         reportedBy = user?.chatHandle || userId || 'anonymous';
     }
 
-    // Captured before the upsert so we can tell whether this report
-    // actually *changed* the status, vs. just re-confirming the same
-    // one — secondary-location watchers should only be pinged on a
-    // real flip, not on every single report.
-    const previous = await LightStatus.findOne({ locationKey: key }).select('status').lean();
     const previousStatus = previous?.status || null;
     const statusChanged = previousStatus !== null && previousStatus !== status;
 
@@ -1877,7 +1987,7 @@ async function applyLightStatusUpdate(rawLocation, status, { userId = null, repo
         tone: status === 'on' ? 'power-on' : 'power-off'
     };
 
-    const subscribers = await PushSubscription.find({ location: key });
+    const subscribers = await PushSubscription.find({ location: key }).lean();
     console.log(`Sending push to ${subscribers.length} subscriber(s) at ${key}`);
 
     // Don't block the response waiting for pushes
@@ -1900,7 +2010,7 @@ async function applyLightStatusUpdate(rawLocation, status, { userId = null, repo
             tone: status === 'on' ? 'power-on' : 'power-off'
         };
 
-        const secondarySubscribers = await PushSubscription.find({ secondaryLocationKey: key });
+        const secondarySubscribers = await PushSubscription.find({ secondaryLocationKey: key }).lean();
         console.log(`Sending secondary-location push to ${secondarySubscribers.length} subscriber(s) watching ${key}`);
 
         sendPushToSubscribers(secondarySubscribers, secondaryPayload);
@@ -2300,7 +2410,7 @@ app.post('/admin/push-test', verifyAdminToken, async (req, res) => {
 
     try {
         const key = normalizeLocation(location).split(',')[0].trim();
-        const subscribers = await PushSubscription.find({ location: key });
+        const subscribers = await PushSubscription.find({ location: key }).lean();
 
         if (!subscribers.length) {
             return res.status(404).json({ error: 'No subscribers found for this location' });
@@ -2367,12 +2477,12 @@ app.post('/admin/broadcast', verifyAdminToken, async (req, res) => {
 
         if (hasLocation) {
             key = normalizeLocation(location).split(',')[0].trim();
-            subscribers = await PushSubscription.find({ location: key });
+            subscribers = await PushSubscription.find({ location: key }).lean();
             audienceTitle = titleCaseLocation(key);
             savedLocation = audienceTitle;
             normalizedLocation = key;
         } else {
-            subscribers = await PushSubscription.find({});
+            subscribers = await PushSubscription.find({}).lean();
             audienceTitle = 'Everyone';
             savedLocation = 'All areas';
             normalizedLocation = 'global';
