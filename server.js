@@ -134,10 +134,17 @@ const userSchema = new mongoose.Schema({
 });
 
 const chatSchema = new mongoose.Schema({
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    // Not required: admin-broadcast messages (see POST /admin/broadcast)
+    // are authored by the admin dashboard, not a User account, and are
+    // saved directly as Chat docs with userId omitted + isAdmin: true.
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: false },
     handle: { type: String, required: true },
     text: { type: String, required: true },
     scope: { type: String, enum: ['local', 'global'], default: 'local' },
+    // True only for messages created by POST /admin/broadcast — lets the
+    // Reports feed always surface them (see GET /reports below) and lets
+    // the frontend give them a distinct "official" look in the chat list.
+    isAdmin: { type: Boolean, default: false },
     replyTo: {
         chatId: { type: String },
         handle: { type: String },
@@ -1556,9 +1563,14 @@ app.get('/reports', async (req, res) => {
     if (req.query.location) {
         query.locationKey = normalizeLocation(req.query.location).split(',')[0].trim();
     }
-    if (req.query.userId) {
-        query.userId = req.query.userId;
-    }
+    // NOTE: deliberately not filtering LightStatusEvent by userId here.
+    // userId is only relevant to the community/reply block below (which
+    // has its own requestingUserId check) — an outage/restoration event
+    // reported by someone else at your location is exactly what this
+    // feed is supposed to surface. Filtering by userId here silently
+    // hid every event you didn't report yourself, even at your own
+    // location, even though the push notification for it still went
+    // out correctly.
 
     // Opt-in only (?includeCommunity=1) — the Reports page passes this;
     // other existing callers (e.g. home.js's compact recentReportsList)
@@ -1675,7 +1687,30 @@ app.get('/reports', async (req, res) => {
             communityItems = [...locationItems, ...replyItems];
         }
 
-        const merged = [...reports, ...communityItems]
+        // ── Admin broadcasts ────────────────────────────────────────
+        // Unlike the community items above, these are NOT gated behind
+        // includeCommunity/userId/location — an admin broadcast (see
+        // POST /admin/broadcast) is meant for every viewer of the
+        // Reports feed, the same way a LightStatusEvent is. Recent-only
+        // (7 days) so this can't grow into an unbounded always-fetched
+        // list.
+        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        const adminChats = await Chat.find({ isAdmin: true, createdAt: { $gte: sevenDaysAgo } })
+            .sort({ createdAt: -1 })
+            .limit(20)
+            .lean();
+        const adminItems = adminChats.map(chat => ({
+            id: `admin-${chat._id}`,
+            title: `📢 ${chat.handle || 'LightWatch Admin'}`,
+            text: chat.text,
+            reportedAt: chat.createdAt,
+            type: 'admin',
+            chatId: String(chat._id),
+            chatScope: chat.scope || 'global',
+            chatLocation: chat.location
+        }));
+
+        const merged = [...reports, ...communityItems, ...adminItems]
             .sort((a, b) => new Date(b.reportedAt) - new Date(a.reportedAt))
             .slice(0, limit);
 
@@ -2303,25 +2338,51 @@ app.post('/admin/push-test', verifyAdminToken, async (req, res) => {
     }
 });
 
-// ---- ADMIN: BROADCAST — push a message to every subscriber in the app ----
-// Unlike /admin/push-test (one location) this ignores location entirely
-// and fans out to every PushSubscription in the collection, labeled as
-// coming from "LightWatch Admin" — the same sender label used for
-// admin-pushed light-status updates.
+// ---- ADMIN: BROADCAST — push a message to every subscriber (or one
+// location), post it into that audience's Community chat, and surface it
+// in everyone's Reports feed ----
+// If `location` is omitted/blank, this behaves as before: every
+// PushSubscription in the collection gets the push, and the message is
+// saved as a scope:'global' Chat (shows up in the "Community"/global
+// chat tab for everyone). If `location` IS given, this instead targets
+// only subscribers at that location (same lookup /admin/push-test uses)
+// and saves the message as a scope:'local' Chat at that location (shows
+// up in that location's own Community tab, same as a normal local chat
+// message). Either way the saved Chat doc is flagged isAdmin: true, which
+// is what makes GET /reports below always include it regardless of the
+// requester's own location/userId.
 app.post('/admin/broadcast', verifyAdminToken, async (req, res) => {
-    const { title, body, url } = req.body || {};
+    const { title, body, url, location } = req.body || {};
 
     if (!body || !String(body).trim()) {
         return res.status(400).json({ error: 'Message text is required' });
     }
 
+    const trimmedBody = String(body).trim();
+    const trimmedTitle = title && String(title).trim() ? String(title).trim() : 'LightWatch Admin';
+    const hasLocation = Boolean(location && String(location).trim());
+
     try {
-        const subscribers = await PushSubscription.find({});
-        console.log(`Broadcasting admin message to ${subscribers.length} subscriber(s)`);
+        let subscribers, key, audienceTitle, savedLocation, normalizedLocation;
+
+        if (hasLocation) {
+            key = normalizeLocation(location).split(',')[0].trim();
+            subscribers = await PushSubscription.find({ location: key });
+            audienceTitle = titleCaseLocation(key);
+            savedLocation = audienceTitle;
+            normalizedLocation = key;
+        } else {
+            subscribers = await PushSubscription.find({});
+            audienceTitle = 'Everyone';
+            savedLocation = 'All areas';
+            normalizedLocation = 'global';
+        }
+
+        console.log(`Broadcasting admin message to ${subscribers.length} subscriber(s) (${audienceTitle})`);
 
         const payload = {
-            title: title && String(title).trim() ? String(title).trim() : 'LightWatch Admin',
-            body: String(body).trim(),
+            title: trimmedTitle,
+            body: trimmedBody,
             url: url || '/pages/home.html',
             tag: `admin-broadcast-${Date.now()}`,
             requireInteraction: true,
@@ -2329,16 +2390,27 @@ app.post('/admin/broadcast', verifyAdminToken, async (req, res) => {
             tone: 'chat'
         };
 
-        const pushPromises = subscribers.map(sub => sendPushToOne(sub, payload));
+        const [settled, savedChat] = await Promise.all([
+            Promise.all(subscribers.map(sub => sendPushToOne(sub, payload))),
+            new Chat({
+                handle: trimmedTitle,
+                text: trimmedBody,
+                scope: hasLocation ? 'local' : 'global',
+                isAdmin: true,
+                location: savedLocation,
+                locationKey: normalizedLocation
+            }).save()
+        ]);
 
-        const settled = await Promise.all(pushPromises);
         const sentCount = settled.filter(x => x.ok).length;
         const staleCount = settled.filter(x => x.stale).length;
 
         return res.json({
             subscribers: subscribers.length,
             sentCount,
-            staleRemoved: staleCount
+            staleRemoved: staleCount,
+            location: hasLocation ? key : null,
+            chatId: savedChat._id
         });
     } catch (err) {
         console.error('Admin broadcast route error:', err.message);

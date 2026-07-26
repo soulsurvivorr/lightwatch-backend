@@ -429,7 +429,13 @@ module.exports = function initNewsSystem(app, deps) {
         // These broadcast to every subscriber, not just ones watching a
         // mentioned location, since by definition there isn't one.
         isNationwide:       { type: Boolean, default: false },
-        notifiedNationwide: { type: Boolean, default: false }
+        notifiedNationwide: { type: Boolean, default: false },
+        // True only for articles created via POST /admin/news (the admin
+        // dashboard's "Publish to Official News" form) rather than the
+        // automated RSS/scrape fetch cycle above. Lets the frontend (and
+        // the admin panel itself) tell "LightWatch published this" apart
+        // from "the scheduler picked this up from an outlet's feed".
+        isAdminPosted:      { type: Boolean, default: false }
     });
     newsArticleSchema.index({ publishedAt: -1 });
     newsArticleSchema.index({ isOfficial: -1, publishedAt: -1 });
@@ -532,7 +538,12 @@ module.exports = function initNewsSystem(app, deps) {
     }
 
     // ---- Store (with relevance filter + dedupe) ----------------
-    async function storeArticle(raw, source) {
+    // `opts.skipRelevanceFilter` is used only by the admin manual-publish
+    // route below — an admin curating a specific story (or sharing a
+    // tweet/social post as an article) has already made the relevance
+    // call themselves, so the keyword allowlist would just be a chance
+    // to reject something a human already vetted.
+    async function storeArticle(raw, source, opts = {}) {
         const title = String(raw.title || '').trim();
         const articleUrl = raw.url;
         if (!title || !articleUrl) return null;
@@ -540,11 +551,11 @@ module.exports = function initNewsSystem(app, deps) {
         const summary = stripHtml(raw.summary || '').slice(0, 500) || title;
         const combinedText = `${title} ${summary}`;
 
-        if (!isRelevantArticle(combinedText)) return null;
+        if (!opts.skipRelevanceFilter && !isRelevantArticle(combinedText)) return null;
 
         // Exact-URL duplicate (this story, already stored).
         const existing = await NewsArticle.findOne({ articleUrl }).select('_id').lean();
-        if (existing) return null;
+        if (existing) return opts.throwOnDuplicate ? 'duplicate' : null;
 
         // Cross-source near-duplicate (same story, different outlet)
         // within the last 3 days.
@@ -557,8 +568,10 @@ module.exports = function initNewsSystem(app, deps) {
 
         // If a non-official outlet already has this story but ECG's own
         // version just came in, prefer keeping ECG's — replace rather
-        // than skip, so official framing wins over a re-hash.
-        if (nearDuplicate) {
+        // than skip, so official framing wins over a re-hash. An admin
+        // manual post never gets silently replaced/skipped this way
+        // (opts.skipRelevanceFilter implies a deliberate admin action).
+        if (nearDuplicate && !opts.skipRelevanceFilter) {
             if (source.official && !nearDuplicate.isOfficial) {
                 await NewsArticle.deleteOne({ _id: nearDuplicate._id });
             } else {
@@ -568,7 +581,7 @@ module.exports = function initNewsSystem(app, deps) {
 
         const knownKeys = await getKnownLocationKeys();
         const mentionedLocations = findMentionedLocations(combinedText, knownKeys);
-        const category = detectCategory(combinedText);
+        const category = raw.category || detectCategory(combinedText);
         const nationwide = isNationwideArticle(combinedText, category);
 
         let doc;
@@ -585,12 +598,13 @@ module.exports = function initNewsSystem(app, deps) {
                 dedupeKey,
                 publishedAt: raw.publishedAt instanceof Date && !isNaN(raw.publishedAt) ? raw.publishedAt : new Date(),
                 mentionedLocations,
-                isNationwide: nationwide
+                isNationwide: nationwide,
+                isAdminPosted: !!opts.skipRelevanceFilter
             });
         } catch (err) {
             // Unique-index race (two cycles overlapping, or the same URL
             // appearing twice in one feed) — not a real error, just skip.
-            if (err.code === 11000) return null;
+            if (err.code === 11000) return opts.throwOnDuplicate ? 'duplicate' : null;
             throw err;
         }
 
@@ -802,7 +816,8 @@ module.exports = function initNewsSystem(app, deps) {
                 publishedAt: a.publishedAt,
                 url: a.articleUrl,
                 locations: a.mentionedLocations,
-                isNationwide: !!a.isNationwide
+                isNationwide: !!a.isNationwide,
+                isAdminPosted: !!a.isAdminPosted
             })));
         } catch (err) {
             console.error('News fetch error:', err.message);
@@ -831,9 +846,94 @@ module.exports = function initNewsSystem(app, deps) {
         return res.json({ totalArticles, lastFetchStats, sources: NEWS_SOURCES.map(s => ({ name: s.name, url: s.url, type: s.type })) });
     });
 
-    app.delete('/admin/news', verifyAdminToken, async (req, res) => {
+    // ---- Admin: publish an article directly ------------------------
+    // Lets the admin dashboard push a story straight into Official News
+    // without waiting on the scheduled fetch cycle — either a normal
+    // article (title/summary/url/image) they've written or curated
+    // themselves, OR a link to something found elsewhere (a tweet, a
+    // Facebook post, another outlet's story) that they want represented
+    // here as an article: `url` is exactly what "Read full article"
+    // opens, so for a social-media post that's just the post's own link,
+    // with the admin supplying the title/summary since the post itself
+    // won't have those in article form.
+    // Deliberately bypasses the keyword relevance filter (skipRelevanceFilter)
+    // — an admin choosing to publish something has already made that
+    // judgment call — but still runs the same dedupe, location-mention,
+    // and nationwide-push logic as the automated pipeline, so a manually
+    // posted article behaves identically everywhere else in the app.
+    app.post('/admin/news', verifyAdminToken, async (req, res) => {
+        const { title, summary, url, image, category, sourceName, isOfficial, publishedAt } = req.body || {};
+
+        if (!title || !String(title).trim()) {
+            return res.status(400).json({ error: 'Title is required' });
+        }
+        if (!url || !String(url).trim()) {
+            return res.status(400).json({ error: 'A link is required — the article\'s own URL, or the link to the tweet/post you\'re sharing' });
+        }
+        const ALLOWED_CATEGORIES = ['maintenance', 'outage', 'tariff', 'restoration', 'general'];
+        const normalizedCategory = ALLOWED_CATEGORIES.includes(category) ? category : undefined;
+
+        const source = {
+            name: sourceName && String(sourceName).trim() ? String(sourceName).trim() : 'LightWatch Admin',
+            icon: '📢',
+            // Admin-posted articles default to "Official" (they're coming
+            // from LightWatch itself) but the admin can uncheck this when
+            // sharing a third-party link (e.g. someone else's tweet) that
+            // shouldn't be badged as ECG/LightWatch's own announcement.
+            official: isOfficial !== false
+        };
+
         try {
-            await NewsArticle.deleteMany({});
+            const result = await storeArticle({
+                title: String(title).trim(),
+                summary: summary ? String(summary).trim() : '',
+                url: String(url).trim(),
+                imageUrl: image && String(image).trim() ? String(image).trim() : null,
+                category: normalizedCategory,
+                publishedAt: publishedAt ? new Date(publishedAt) : new Date()
+            }, source, { skipRelevanceFilter: true, throwOnDuplicate: true });
+
+            if (result === 'duplicate') {
+                return res.status(409).json({ error: 'This link has already been published to Official News' });
+            }
+            if (!result) {
+                return res.status(500).json({ error: 'Could not publish article' });
+            }
+
+            return res.status(201).json({
+                id: result._id,
+                title: result.title,
+                summary: result.summary,
+                image: result.imageUrl,
+                source: result.sourceName,
+                sourceIcon: result.sourceIcon,
+                isOfficial: result.isOfficial,
+                category: result.category,
+                publishedAt: result.publishedAt,
+                url: result.articleUrl,
+                locations: result.mentionedLocations,
+                isNationwide: !!result.isNationwide,
+                isAdminPosted: true
+            });
+        } catch (err) {
+            console.error('Admin news publish error:', err.message);
+            return res.status(500).json({ error: 'Server error publishing article' });
+        }
+    });
+
+    // DELETE /admin/news — with an `ids` array in the body, deletes just
+    // those articles (same {ids} contract as /admin/chats, /admin/users,
+    // etc.). With no ids (or an empty array), falls back to the original
+    // behavior of clearing every article — kept for whatever already
+    // calls this route that way.
+    app.delete('/admin/news', verifyAdminToken, async (req, res) => {
+        const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter(Boolean) : [];
+        try {
+            if (ids.length) {
+                await NewsArticle.deleteMany({ _id: { $in: ids } });
+            } else {
+                await NewsArticle.deleteMany({});
+            }
             return res.json({ success: true });
         } catch (err) {
             console.error('Admin news clear error:', err.message);
