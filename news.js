@@ -515,6 +515,60 @@ function extractImageFromRssItem(item) {
     return match ? match[1] : null;
 }
 
+// Google News' own RSS feed NEVER carries an image — no <enclosure>, no
+// media:content, nothing in the description either. That's not a parsing
+// gap like the media:content one above; the data simply isn't in the
+// feed. Since Google News search is most of what actually gets fetched
+// here (Yen News, Ghanaian Times, Graphic Online, etc. all come in
+// through it), that alone would leave most articles image-less forever.
+//
+// The only way to get a real image for these is to visit the article
+// page itself and read its og:image meta tag. item.link is a Google
+// News redirect wrapper (news.google.com/rss/articles/...), not the
+// publisher's real URL — following it with a normal HTTP request
+// resolves through to the real page for many (not all) links; when it
+// doesn't, this just finds no og:image and returns null, same as before
+// the fix, so there's no downside to always trying it.
+//
+// Best-effort and deliberately quiet on failure: a slow or blocking
+// publisher site should never take down the whole fetch cycle over one
+// missing thumbnail.
+async function scrapeOgImage(url) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
+    try {
+        const res = await fetch(url, {
+            redirect: 'follow',
+            signal: controller.signal,
+            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0)' }
+        });
+        if (!res.ok) return null;
+        // Bail early on non-HTML responses (PDFs, images, etc.) rather
+        // than reading a potentially huge body just to find no match.
+        const contentType = res.headers.get('content-type') || '';
+        if (!contentType.includes('html')) return null;
+        const html = await res.text();
+        // og:image first, twitter:image as a fallback — attribute order
+        // varies by site (content-before-property is common), so this
+        // checks both orders rather than assuming one.
+        const patterns = [
+            /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i,
+            /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i,
+            /<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i,
+            /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:image["']/i
+        ];
+        for (const re of patterns) {
+            const match = re.exec(html);
+            if (match && match[1]) return match[1];
+        }
+        return null;
+    } catch (err) {
+        return null;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
 function resolveUrl(maybeRelative, base) {
     if (!maybeRelative) return null;
     try { return new URL(maybeRelative, base).toString(); }
@@ -1111,11 +1165,15 @@ module.exports = function initNewsSystem(app, deps) {
                 // itself — keeps sourceList/isOfficial meaningful downstream.
                 sourceForItem = { name: parsed.outlet, icon: '📰', official: false };
             }
+            let imageUrl = extractImageFromRssItem(item);
+            if (!imageUrl && source.type === 'google-news') {
+                imageUrl = await scrapeOgImage(item.link);
+            }
             const doc = await storeArticle({
                 title,
                 summary: item.contentSnippet || item.content || item.summary || '',
                 url: item.link,
-                imageUrl: extractImageFromRssItem(item),
+                imageUrl,
                 publishedAt: item.isoDate ? new Date(item.isoDate) : new Date()
             }, sourceForItem, { knownKeys, isGoogleNews: source.type === 'google-news' });
             if (doc) stored++;
