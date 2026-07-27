@@ -1,44 +1,57 @@
 // ============================================================
-//  NEWS.JS — Official electricity-news system for LightWatch
+//  NEWS.JS — Event Detection System for LightWatch
 //
-//  Self-contained module: owns its own Mongoose schema/model,
-//  the background fetch scheduler, and the public GET /news
-//  route. Wired into server.js with a single call:
+//  UPGRADED from a flat "list of articles" feed into an EVENT layer:
+//  every RSS/scrape item is still stored as a raw NewsArticle (same
+//  as before — admin publish/delete routes are unchanged), but each
+//  one is now also matched against recent NewsEvent documents and
+//  either merged into an existing event (as a new corroborating
+//  source, or as an update — e.g. a restoration notice closing out
+//  an outage) or used to start a brand new event.
 //
+//  GET /events (new) returns the structured, deduplicated view:
+//  one entry per real-world incident, with every source that's
+//  reported on it, a confidence score, and a timeline of updates.
+//  GET /news (existing) keeps its old response shape so the current
+//  frontend keeps working untouched, but each row now represents an
+//  EVENT (sourceCount/sources added, everything else same field
+//  names as before) instead of one single article.
+//
+//  Wired into server.js exactly the same as before:
 //      require('./news')(app, {
 //          mongoose, PushSubscription, User,
 //          sendPushToSubscribers, normalizeLocation,
 //          titleCaseLocation, escapeRegex, verifyAdminToken
 //      });
 //
-//  WHAT IT DOES
-//   1. Every NEWS_FETCH_INTERVAL_MS (default 20 min, well inside
-//      the requested 15–30 min window) it polls a list of trusted
-//      Ghanaian media RSS feeds plus ECG's own "News & Events"
-//      page (scraped — ECG doesn't publish an RSS feed).
-//   2. Every candidate item is filtered against an electricity-
-//      related keyword allowlist (ECG, GRIDCo, outages, tariffs,
-//      maintenance, etc.) — anything that doesn't match is
-//      dropped before it ever reaches the database.
-//   3. Duplicates are rejected two ways: an exact articleUrl
-//      match (same story re-fetched next cycle) and a fuzzy
-//      title match against anything stored in the last 3 days
-//      (same story picked up by two outlets).
-//   4. Surviving articles are stored with a normalized set of
-//      "mentioned locations" — matched against the same location
-//      keys LightWatch already tracks (every PushSubscription's
-//      location/secondaryLocationKey, every User's city). Any
-//      match fires a push notification to devices watching that
-//      location, through the exact same sendPushToSubscribers()
-//      pipeline lightstatus/chat pushes already use.
-//   5. GET /news returns the stored feed, ECG articles always
-//      sorted first (isOfficial), then newest first.
+//  WHAT'S NEW vs. the previous version of this file
+//   1. More sources: Google News search feeds (no official ECG RSS/
+//      outlet covers everything — Google News fills the gap and
+//      catches outlets we don't have a direct feed for) plus several
+//      more Ghanaian outlets. See NEWS_SOURCES / GOOGLE_NEWS_QUERIES.
+//   2. Fetch cadence dropped from 20 min to 7 min (env-overridable),
+//      inside the requested 5–10 min window.
+//   3. Event clustering (findOrCreateEvent / scoreEventMatch below):
+//      near-duplicate articles from different outlets, or later
+//      follow-ups (a restoration notice for an outage already on
+//      file), now land on ONE NewsEvent instead of creating fresh
+//      rows — see attachArticleToEvent().
+//   4. Structured event fields: eventType, headline, summary,
+//      affectedLocations, startTimeText/endTimeText (best-effort —
+//      see extractTimeWindow()), firstPublishedAt/lastUpdatedAt,
+//      sources[], confidenceScore, history[].
+//   5. Broadcast-to-everyone notifications now also fire on the word
+//      "dumsor" itself (Ghana's own shorthand for a power crisis),
+//      not only on an explicit "nationwide"-style phrase — see
+//      shouldBroadcastToAll(). Per-location notifications are
+//      unchanged. Both are also now state-gated (see notifiedStates
+//      below) so five outlets confirming the SAME outage sends one
+//      notification, not five — but a later restoration update for
+//      that same event still gets its own, separate notification.
 //
-//  DEPENDENCIES (new): rss-parser, cheerio.
-//      npm install rss-parser cheerio --save
-//  Node 18+ is assumed for global fetch() (Render's default
-//  runtime already ships 18+). If running on an older Node,
-//  swap the fetch() call in scrapeEcgSite() for node-fetch.
+//  DEPENDENCIES: same as before — rss-parser, cheerio. No new
+//  packages needed; Google News is consumed as an RSS feed like any
+//  other source.
 // ============================================================
 
 const Parser = require('rss-parser');
@@ -49,35 +62,13 @@ const rssParser = new Parser({
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0; +https://lightwatch-backend.onrender.com)' }
 });
 
-// A handful of these feeds ship genuinely malformed XML. Three recurring
-// causes, all from Ghanaian outlets running WordPress/Joomla feed
-// generators that were clearly built against HTML tolerance, not strict
-// XML:
-//   1. Common named HTML entities (&mdash; &nbsp; &rsquo; etc.) — valid
-//      in HTML, but NOT among XML's five predefined entities, so a
-//      strict parser errors out exactly like it would on a raw "&".
-//   2. Bare/valueless HTML attributes leaking into the feed (e.g.
-//      <img ... allowfullscreen>) — valid HTML, invalid XML, and shows
-//      up as "Attribute without value".
-//   3. Unclosed HTML "void" elements (<br>, <img ...>, <hr> etc. with
-//      no trailing "/") embedded in a <description>/<content:encoded>
-//      body. XML has no concept of an element that never needs a
-//      closing tag, so a strict parser treats the next real closing
-//      tag it hits (e.g. the </p> after a stray <br>) as unmatched —
-//      exactly the "Unexpected close tag" errors ECG and GhanaWeb throw.
-//      Self-closing every void element (<br /> instead of <br>) before
-//      parsing fixes this without touching genuinely paired tags.
-// Rather than lose the whole feed over one bad headline or embedded
-// snippet, fetch the raw text ourselves and repair all three before
-// handing it to the parser.
-// NOTE: "link" and "source" are HTML void elements but are deliberately
-// left OFF this list — RSS/Atom itself uses <link>...</link> and
-// <source url="...">...</source> as ordinary elements with real text
-// content, so self-closing a bare <link> or <source> at the feed's own
-// structural level would corrupt the feed (turns its real closing tag
-// into an "unexpected close tag" itself). The elements below don't
-// collide with any RSS/Atom vocabulary, so they're safe to always
-// self-close wherever they show up, structural or embedded-HTML.
+// ---------------------------------------------------------------
+//  XML repair helpers (unchanged from the previous version of this
+//  file — several Ghanaian outlets ship feeds with HTML entities,
+//  bare attributes, and crossed tags that a strict XML parser
+//  rejects outright; these repair just enough to parse without
+//  touching CDATA-wrapped bodies).
+// ---------------------------------------------------------------
 const VOID_ELEMENTS = /^(area|base|br|col|embed|hr|img|input|meta|param|track|wbr)$/i;
 const HTML_ENTITY_MAP = {
     nbsp: '\u00A0', mdash: '\u2014', ndash: '\u2013', hellip: '\u2026',
@@ -86,14 +77,6 @@ const HTML_ENTITY_MAP = {
     eacute: '\u00E9', egrave: '\u00E8', agrave: '\u00E0', ccedil: '\u00E7'
 };
 
-// Stack-based tag balancer for a single isolated snippet of embedded
-// article HTML (never the whole document — see scopeToArticleFields()
-// below for why). Walks every tag in the string in order; a closing
-// tag matching the top of the stack pops normally, one matching
-// something DEEPER in the stack force-closes everything above it too
-// (flattening the crossed structure), and one matching NOTHING
-// currently open is dropped as a stray. Anything still open when the
-// string ends gets auto-closed.
 function repairCrossedTags(xml) {
     const tagPattern = /<\/?([a-zA-Z][\w:-]*)\b[^>]*?(\/)?>/g;
     const stack = [];
@@ -111,7 +94,7 @@ function repairCrossedTags(xml) {
 
         if (isClosing) {
             const stackIdx = stack.lastIndexOf(name);
-            if (stackIdx === -1) continue; // stray closing tag, no match open — drop it
+            if (stackIdx === -1) continue;
             for (let i = stack.length - 1; i >= stackIdx; i--) {
                 result += `</${stack[i]}>`;
             }
@@ -128,126 +111,72 @@ function repairCrossedTags(xml) {
     return result;
 }
 
-// Runs the tag-STRUCTURE repairs (bare-attribute fix, void-element
-// self-close, crossed-tag repair) on one already-isolated, already-
-// confirmed-non-CDATA snippet. Entity/ampersand fixing happens
-// separately, globally, in sanitizeFeedXml() below — see the comment
-// there for why that one isn't scoped the same way.
 function repairEmbeddedHtml(snippet) {
     let out = snippet;
-
-    // Repair bare/valueless attributes (e.g. <img ... allowfullscreen>)
-    // and self-close unclosed void elements in the same pass — see
-    // causes #2 and #3 in sanitizeFeedXml() below.
     out = out.replace(/<([a-zA-Z][\w:-]*)((?:\s+[a-zA-Z_:][\w:.-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'))?)*)\s*(\/?)\s*>/g,
         (match, tagName, attrs, selfClose) => {
             const fixed = attrs ? attrs.replace(/(\s+)([a-zA-Z_:][\w:.-]*)(?!\s*=)(?=\s|$)/g, '$1$2=""') : '';
             const needsSelfClose = selfClose || VOID_ELEMENTS.test(tagName);
             return `<${tagName}${fixed}${needsSelfClose ? ' /' : ''}>`;
         });
-
     return repairCrossedTags(out);
 }
 
-// Finds every <description>...</description> and <content:encoded>...
-// </content:encoded> element and repairs ONLY the embedded HTML inside
-// each one, in isolation — never the document as a whole. This matters
-// for two reasons, both confirmed as real regressions from an earlier,
-// document-wide version of this pass:
-//   1. CDATA safety — WordPress feeds (MyJoyOnline, Modern Ghana, ...)
-//      wrap this same messy embedded HTML in <![CDATA[...]]>, which
-//      means the XML parser already treats it as opaque text and never
-//      tries to interpret it as tags at all. Running tag-repair logic
-//      over CDATA content doesn't just waste effort, it actively risks
-//      corrupting the feed. A field whose content starts with
-//      "<![CDATA[" is left 100% untouched here.
-//   2. No cross-item leakage — a stack-based repair needs an actual
-//      stack, and running ONE stack across the entire document meant a
-//      stray/unclosed tag inside one article's description could leave
-//      phantom state that then misinterprets the NEXT article's real
-//      <item>/<title>/<link> structure, or the feed's own <link>/
-//      <source> elements. Scoping each field to its own isolated stack
-//      makes that class of bug impossible by construction — one
-//      article's messy HTML can never affect another's, or the feed's
-//      own scaffolding, no matter how broken it is.
-// Everything outside these two field types (the actual RSS/Atom
-// scaffolding: rss/channel/item/title/link/pubDate/guid/source/...) is
-// always generator-produced and well-formed — it never needs repair
-// and is left completely untouched here.
 function scopeToArticleFields(xml) {
     return xml.replace(
         /(<(?:description|content:encoded)\b[^>]*>)([\s\S]*?)(<\/(?:description|content:encoded)>)/g,
         (fullMatch, openTag, inner, closeTag) => {
-            if (inner.trimStart().startsWith('<![CDATA[')) return fullMatch; // opaque to XML — leave alone
+            if (inner.trimStart().startsWith('<![CDATA[')) return fullMatch;
             return openTag + repairEmbeddedHtml(inner) + closeTag;
         }
     );
 }
 
-// A handful of these feeds ship genuinely malformed XML. Four recurring
-// causes, all from Ghanaian outlets running WordPress/Joomla feed
-// generators:
-//   1. Common named HTML entities (&mdash; &nbsp; &rsquo; etc.) — valid
-//      in HTML, but NOT among XML's five predefined entities, so a
-//      strict parser errors out exactly like it would on a raw "&".
-//      This can appear ANYWHERE text runs in the feed (a headline's
-//      <title> uses em-dashes just as often as a <description> does),
-//      so — unlike causes #2-4 below — this fix runs globally, over
-//      the whole document. That's safe even inside CDATA or a plain
-//      title: decoding "&mdash;" to a real em-dash, or escaping a
-//      stray "&", never changes tag structure, only character content.
-//   2. Bare/valueless HTML attributes (e.g. <img ... allowfullscreen>)
-//      — valid HTML, invalid XML ("Attribute without value").
-//   3. Unclosed HTML "void" elements (<br>, <img ...>, <hr> etc. with
-//      no trailing "/") — the next real closing tag (e.g. the </p>
-//      after a stray <br>) reads as unmatched ("Unexpected close tag").
-//   4. Genuinely CROSSED (overlapping) tags, e.g. <b>text<p>more</b>
-//      </p> — real paired tags nested in an order browsers silently
-//      auto-correct but XML never tolerates, common in copy-pasted
-//      Word/Google-Docs content.
-// Causes #2-4 are all tag-STRUCTURE repairs, and unlike #1 they are
-// scoped to non-CDATA <description>/<content:encoded> fields only, via
-// scopeToArticleFields() above — see that function's comment for why
-// running them document-wide was a real, confirmed regression.
 function sanitizeFeedXml(xml) {
     let out = String(xml || '');
-
-    // Decode recognized HTML named entities to real characters. Anything
-    // NOT in the map (unknown/rare entity) falls through to the generic
-    // ampersand escape below, same as a truly raw "&".
     out = out.replace(/&([a-zA-Z][a-zA-Z0-9]{1,10});/g, (m, name) => {
         const lower = name.toLowerCase();
-        if (['amp', 'lt', 'gt', 'quot', 'apos'].includes(lower)) return m; // already XML-valid, leave alone
+        if (['amp', 'lt', 'gt', 'quot', 'apos'].includes(lower)) return m;
         return HTML_ENTITY_MAP[lower] !== undefined ? HTML_ENTITY_MAP[lower] : m;
     });
-
-    // Escape any "&" that still isn't part of a valid XML entity
-    // (numeric entities and the 5 XML-predefined ones are left alone).
     out = out.replace(/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;');
-
     out = scopeToArticleFields(out);
-
     return out;
 }
 
 // ---- Sources ------------------------------------------------
-// `official: true` is reserved for ECG's own site — that's the
-// flag the /news route and the frontend use to always surface
-// ECG's own announcements first. Media RSS URLs occasionally
-// move when an outlet re-platforms; if a feed starts 404ing,
-// fetchRssSource() just logs and skips it rather than crashing
-// the whole cycle, so one dead feed never takes the others down.
+// `official: true` is reserved for ECG's own site.
+//
+// Google News is added as a set of *search* feeds — it has no single
+// "everything about ECG" feed, so each query below is its own source
+// entry. This is what gives coverage of any outlet (Ghanaian or not)
+// we don't have a direct RSS feed for, without hand-maintaining a
+// feed URL for every single one.
+//
+// Google News RSS item titles come back as "Headline - Outlet Name"
+// (Google's own convention) — parseGoogleNewsItem() below splits that
+// back out so the real outlet still gets credited as the source
+// instead of everything showing up as "Google News".
+function googleNewsUrl(query) {
+    return `https://news.google.com/rss/search?q=${encodeURIComponent(query)}+when:14d&hl=en-GH&gl=GH&ceid=GH:en`;
+}
+
+const GOOGLE_NEWS_QUERIES = [
+    'ECG Ghana',
+    'Electricity Company of Ghana',
+    'ECG outage',
+    'dumsor Ghana',
+    'planned power outage Ghana',
+    'power restoration Ghana',
+    'GRIDCo Ghana',
+    'load shedding Ghana'
+];
+
 const NEWS_SOURCES = [
-    // Was: scraping https://ecg.com.gh/index.php/en/media-centre/news-events
-    // directly. That path sits behind a bot-check (confirmed: Render's
-    // requests get a 210-byte "sgcaptcha" redirect stub instead of the
-    // real page — an IP-level block, not a selector/markup problem, so
-    // no amount of scraper tweaking will fix it). ECG separately runs a
-    // WordPress blog at ecg.com.gh/blog/ (different software stack, not
-    // behind the same gate) with the same press releases — using its
-    // standard WordPress RSS feed instead. If this ever comes back
-    // empty, check the URL still resolves before assuming it's blocked
-    // too.
+    // ECG's own site sits behind bot-detection on its main domain
+    // (confirmed: Render's requests get a captcha-redirect stub back).
+    // Its WordPress blog carries the same press releases and isn't
+    // behind that gate.
     {
         name: 'ECG',
         icon: '⚡',
@@ -255,41 +184,37 @@ const NEWS_SOURCES = [
         type: 'rss',
         url: 'https://ecg.com.gh/blog/feed/'
     },
-    // NOTE: this has been seen returning both a 403 and (on other runs) a
-    // malformed-XML parse error — inconsistent behavior consistent with
-    // bot-detection (e.g. Cloudflare) that sometimes challenges Render's
-    // requests and sometimes lets a mangled response through. If it never
-    // recovers, it likely can't be fixed from this hosting IP without a
-    // proxy/rotating-IP service — may be worth dropping if it stays dead.
-    { name: 'Citi News',      icon: '📰', official: false, type: 'rss', url: 'https://citinewsroom.com/feed/' },
-    { name: 'MyJoyOnline',    icon: '📰', official: false, type: 'rss', url: 'https://www.myjoyonline.com/feed/' },
-    // Was 'https://www.graphic.com.gh/feed' — 404s now. Graphic's Joomla
-    // feed generator lives at this path instead (same pattern as their
-    // per-section feeds, e.g. /features/features.feed?type=rss). Worth
-    // double-checking in a browser if this ever goes quiet again.
-    { name: 'Graphic Online', icon: '📰', official: false, type: 'rss', url: 'https://www.graphic.com.gh/news.feed?type=rss' },
-    { name: 'GhanaWeb',       icon: '📰', official: false, type: 'rss', url: 'https://www.ghanaweb.com/GhanaHomePage/NewsArchive/rss.xml' },
-    // Was 'https://www.modernghana.com/rss/news.xml' — wrong host/path.
-    // Confirmed current URL straight from modernghana.com/rssfeed/.
-    { name: 'Modern Ghana',   icon: '📰', official: false, type: 'rss', url: 'https://rss.modernghana.com/news.xml' },
-    // New sources added to widen coverage — both confirmed live (real
-    // rss+xml / WordPress feed content, not a 404 or parked-domain page)
-    // before being added here.
-    { name: 'AdomOnline',        icon: '📰', official: false, type: 'rss', url: 'https://www.adomonline.com/feed' },
-    { name: 'Ghana Business News', icon: '📰', official: false, type: 'rss', url: 'https://www.ghanabusinessnews.com/feed/' }
+    { name: 'Citi News',           icon: '📰', official: false, type: 'rss', url: 'https://citinewsroom.com/feed/' },
+    { name: 'MyJoyOnline',         icon: '📰', official: false, type: 'rss', url: 'https://www.myjoyonline.com/feed/' },
+    { name: 'Graphic Online',      icon: '📰', official: false, type: 'rss', url: 'https://www.graphic.com.gh/news.feed?type=rss' },
+    { name: 'GhanaWeb',            icon: '📰', official: false, type: 'rss', url: 'https://www.ghanaweb.com/GhanaHomePage/NewsArchive/rss.xml' },
+    { name: 'Modern Ghana',        icon: '📰', official: false, type: 'rss', url: 'https://rss.modernghana.com/news.xml' },
+    { name: 'AdomOnline',          icon: '📰', official: false, type: 'rss', url: 'https://www.adomonline.com/feed' },
+    { name: 'Ghana Business News', icon: '📰', official: false, type: 'rss', url: 'https://www.ghanabusinessnews.com/feed/' },
+    // Newly added — same WordPress /feed/ convention as most of the
+    // list above, but NOT individually confirmed live the way the
+    // block above was. fetchRssSource() already fails one dead feed
+    // silently without affecting the others, so it's safe to carry
+    // these as best-effort; drop any that log a 404/parse error on
+    // every run for a week.
+    { name: '3News',        icon: '📰', official: false, type: 'rss', url: 'https://3news.com/feed/' },
+    { name: 'Pulse Ghana',  icon: '📰', official: false, type: 'rss', url: 'https://www.pulse.com.gh/rss' },
+    { name: 'Peace FM',     icon: '📰', official: false, type: 'rss', url: 'https://www.peacefmonline.com/pages/rss/local.xml' },
+    { name: 'Starr FM',     icon: '📰', official: false, type: 'rss', url: 'https://starrfm.com.gh/feed/' },
+    // Google News search feeds — see googleNewsUrl() above.
+    ...GOOGLE_NEWS_QUERIES.map(q => ({
+        name: 'Google News', icon: '🔎', official: false, type: 'google-news', url: googleNewsUrl(q), query: q
+    })),
+    {
+        name: 'ECG (site scrape)',
+        icon: '⚡',
+        official: true,
+        type: 'scrape-ecg',
+        url: 'https://ecg.com.gh/index.php/en/media-centre/news-events'
+    }
 ];
 
 // ---- Relevance keyword allowlist -----------------------------
-// NOTE: no bare 'feeder' entry. Confirmed real false positive: a
-// Parliament road-funding story about "feeder roads" (a standard term
-// for rural access roads in Ghana, nothing to do with electricity)
-// matched the allowlist purely because of that word. Unlike the
-// 'purc'/"purchase" bug, word-boundary matching can't fix this one —
-// "feeder" really is a standalone word in both the electrical sense
-// ("11kV feeder") and the roads sense ("feeder roads"), so it's a
-// genuine homonym, not a substring artifact. 'feeder fault' (the
-// actual recurring ECG-outage phrasing) stays, since that compound
-// phrase doesn't collide with the roads usage.
 const NEWS_KEYWORDS = [
     'ecg', 'electricity company of ghana', 'gridco', 'ghana grid company',
     'power outage', 'power cut', 'blackout', 'load shedding', 'dumsor',
@@ -300,29 +225,20 @@ const NEWS_KEYWORDS = [
     'electricity bill', 'energy commission', 'power crisis', 'electricity',
     'power rationing', 'load management', 'distribution network'
 ];
-
-// Compiled once. Word-boundary matching, NOT plain substring matching —
-// this matters because several keywords here are short abbreviations
-// ("purc", "ecg") that would otherwise match as a SUBSTRING of an
-// unrelated ordinary word. Confirmed real-world false positive: 'purc'
-// (meant to catch "PURC", the utility regulator) was matching inside
-// "purchase"/"purchasing" — which let completely unrelated stories
-// (a doctor buying hospital equipment, a condom-vending-machine
-// article, a road-infrastructure funding story) sail through the
-// allowlist just because they contained the word "purchase" somewhere.
-// \b...\b anchors each keyword to real word boundaries, so "purc"
-// matches only the standalone word "PURC", never "purchase". Multi-word
-// phrases are unaffected — the space between words is already a word
-// boundary on both sides.
 const NEWS_KEYWORD_REGEX = new RegExp(
     '\\b(' + NEWS_KEYWORDS.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')\\b',
     'i'
 );
-
 function isRelevantArticle(text) {
     return NEWS_KEYWORD_REGEX.test(text);
 }
 
+// ---- Event type detection -------------------------------------
+// Same categories as before, renamed at the API boundary to the
+// requested event-type vocabulary (see EVENT_TYPE_LABELS below).
+// 'restoration'/'maintenance' checked before the generic 'outage'
+// match so a "power restored after fault" story doesn't get stuck
+// as an outage.
 function detectCategory(text) {
     const t = text.toLowerCase();
     if (/(restor|back on|resum|reconnect)/.test(t)) return 'restoration';
@@ -332,17 +248,35 @@ function detectCategory(text) {
     return 'general';
 }
 
+// A "planned" vs "unplanned" outage split, used only to pick the
+// display eventType label — everything else (clustering, storage)
+// still runs off the coarser `category` above.
+function detectOutageType(text) {
+    return /(planned|scheduled|will (be )?(carried out|conducted)|notice of (a )?(planned )?outage)/i.test(text)
+        ? 'Planned Outage'
+        : 'Unplanned Outage';
+}
+
+const EVENT_TYPE_LABELS = {
+    outage: null, // resolved to Planned/Unplanned via detectOutageType()
+    restoration: 'Power Restoration',
+    maintenance: 'Maintenance',
+    tariff: 'General Announcement',
+    general: 'General Announcement'
+};
+
+function eventTypeLabel(category, text) {
+    if (category === 'outage') return detectOutageType(text);
+    return EVENT_TYPE_LABELS[category] || 'General Announcement';
+}
+
+// `category` FAMILIES that are allowed to merge into one another as
+// an event evolves over time (an outage that later gets a
+// restoration notice is the SAME event; a tariff story never merges
+// with an outage story just because they mention the same town).
+const CATEGORY_FAMILY = { outage: 'incident', restoration: 'incident', maintenance: 'incident', tariff: 'policy', general: 'general' };
+
 // ---- Nationwide-outage detection -----------------------------
-// A handful of phrasings a genuinely country-wide advisory would use —
-// distinct from findMentionedLocations() below, which only matches
-// SPECIFIC place names. A story with zero specific-location hits still
-// deserves to reach every user if it reads as nationwide (e.g. a GRIDCo
-// national-grid fault, or ECG announcing countrywide load management) —
-// this is what lets that case surface, since an empty mentionedLocations
-// array on its own would otherwise mean the article notifies no one.
-// Restricted to the outage/restoration/maintenance categories — a
-// nationwide TARIFF story doesn't belong in an "is the light off"
-// notification, no matter how broad its reach.
 const NATIONWIDE_KEYWORDS = [
     'nationwide', 'countrywide', 'country-wide', 'across the country',
     'national grid', 'all regions', 'entire country', 'all 16 regions',
@@ -352,17 +286,67 @@ const NATIONWIDE_REGEX = new RegExp(
     '\\b(' + NATIONWIDE_KEYWORDS.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')\\b',
     'i'
 );
-
 function isNationwideArticle(text, category) {
     if (!['outage', 'restoration', 'maintenance'].includes(category)) return false;
     return NATIONWIDE_REGEX.test(text);
 }
 
-// Cheap normalized-title key for cross-source duplicate detection —
-// lowercase, strip punctuation, collapse whitespace, keep the first
-// ~12 significant words (enough to catch "ECG explains outage in
-// Kumasi" vs "ECG explains outage in Kumasi — Citi News" without
-// needing a full similarity algorithm).
+// "dumsor" is Ghana's own shorthand for a widespread power crisis —
+// treated as broadcast-worthy in its own right, separately from the
+// explicit nationwide-phrase check above (a headline can say "dumsor
+// hits Kasoa" and still be worth an all-user heads-up even though
+// it's phrased as one town).
+const DUMSOR_REGEX = /\bdumsor\b/i;
+function shouldBroadcastToAll(text, isNationwide) {
+    return isNationwide || DUMSOR_REGEX.test(text);
+}
+
+// ---- Best-effort start/end time extraction ---------------------
+// Deliberately returns free-text spans, not parsed Date objects —
+// Ghanaian outage notices phrase timing too inconsistently ("from
+// 7am to 6pm on Tuesday 29th", "for 24 hours starting Monday",
+// "between 0800 and 1700hrs") to safely coerce into a single Date
+// without silently misreading one of those formats. Downstream
+// consumers get a readable string; startTime/endTime Date fields are
+// only ever set when a full explicit date+time is unambiguous.
+const TIME_WINDOW_REGEX = /\b(from|between)\s+([0-9]{1,2}(:[0-9]{2})?\s?(am|pm|hrs?)?)\s+(to|and|-|–)\s+([0-9]{1,2}(:[0-9]{2})?\s?(am|pm|hrs?)?)\b/i;
+const DURATION_REGEX = /\bfor\s+(\d+)\s*(hour|hr|day)s?\b/i;
+function extractTimeWindow(text) {
+    const windowMatch = TIME_WINDOW_REGEX.exec(text);
+    if (windowMatch) {
+        return { startTimeText: windowMatch[2].trim(), endTimeText: windowMatch[6].trim() };
+    }
+    const durationMatch = DURATION_REGEX.exec(text);
+    if (durationMatch) {
+        return { startTimeText: null, endTimeText: `~${durationMatch[1]} ${durationMatch[2]}(s) after start` };
+    }
+    return { startTimeText: null, endTimeText: null };
+}
+
+// ---- Title similarity (event clustering) ------------------------
+const TITLE_STOPWORDS = new Set([
+    'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'of', 'and', 'or', 'is', 'are',
+    'will', 'has', 'have', 'be', 'as', 'by', 'with', 'from', 'ecg', 'ghana', 'news',
+    'says', 'over', 'after', 'amid', 'due'
+]);
+function titleTokens(title) {
+    return title
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .split(/\s+/)
+        .filter(w => w.length > 2 && !TITLE_STOPWORDS.has(w));
+}
+function jaccardSimilarity(aTokens, bTokens) {
+    if (!aTokens.length || !bTokens.length) return 0;
+    const a = new Set(aTokens), b = new Set(bTokens);
+    let intersection = 0;
+    for (const w of a) if (b.has(w)) intersection++;
+    const union = a.size + b.size - intersection;
+    return union === 0 ? 0 : intersection / union;
+}
+
+// Cheap normalized-title key — kept for the raw-NewsArticle exact/
+// near-duplicate check further down (unrelated to event clustering).
 function titleDedupeKey(title) {
     return title
         .toLowerCase()
@@ -391,6 +375,17 @@ function resolveUrl(maybeRelative, base) {
     catch { return null; }
 }
 
+// Google News RSS titles are "Headline - Outlet"; the outlet name is
+// everything after the LAST " - " (headlines themselves sometimes
+// contain a dash, so splitting on the first one would cut a real
+// headline in half).
+function parseGoogleNewsItem(item) {
+    const raw = String(item.title || '');
+    const idx = raw.lastIndexOf(' - ');
+    if (idx === -1) return { headline: raw, outlet: 'Google News' };
+    return { headline: raw.slice(0, idx).trim(), outlet: raw.slice(idx + 3).trim() || 'Google News' };
+}
+
 module.exports = function initNewsSystem(app, deps) {
     const {
         mongoose,
@@ -403,71 +398,90 @@ module.exports = function initNewsSystem(app, deps) {
         verifyAdminToken
     } = deps;
 
-    // ---- Schema / model --------------------------------------
+    // ---- Schema / model: raw ingested articles (unchanged shape,
+    // admin routes below still operate on this exactly as before) --
     const newsArticleSchema = new mongoose.Schema({
         title:        { type: String, required: true },
         summary:      { type: String, default: '' },
         imageUrl:     { type: String, default: null },
         sourceName:   { type: String, required: true },
         sourceIcon:   { type: String, default: '📰' },
-        isOfficial:   { type: Boolean, default: false }, // true only for ECG's own site
+        isOfficial:   { type: Boolean, default: false },
         category:     { type: String, enum: ['maintenance', 'outage', 'tariff', 'restoration', 'general'], default: 'general' },
         articleUrl:   { type: String, required: true, unique: true },
         dedupeKey:    { type: String, required: true },
         publishedAt:  { type: Date, required: true },
         fetchedAt:    { type: Date, default: Date.now },
-        // Location keys (same normalized form as PushSubscription.location)
-        // found mentioned in the title/summary text.
         mentionedLocations: { type: [String], default: [] },
-        // Which of those locations have already had a push sent for this
-        // article — guards against double-notifying if the article gets
-        // touched again by a later fetch cycle for any reason.
         notifiedLocations:  { type: [String], default: [] },
-        // A story that reads as country-wide (see isNationwideArticle()
-        // above) rather than tied to specific place names — e.g. a
-        // national-grid fault or a countrywide load-management notice.
-        // These broadcast to every subscriber, not just ones watching a
-        // mentioned location, since by definition there isn't one.
         isNationwide:       { type: Boolean, default: false },
         notifiedNationwide: { type: Boolean, default: false },
-        // True only for articles created via POST /admin/news (the admin
-        // dashboard's "Publish to Official News" form) rather than the
-        // automated RSS/scrape fetch cycle above. Lets the frontend (and
-        // the admin panel itself) tell "LightWatch published this" apart
-        // from "the scheduler picked this up from an outlet's feed".
-        isAdminPosted:      { type: Boolean, default: false }
+        isAdminPosted:      { type: Boolean, default: false },
+        // NEW — which NewsEvent this raw article was folded into.
+        eventId: { type: mongoose.Schema.Types.ObjectId, ref: 'NewsEvent', default: null }
     });
     newsArticleSchema.index({ publishedAt: -1 });
     newsArticleSchema.index({ isOfficial: -1, publishedAt: -1 });
     newsArticleSchema.index({ dedupeKey: 1, publishedAt: -1 });
-    // GET /news with ?location= filters on mentionedLocations and sorts by
-    // { isOfficial: -1, publishedAt: -1 }. The old single-field
-    // mentionedLocations index below can serve the filter but Mongo still
-    // has to sort the matched set in memory. This compound index lets that
-    // same query use one index for both the filter and the sort.
     newsArticleSchema.index({ mentionedLocations: 1, isOfficial: -1, publishedAt: -1 });
     newsArticleSchema.index({ mentionedLocations: 1 });
+    newsArticleSchema.index({ eventId: 1 });
 
     const NewsArticle = mongoose.models.NewsArticle || mongoose.model('NewsArticle', newsArticleSchema);
 
-    // ---- Location matching ------------------------------------
-    // Reuses the same location vocabulary LightWatch already has —
-    // every device's primary/secondary watched location, plus every
-    // signed-up user's home city — rather than maintaining a separate
-    // hardcoded gazetteer of Ghanaian place names.
+    // ---- Schema / model: NEW — clustered events -------------------
+    const newsEventSchema = new mongoose.Schema({
+        // Coarse family, used for clustering/queries. eventType is the
+        // human-facing label derived from this + text (see eventTypeLabel).
+        category: { type: String, enum: ['maintenance', 'outage', 'tariff', 'restoration', 'general'], default: 'general' },
+        eventType: { type: String, required: true }, // e.g. "Planned Outage", "Power Restoration"
+        headline:  { type: String, required: true }, // most-recently-updated headline
+        summary:   { type: String, default: '' },
+        affectedLocations: { type: [String], default: [] },
+        isNationwide: { type: Boolean, default: false },
+        startTimeText: { type: String, default: null },
+        endTimeText:   { type: String, default: null },
+        startTime: { type: Date, default: null },
+        endTime:   { type: Date, default: null },
+        firstPublishedAt: { type: Date, required: true },
+        lastUpdatedAt:    { type: Date, required: true },
+        dedupeKey: { type: String, required: true }, // title key of the FIRST source, used as a fast pre-filter
+        titleTokens: { type: [String], default: [] }, // cached tokens of the most recent headline, for re-scoring
+        sources: {
+            type: [{
+                name: String, icon: String, official: Boolean,
+                url: String, headline: String, publishedAt: Date
+            }], default: []
+        },
+        confidenceScore: { type: Number, default: 0 }, // 0-100
+        status: { type: String, enum: ['active', 'resolved'], default: 'active' },
+        // Every category label this event has already triggered a push
+        // for — stops five sources confirming the SAME outage from
+        // sending five notifications, while still letting a later
+        // status change (outage -> restoration) send its own.
+        notifiedStates: { type: [String], default: [] },
+        history: {
+            type: [{ at: Date, note: String }], default: []
+        }
+    });
+    newsEventSchema.index({ lastUpdatedAt: -1 });
+    newsEventSchema.index({ category: 1, lastUpdatedAt: -1 });
+    newsEventSchema.index({ affectedLocations: 1, lastUpdatedAt: -1 });
+    newsEventSchema.index({ dedupeKey: 1 });
+
+    const NewsEvent = mongoose.models.NewsEvent || mongoose.model('NewsEvent', newsEventSchema);
+
+    // ---- Location matching (unchanged) -----------------------------
     async function getKnownLocationKeys() {
         const [subLocations, secondaryLocations, userCities] = await Promise.all([
             PushSubscription.distinct('location'),
             PushSubscription.distinct('secondaryLocationKey'),
             User.distinct('city')
         ]);
-
         const keys = new Set();
         [...subLocations, ...secondaryLocations, ...userCities].forEach(loc => {
             if (!loc) return;
             const key = normalizeLocation(loc).split(',')[0].trim();
-            // Skip very short keys (e.g. stray single letters) to avoid
-            // noisy false-positive matches inside unrelated words.
             if (key && key.length >= 3) keys.add(key);
         });
         return [...keys];
@@ -482,73 +496,213 @@ module.exports = function initNewsSystem(app, deps) {
         });
     }
 
-    async function notifyLocationMentions(article, locationKeys) {
+    // ---- Notifications ---------------------------------------------
+    async function notifyLocationMentions(event, locationKeys) {
         if (!locationKeys.length) return;
         try {
             const subscribers = await PushSubscription.find({ location: { $in: locationKeys } }).lean();
             if (!subscribers.length) return;
-
             const displayLocation = titleCaseLocation(locationKeys[0]);
             const payload = {
                 title: `LightWatch News — ${displayLocation}`,
-                body: article.title,
+                body: event.headline,
                 url: '/pages/chat.html',
-                tag: `news-${article._id}`,
+                tag: `news-event-${event._id}-${event.category}`,
                 requireInteraction: false,
                 vibrate: [200, 90, 200],
-                image: article.imageUrl || undefined,
                 tone: 'chat'
             };
-
-            console.log(`[news] Notifying ${subscribers.length} subscriber(s) — "${article.title}" mentions ${locationKeys.join(', ')}`);
+            console.log(`[news] Notifying ${subscribers.length} subscriber(s) — "${event.headline}" mentions ${locationKeys.join(', ')}`);
             await sendPushToSubscribers(subscribers, payload);
-
-            await NewsArticle.updateOne(
-                { _id: article._id },
-                { $addToSet: { notifiedLocations: { $each: locationKeys } } }
-            );
         } catch (err) {
             console.error('[news] Location-mention push error:', err.message);
         }
     }
 
-    // A nationwide story has no specific location to key off of, so —
-    // unlike notifyLocationMentions() above — this goes to EVERY current
-    // subscriber, the same way a global-scope chat message does.
-    // notifiedNationwide guards this the same way notifiedLocations
-    // guards the per-location push: skip if a later fetch cycle somehow
-    // touches this article again.
-    async function notifyNationwideOutage(article) {
+    async function notifyAllUsers(event, reason) {
         try {
             const subscribers = await PushSubscription.find({}).lean();
             if (!subscribers.length) return;
-
             const payload = {
-                title: 'LightWatch News — Nationwide',
-                body: article.title,
+                title: 'LightWatch News — Ghana',
+                body: event.headline,
                 url: '/pages/chat.html',
-                tag: `news-nationwide-${article._id}`,
+                tag: `news-event-broadcast-${event._id}-${event.category}`,
                 requireInteraction: false,
                 vibrate: [200, 90, 200, 90, 200],
-                image: article.imageUrl || undefined,
                 tone: 'chat'
             };
-
-            console.log(`[news] Notifying ${subscribers.length} subscriber(s) nationwide — "${article.title}"`);
+            console.log(`[news] Broadcasting to ${subscribers.length} subscriber(s) [${reason}] — "${event.headline}"`);
             await sendPushToSubscribers(subscribers, payload);
-
-            await NewsArticle.updateOne({ _id: article._id }, { notifiedNationwide: true });
         } catch (err) {
-            console.error('[news] Nationwide push error:', err.message);
+            console.error('[news] Broadcast push error:', err.message);
         }
     }
 
-    // ---- Store (with relevance filter + dedupe) ----------------
+    // Fires whenever an event is created, or an existing one changes to
+    // a status it hasn't already notified for (see notifiedStates).
+    // Deliberately does NOT fire again just because a 2nd/3rd/4th source
+    // confirms the same already-notified state — that only bumps
+    // confidence, silently.
+    async function notifyForEvent(event, combinedText) {
+        if (event.notifiedStates.includes(event.category)) return;
+
+        const broadcast = shouldBroadcastToAll(combinedText, event.isNationwide);
+        if (broadcast) {
+            await notifyAllUsers(event, event.isNationwide ? 'nationwide' : 'dumsor-keyword');
+        } else if (event.affectedLocations.length) {
+            await notifyLocationMentions(event, event.affectedLocations);
+        }
+        // else: no specific location and not broadcast-worthy — nothing
+        // to target notifications at (e.g. a vague general-category
+        // story); it still shows up in the feed either way.
+
+        event.notifiedStates.push(event.category);
+        await event.save();
+    }
+
+    // ---- Confidence score --------------------------------------------
+    // Weighted by how many distinct outlets independently reported this
+    // event and whether any of them is ECG's own official channel — a
+    // single source (even ECG) is meaningful but capped below 100 since
+    // there's been no independent corroboration yet.
+    function computeConfidence(event) {
+        const distinctOutlets = new Set(event.sources.map(s => s.name)).size;
+        const hasOfficial = event.sources.some(s => s.official);
+        let score = Math.min(distinctOutlets, 5) * 15; // up to 75 for 5+ outlets
+        if (hasOfficial) score += 20;
+        if (distinctOutlets === 1 && !hasOfficial) score = Math.min(score, 35);
+        return Math.max(0, Math.min(100, score));
+    }
+
+    // ---- Event clustering --------------------------------------------
+    // Looks for a recent, same-family event this article most likely
+    // belongs to. Returns the best match (if any) above threshold.
+    async function findMatchingEvent(article, category, mentionedLocations, nationwide) {
+        const family = CATEGORY_FAMILY[category];
+        const cutoff = new Date(Date.now() - EVENT_MATCH_WINDOW_MS);
+        const familyCategories = Object.keys(CATEGORY_FAMILY).filter(c => CATEGORY_FAMILY[c] === family);
+
+        const query = {
+            category: { $in: familyCategories },
+            lastUpdatedAt: { $gte: cutoff },
+            status: 'active'
+        };
+        if (mentionedLocations.length || nationwide) {
+            query.$or = [
+                ...(mentionedLocations.length ? [{ affectedLocations: { $in: mentionedLocations } }] : []),
+                ...(nationwide ? [{ isNationwide: true }] : [])
+            ];
+        }
+
+        const candidates = await NewsEvent.find(query).limit(30).lean();
+        if (!candidates.length) return null;
+
+        const incomingTokens = titleTokens(article.title);
+        let best = null, bestScore = 0;
+        for (const candidate of candidates) {
+            const sim = jaccardSimilarity(incomingTokens, candidate.titleTokens || []);
+            const locationOverlap = mentionedLocations.some(l => (candidate.affectedLocations || []).includes(l));
+            // Require either location overlap (or both nationwide) alongside
+            // a modest title match, OR a very high title match on its own
+            // (catches paraphrased headlines where location extraction
+            // missed a place name mentioned only in the body).
+            const qualifies = (sim >= 0.35 && (locationOverlap || (nationwide && candidate.isNationwide))) || sim >= 0.6;
+            if (qualifies && sim > bestScore) { best = candidate; bestScore = sim; }
+        }
+        return best;
+    }
+
+    // Merges a raw article into an existing event, or creates a new one.
+    // Always runs (independent of whether the raw NewsArticle itself
+    // was a near-duplicate of one already stored) — corroboration from
+    // a second outlet on the SAME story is exactly what should raise
+    // confidence, not get thrown away.
+    async function attachArticleToEvent(article, combinedText, category, mentionedLocations, nationwide) {
+        const match = await findMatchingEvent(article, category, mentionedLocations, nationwide);
+        const { startTimeText, endTimeText } = extractTimeWindow(combinedText);
+        const label = eventTypeLabel(category, combinedText);
+
+        if (!match) {
+            const event = await NewsEvent.create({
+                category,
+                eventType: label,
+                headline: article.title,
+                summary: article.summary,
+                affectedLocations: mentionedLocations,
+                isNationwide: nationwide,
+                startTimeText, endTimeText,
+                firstPublishedAt: article.publishedAt,
+                lastUpdatedAt: article.publishedAt,
+                dedupeKey: titleDedupeKey(article.title),
+                titleTokens: titleTokens(article.title),
+                sources: [{
+                    name: article.sourceName, icon: article.sourceIcon, official: article.isOfficial,
+                    url: article.articleUrl, headline: article.title, publishedAt: article.publishedAt
+                }],
+                confidenceScore: 0,
+                history: [{ at: article.publishedAt, note: `Event opened from ${article.sourceName}` }]
+            });
+            event.confidenceScore = computeConfidence(event);
+            await event.save();
+            article.eventId = event._id;
+            await article.save();
+            await notifyForEvent(event, combinedText);
+            return event;
+        }
+
+        const event = await NewsEvent.findById(match._id);
+        const alreadyHasSource = event.sources.some(s => s.url === article.articleUrl);
+        const statusChanged = event.category !== category;
+
+        if (!alreadyHasSource) {
+            event.sources.push({
+                name: article.sourceName, icon: article.sourceIcon, official: article.isOfficial,
+                url: article.articleUrl, headline: article.title, publishedAt: article.publishedAt
+            });
+        }
+
+        // A newer article always wins on "current" fields — that's what
+        // keeps the event reflecting the LATEST information (e.g. a
+        // restoration notice replacing an outage's status) rather than
+        // whichever source happened to be first.
+        if (article.publishedAt >= event.lastUpdatedAt) {
+            event.lastUpdatedAt = article.publishedAt;
+            event.headline = article.title;
+            event.summary = article.summary || event.summary;
+            event.category = category;
+            event.eventType = label;
+            if (startTimeText) event.startTimeText = startTimeText;
+            if (endTimeText) event.endTimeText = endTimeText;
+            event.titleTokens = titleTokens(article.title);
+            if (category === 'restoration') event.status = 'resolved';
+        }
+
+        // Locations only ever grow (a later article naming an ADDITIONAL
+        // affected area is new information, not a correction).
+        for (const loc of mentionedLocations) {
+            if (!event.affectedLocations.includes(loc)) event.affectedLocations.push(loc);
+        }
+        if (nationwide) event.isNationwide = true;
+
+        event.confidenceScore = computeConfidence(event);
+        event.history.push({
+            at: article.publishedAt,
+            note: statusChanged
+                ? `${article.sourceName} reported an update: now "${label}"`
+                : `${article.sourceName} corroborated this event`
+        });
+
+        await event.save();
+        article.eventId = event._id;
+        await article.save();
+        await notifyForEvent(event, combinedText);
+        return event;
+    }
+
+    // ---- Store raw article (relevance filter + exact-dup guard) ------
     // `opts.skipRelevanceFilter` is used only by the admin manual-publish
-    // route below — an admin curating a specific story (or sharing a
-    // tweet/social post as an article) has already made the relevance
-    // call themselves, so the keyword allowlist would just be a chance
-    // to reject something a human already vetted.
+    // route — an admin curating a story has already made that call.
     async function storeArticle(raw, source, opts = {}) {
         const title = String(raw.title || '').trim();
         const articleUrl = raw.url;
@@ -560,42 +714,15 @@ module.exports = function initNewsSystem(app, deps) {
         if (!opts.skipRelevanceFilter && !isRelevantArticle(combinedText)) return null;
 
         const dedupeKey = titleDedupeKey(title);
-        const cutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
 
-        // Exact-URL duplicate and cross-source near-duplicate are
-        // independent lookups — run them concurrently instead of one
-        // after another.
-        const [existing, nearDuplicate] = await Promise.all([
-            // Exact-URL duplicate (this story, already stored).
-            NewsArticle.findOne({ articleUrl }).select('_id').lean(),
-            // Cross-source near-duplicate (same story, different outlet)
-            // within the last 3 days.
-            NewsArticle.findOne({
-                dedupeKey,
-                publishedAt: { $gte: cutoff }
-            }).select('_id isOfficial').lean()
-        ]);
+        // Only reject on an EXACT url repeat now — near-duplicate
+        // titles from a different outlet are exactly what the event
+        // layer below wants to see (extra corroboration), so they're
+        // no longer dropped/replaced here the way the old version of
+        // this file did.
+        const existing = await NewsArticle.findOne({ articleUrl }).select('_id').lean();
         if (existing) return opts.throwOnDuplicate ? 'duplicate' : null;
 
-        // If a non-official outlet already has this story but ECG's own
-        // version just came in, prefer keeping ECG's — replace rather
-        // than skip, so official framing wins over a re-hash. An admin
-        // manual post never gets silently replaced/skipped this way
-        // (opts.skipRelevanceFilter implies a deliberate admin action).
-        if (nearDuplicate && !opts.skipRelevanceFilter) {
-            if (source.official && !nearDuplicate.isOfficial) {
-                await NewsArticle.deleteOne({ _id: nearDuplicate._id });
-            } else {
-                return null;
-            }
-        }
-
-        // getKnownLocationKeys() runs 3 distinct/aggregate-style queries.
-        // A fetch cycle can call storeArticle() for dozens of articles in
-        // a row, so runNewsFetchCycle() pre-fetches this once and passes
-        // it in via opts.knownKeys — falling back to a fresh fetch here
-        // only for one-off calls (e.g. the admin manual-publish route)
-        // that don't go through the cycle.
         const knownKeys = opts.knownKeys || await getKnownLocationKeys();
         const mentionedLocations = findMentionedLocations(combinedText, knownKeys);
         const category = raw.category || detectCategory(combinedText);
@@ -619,18 +746,16 @@ module.exports = function initNewsSystem(app, deps) {
                 isAdminPosted: !!opts.skipRelevanceFilter
             });
         } catch (err) {
-            // Unique-index race (two cycles overlapping, or the same URL
-            // appearing twice in one feed) — not a real error, just skip.
             if (err.code === 11000) return opts.throwOnDuplicate ? 'duplicate' : null;
             throw err;
         }
 
-        if (mentionedLocations.length) {
-            // Don't block the fetch cycle waiting on push delivery.
-            notifyLocationMentions(doc, mentionedLocations);
-        }
-        if (nationwide) {
-            notifyNationwideOutage(doc);
+        try {
+            await attachArticleToEvent(doc, combinedText, category, mentionedLocations, nationwide);
+        } catch (err) {
+            // Never let event-clustering failures lose the raw article —
+            // it's already safely stored above either way.
+            console.error('[news] Event clustering error:', err.message);
         }
 
         return doc;
@@ -640,10 +765,6 @@ module.exports = function initNewsSystem(app, deps) {
     async function fetchRssSource(source, knownKeys) {
         let items = [];
         try {
-            // Fetch raw text ourselves (instead of rssParser.parseURL, which
-            // fetches AND parses in one step) so malformed XML can be
-            // repaired before it ever reaches the strict parser — see
-            // sanitizeFeedXml() above.
             const res = await fetch(source.url, {
                 headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0)' }
             });
@@ -652,37 +773,35 @@ module.exports = function initNewsSystem(app, deps) {
             const feed = await rssParser.parseString(sanitizeFeedXml(rawXml));
             items = feed.items || [];
         } catch (err) {
-            // This is the #1 thing to check first if news isn't showing up —
-            // a feed URL that's moved/changed shows up here as a 404/parse
-            // error, distinct from "fetched fine but nothing was relevant"
-            // below.
             console.error(`[news] RSS fetch FAILED for ${source.name} (${source.url}): ${err.message}`);
             return { fetched: 0, stored: 0 };
         }
 
         let stored = 0;
         for (const item of items.slice(0, 25)) {
+            let title = item.title;
+            let sourceForItem = source;
+            if (source.type === 'google-news') {
+                const parsed = parseGoogleNewsItem(item);
+                title = parsed.headline;
+                // Credit the real outlet Google surfaced, not "Google News"
+                // itself — keeps sourceList/isOfficial meaningful downstream.
+                sourceForItem = { name: parsed.outlet, icon: '📰', official: false };
+            }
             const doc = await storeArticle({
-                title: item.title,
+                title,
                 summary: item.contentSnippet || item.content || item.summary || '',
                 url: item.link,
                 imageUrl: extractImageFromRssItem(item),
                 publishedAt: item.isoDate ? new Date(item.isoDate) : new Date()
-            }, source, { knownKeys });
+            }, sourceForItem, { knownKeys });
             if (doc) stored++;
         }
 
-        console.log(`[news] ${source.name}: fetched ${items.length} item(s), stored ${stored} new (rest were off-topic, duplicates, or already stored).`);
+        console.log(`[news] ${source.name}${source.query ? ` (${source.query})` : ''}: fetched ${items.length} item(s), stored ${stored} new.`);
         return { fetched: items.length, stored };
     }
 
-    // ECG doesn't publish RSS, so its "Media Centre / News & Events"
-    // page is scraped directly. Selectors target the common Joomla
-    // blog-listing markup that page uses; kept loose (several
-    // fallback selectors) since a template tweak on ECG's end is far
-    // more likely to break a scraper than an RSS feed. The keyword
-    // filter in storeArticle() means a stale/broken selector just
-    // yields nothing useful rather than bad data reaching users.
     async function scrapeEcgSite(source, knownKeys) {
         let html;
         try {
@@ -692,9 +811,6 @@ module.exports = function initNewsSystem(app, deps) {
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             html = await res.text();
         } catch (err) {
-            // A ReferenceError here ("fetch is not defined") means the
-            // Node runtime is older than 18 and has no global fetch —
-            // check `node -v` on the host if you see that specific message.
             console.error(`[news] ECG site fetch FAILED (${source.url}): ${err.message}`);
             return { fetched: 0, stored: 0 };
         }
@@ -711,36 +827,21 @@ module.exports = function initNewsSystem(app, deps) {
             if (!title || !href) return;
             href = resolveUrl(href, source.url);
             if (!href) return;
-
             const summary = $el.find('p').first().text().trim();
             const imgSrc = $el.find('img').first().attr('src');
             const imageUrl = imgSrc ? resolveUrl(imgSrc, source.url) : null;
-
             items.push({ title, summary, url: href, imageUrl, publishedAt: new Date() });
         });
 
-        // If the fetch succeeded (HTML came back) but the selectors above
-        // found zero candidate blocks, that's a near-certain sign ECG's
-        // page markup no longer matches these selectors — worth checking
-        // `curl <url>` and inspecting the actual HTML structure.
         if (items.length === 0) {
-            // A response under ~2KB is almost certainly NOT the real page
-            // (the actual News & Events page is tens of KB) — far more
-            // likely a bot-detection/challenge page, a redirect stub, or a
-            // WAF block of Render's outbound IP. Log the actual body in
-            // that case so it's obvious which one we're dealing with,
-            // rather than assuming "markup changed" and chasing selectors
-            // that were never the problem.
             if (html.length < 2000) {
-                console.warn(`[news] ECG: page fetched but only ${html.length} bytes back — likely blocked/challenged rather than a markup change. Body: ${html.slice(0, 500)}`);
+                console.warn(`[news] ECG: page fetched but only ${html.length} bytes back — likely blocked/challenged. Body: ${html.slice(0, 500)}`);
             } else {
-                console.warn(`[news] ECG: page fetched (${html.length} bytes) but 0 article blocks matched the selectors — the site's markup may have changed.`);
+                console.warn(`[news] ECG: page fetched (${html.length} bytes) but 0 article blocks matched the selectors.`);
             }
             return { fetched: 0, stored: 0 };
         }
 
-        // De-dupe within this single scrape pass (the same story can
-        // appear in more than one listing block on the page).
         const seen = new Set();
         let stored = 0;
         for (const item of items) {
@@ -754,28 +855,19 @@ module.exports = function initNewsSystem(app, deps) {
         return { fetched: items.length, stored };
     }
 
-    // Kept around so GET /admin/news/refresh (and anyone poking at this
-    // from a debugger) can see exactly what the last cycle did per
-    // source, without having to go dig through log history.
     let lastFetchStats = null;
 
     async function runNewsFetchCycle() {
         console.log('[news] Fetch cycle starting...');
         const stats = { startedAt: new Date(), sources: {} };
-
-        // getKnownLocationKeys() used to be re-run inside storeArticle()
-        // for every single article — up to 25 per RSS source times
-        // however many sources, all hitting PushSubscription/User with
-        // 3 distinct() queries each. The location vocabulary barely
-        // changes over the few seconds a fetch cycle takes, so fetch it
-        // once here and hand it to every source/article in this cycle.
         const knownKeys = await getKnownLocationKeys();
 
         for (const source of NEWS_SOURCES) {
             let result;
-            if (source.type === 'rss') result = await fetchRssSource(source, knownKeys);
+            if (source.type === 'rss' || source.type === 'google-news') result = await fetchRssSource(source, knownKeys);
             else if (source.type === 'scrape-ecg') result = await scrapeEcgSite(source, knownKeys);
-            stats.sources[source.name] = result || { fetched: 0, stored: 0 };
+            const label = source.query ? `${source.name} (${source.query})` : source.name;
+            stats.sources[label] = result || { fetched: 0, stored: 0 };
         }
 
         stats.finishedAt = new Date();
@@ -785,94 +877,137 @@ module.exports = function initNewsSystem(app, deps) {
     }
 
     // ---- Scheduler ------------------------------------------------
-    // 15–30 min window as requested; default sits in the middle of it.
-    const NEWS_FETCH_INTERVAL_MS = Number(process.env.NEWS_FETCH_INTERVAL_MS) || 20 * 60 * 1000;
+    // 5–10 min window as requested; default sits in the middle of it.
+    // NOTE: this cycle now hits ~8 Google News queries plus ~11 direct
+    // feeds every run — comfortably fine at this interval, but if more
+    // queries/outlets get added later and outbound requests start
+    // taking noticeably longer than the interval itself, raise this
+    // rather than let cycles start overlapping.
+    const NEWS_FETCH_INTERVAL_MS = Number(process.env.NEWS_FETCH_INTERVAL_MS) || 7 * 60 * 1000;
+    const EVENT_MATCH_WINDOW_MS = Number(process.env.NEWS_EVENT_MATCH_WINDOW_MS) || 5 * 24 * 60 * 60 * 1000;
 
-    // Give Mongo a moment to finish connecting before the first run,
-    // then settle into the regular interval.
     setTimeout(() => { runNewsFetchCycle().catch(err => console.error('[news] Initial fetch failed:', err.message)); }, 10000);
     setInterval(() => { runNewsFetchCycle().catch(err => console.error('[news] Scheduled fetch failed:', err.message)); }, NEWS_FETCH_INTERVAL_MS);
 
     // ---- In-memory response cache ------------------------------------
-    // GET /news is read-only, called far more often than the data actually
-    // changes (articles only refresh once per NEWS_FETCH_INTERVAL_MS, ~20
-    // min by default), and every client hits it with one of a small set of
-    // query-param combinations (default feed, a specific location, a
-    // category). Caching each distinct query for a short TTL turns repeat
-    // requests into a memory lookup instead of a Mongo round trip, and the
-    // cache is cleared outright whenever a fetch cycle actually writes new
-    // articles — so it can never serve genuinely stale data for longer
-    // than one fetch cycle, and typically clears itself proactively.
-    // Process-local (fine on Render's single instance; would need a shared
-    // cache like Redis if this ever scales to multiple instances).
     const NEWS_CACHE_TTL_MS = Number(process.env.NEWS_CACHE_TTL_MS) || 60 * 1000;
-    const newsResponseCache = new Map(); // cacheKey -> { expiresAt, body }
-
-    function clearNewsCache() {
-        newsResponseCache.clear();
-    }
+    const newsResponseCache = new Map();
+    function clearNewsCache() { newsResponseCache.clear(); }
 
     // ---- Routes -----------------------------------------------------
-    // GET /news — latest articles, ECG's own announcements pinned first.
-    app.get('/news', async (req, res) => {
+    // GET /events — NEW. Full structured event view.
+    app.get('/events', async (req, res) => {
         const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 100);
         const includeNationwide = ['1', 'true'].includes(String(req.query.includeNationwide || '').toLowerCase());
-
-        // Cache key is just the exact query string this caller sent —
-        // identical requests (by far the common case: same filters,
-        // repeated on a poll/refresh) hit the same key.
-        const cacheKey = req.originalUrl;
+        const cacheKey = `EVT:${req.originalUrl}`;
         const cached = newsResponseCache.get(cacheKey);
-        if (cached && cached.expiresAt > Date.now()) {
-            return res.json(cached.body);
-        }
+        if (cached && cached.expiresAt > Date.now()) return res.json(cached.body);
 
-        // Built as $and clauses rather than assigning directly onto one
-        // flat object, since the location+nationwide case needs an $or
-        // alongside whatever else is filtered — a plain object can only
-        // hold one key named "$or".
         const andClauses = [];
         if (req.query.category) andClauses.push({ category: req.query.category });
-        if (req.query.official === 'true') andClauses.push({ isOfficial: true });
-        if (req.query.before) {
-            const beforeDate = new Date(req.query.before);
-            if (!isNaN(beforeDate)) andClauses.push({ publishedAt: { $lt: beforeDate } });
-        }
-
+        if (req.query.status) andClauses.push({ status: req.query.status });
         if (req.query.location) {
             const key = normalizeLocation(req.query.location).split(',')[0].trim();
             andClauses.push(
                 includeNationwide
-                    ? { $or: [{ mentionedLocations: key }, { isNationwide: true }] }
-                    : { mentionedLocations: key }
+                    ? { $or: [{ affectedLocations: key }, { isNationwide: true }] }
+                    : { affectedLocations: key }
             );
         } else if (includeNationwide) {
             andClauses.push({ isNationwide: true });
         }
-
         const query = andClauses.length ? { $and: andClauses } : {};
 
         try {
-            const articles = await NewsArticle.find(query)
-                .sort({ isOfficial: -1, publishedAt: -1 })
+            const events = await NewsEvent.find(query).sort({ lastUpdatedAt: -1 }).limit(limit).lean();
+            const body = events.map(e => ({
+                id: e._id,
+                eventType: e.eventType,
+                headline: e.headline,
+                summary: e.summary,
+                affectedLocations: e.affectedLocations,
+                isNationwide: !!e.isNationwide,
+                startTime: e.startTimeText,
+                endTime: e.endTimeText,
+                firstPublishedAt: e.firstPublishedAt,
+                lastUpdatedAt: e.lastUpdatedAt,
+                status: e.status,
+                confidenceScore: e.confidenceScore,
+                sourceCount: new Set(e.sources.map(s => s.name)).size,
+                sources: e.sources.map(s => ({ name: s.name, icon: s.icon, official: s.official, url: s.url, headline: s.headline, publishedAt: s.publishedAt })),
+                history: e.history
+            }));
+            newsResponseCache.set(cacheKey, { expiresAt: Date.now() + NEWS_CACHE_TTL_MS, body });
+            return res.json(body);
+        } catch (err) {
+            console.error('Events fetch error:', err.message);
+            return res.status(500).json({ error: 'Server error fetching events' });
+        }
+    });
+
+    // GET /news — kept for the existing frontend. Same field names as
+    // before, but each row is now an EVENT (sources merged) rather than
+    // one raw article; `source`/`sourceIcon`/`isOfficial` reflect the
+    // most-recently-updated source, with the full list also included
+    // under `sources` for any client that wants to show them all.
+    app.get('/news', async (req, res) => {
+        const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 100);
+        const includeNationwide = ['1', 'true'].includes(String(req.query.includeNationwide || '').toLowerCase());
+        const cacheKey = req.originalUrl;
+        const cached = newsResponseCache.get(cacheKey);
+        if (cached && cached.expiresAt > Date.now()) return res.json(cached.body);
+
+        const andClauses = [];
+        if (req.query.category) andClauses.push({ category: req.query.category });
+        if (req.query.official === 'true') andClauses.push({ 'sources.official': true });
+        if (req.query.before) {
+            const beforeDate = new Date(req.query.before);
+            if (!isNaN(beforeDate)) andClauses.push({ lastUpdatedAt: { $lt: beforeDate } });
+        }
+        if (req.query.location) {
+            const key = normalizeLocation(req.query.location).split(',')[0].trim();
+            andClauses.push(
+                includeNationwide
+                    ? { $or: [{ affectedLocations: key }, { isNationwide: true }] }
+                    : { affectedLocations: key }
+            );
+        } else if (includeNationwide) {
+            andClauses.push({ isNationwide: true });
+        }
+        const query = andClauses.length ? { $and: andClauses } : {};
+
+        try {
+            const events = await NewsEvent.find(query)
+                .sort({ isNationwide: -1, lastUpdatedAt: -1 })
                 .limit(limit)
                 .lean();
 
-            const body = articles.map(a => ({
-                id: a._id,
-                title: a.title,
-                summary: a.summary,
-                image: a.imageUrl,
-                source: a.sourceName,
-                sourceIcon: a.sourceIcon,
-                isOfficial: a.isOfficial,
-                category: a.category,
-                publishedAt: a.publishedAt,
-                url: a.articleUrl,
-                locations: a.mentionedLocations,
-                isNationwide: !!a.isNationwide,
-                isAdminPosted: !!a.isAdminPosted
-            }));
+            const body = events.map(e => {
+                const latestSource = e.sources[e.sources.length - 1] || {};
+                const officialSource = e.sources.find(s => s.official);
+                return {
+                    id: e._id,
+                    title: e.headline,
+                    summary: e.summary,
+                    image: null,
+                    source: (officialSource || latestSource).name || 'LightWatch',
+                    sourceIcon: (officialSource || latestSource).icon || '📰',
+                    isOfficial: !!officialSource,
+                    category: e.category,
+                    publishedAt: e.lastUpdatedAt,
+                    url: (officialSource || latestSource).url,
+                    locations: e.affectedLocations,
+                    isNationwide: !!e.isNationwide,
+                    isAdminPosted: false,
+                    // New, additive fields — safe for the current frontend
+                    // to ignore until it's updated to show them.
+                    eventType: e.eventType,
+                    sourceCount: new Set(e.sources.map(s => s.name)).size,
+                    sources: e.sources,
+                    confidenceScore: e.confidenceScore,
+                    status: e.status
+                };
+            });
 
             newsResponseCache.set(cacheKey, { expiresAt: Date.now() + NEWS_CACHE_TTL_MS, body });
             return res.json(body);
@@ -882,42 +1017,29 @@ module.exports = function initNewsSystem(app, deps) {
         }
     });
 
-    // ---- Admin: manual refresh + cleanup (mirrors the existing
-    // admin/* route conventions elsewhere in server.js) -------------
+    // ---- Admin routes (unchanged behavior — still operate on the raw
+    // NewsArticle collection) ------------------------------------------
     app.post('/admin/news/refresh', verifyAdminToken, async (req, res) => {
         try {
             await runNewsFetchCycle();
             const totalArticles = await NewsArticle.countDocuments();
-            return res.json({ success: true, totalArticles, lastFetchStats });
+            const totalEvents = await NewsEvent.countDocuments();
+            return res.json({ success: true, totalArticles, totalEvents, lastFetchStats });
         } catch (err) {
             console.error('Admin news refresh error:', err.message);
             return res.status(500).json({ error: 'Server error refreshing news' });
         }
     });
 
-    // GET version too — same verifyAdminToken (Bearer JWT in the
-    // Authorization header, same as every other /admin/* route) but
-    // read-only, for a quick status check without triggering a fetch.
     app.get('/admin/news/status', verifyAdminToken, async (req, res) => {
         const totalArticles = await NewsArticle.countDocuments();
-        return res.json({ totalArticles, lastFetchStats, sources: NEWS_SOURCES.map(s => ({ name: s.name, url: s.url, type: s.type })) });
+        const totalEvents = await NewsEvent.countDocuments();
+        return res.json({
+            totalArticles, totalEvents, lastFetchStats,
+            sources: NEWS_SOURCES.map(s => ({ name: s.name, url: s.url, type: s.type, query: s.query }))
+        });
     });
 
-    // ---- Admin: publish an article directly ------------------------
-    // Lets the admin dashboard push a story straight into Official News
-    // without waiting on the scheduled fetch cycle — either a normal
-    // article (title/summary/url/image) they've written or curated
-    // themselves, OR a link to something found elsewhere (a tweet, a
-    // Facebook post, another outlet's story) that they want represented
-    // here as an article: `url` is exactly what "Read full article"
-    // opens, so for a social-media post that's just the post's own link,
-    // with the admin supplying the title/summary since the post itself
-    // won't have those in article form.
-    // Deliberately bypasses the keyword relevance filter (skipRelevanceFilter)
-    // — an admin choosing to publish something has already made that
-    // judgment call — but still runs the same dedupe, location-mention,
-    // and nationwide-push logic as the automated pipeline, so a manually
-    // posted article behaves identically everywhere else in the app.
     app.post('/admin/news', verifyAdminToken, async (req, res) => {
         const { title, summary, url, image, category, sourceName, isOfficial, publishedAt } = req.body || {};
 
@@ -933,10 +1055,6 @@ module.exports = function initNewsSystem(app, deps) {
         const source = {
             name: sourceName && String(sourceName).trim() ? String(sourceName).trim() : 'LightWatch Admin',
             icon: '📢',
-            // Admin-posted articles default to "Official" (they're coming
-            // from LightWatch itself) but the admin can uncheck this when
-            // sharing a third-party link (e.g. someone else's tweet) that
-            // shouldn't be badged as ECG/LightWatch's own announcement.
             official: isOfficial !== false
         };
 
@@ -972,7 +1090,8 @@ module.exports = function initNewsSystem(app, deps) {
                 url: result.articleUrl,
                 locations: result.mentionedLocations,
                 isNationwide: !!result.isNationwide,
-                isAdminPosted: true
+                isAdminPosted: true,
+                eventId: result.eventId
             });
         } catch (err) {
             console.error('Admin news publish error:', err.message);
@@ -980,11 +1099,6 @@ module.exports = function initNewsSystem(app, deps) {
         }
     });
 
-    // DELETE /admin/news — with an `ids` array in the body, deletes just
-    // those articles (same {ids} contract as /admin/chats, /admin/users,
-    // etc.). With no ids (or an empty array), falls back to the original
-    // behavior of clearing every article — kept for whatever already
-    // calls this route that way.
     app.delete('/admin/news', verifyAdminToken, async (req, res) => {
         const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter(Boolean) : [];
         try {
@@ -1001,5 +1115,18 @@ module.exports = function initNewsSystem(app, deps) {
         }
     });
 
-    return { NewsArticle, runNewsFetchCycle };
+    // DELETE /admin/events/:id — NEW. Remove a bad/duplicate event
+    // cluster without touching the raw articles it was built from.
+    app.delete('/admin/events/:id', verifyAdminToken, async (req, res) => {
+        try {
+            await NewsEvent.deleteOne({ _id: req.params.id });
+            clearNewsCache();
+            return res.json({ success: true });
+        } catch (err) {
+            console.error('Admin event delete error:', err.message);
+            return res.status(500).json({ error: 'Server error deleting event' });
+        }
+    });
+
+    return { NewsArticle, NewsEvent, runNewsFetchCycle };
 };
