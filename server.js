@@ -247,7 +247,17 @@ const pushSubscriptionSchema = new mongoose.Schema({
     // 'web' rows. A device gets a new token occasionally (app
     // reinstall, data clear, token rotation); re-registering just
     // upserts on this field, same as web-push re-subscribing.
-    fcmToken:     { type: String, default: null },
+    //
+    // NO `default: null` here — that was the bug behind the
+    // "E11000 duplicate key ... fcmToken: null" 500s on every 2nd+ web
+    // subscriber. `sparse: true` on the index below only excludes
+    // documents where the field is genuinely MISSING/undefined — a
+    // field explicitly set to `null` (which `default: null` did for
+    // every single 'web' row) still counts as a real indexed value, so
+    // the second 'web' subscriber to ever sign up collided with the
+    // first one's `fcmToken: null`. Leaving the field unset for 'web'
+    // rows lets `sparse: true` do what it was actually meant to do.
+    fcmToken:     { type: String },
     createdAt:    { type: Date, default: Date.now }
 });
 // sparse: true on both — a row only ever populates ONE of these two

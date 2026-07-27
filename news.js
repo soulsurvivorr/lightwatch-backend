@@ -198,9 +198,11 @@ const NEWS_SOURCES = [
     // these as best-effort; drop any that log a 404/parse error on
     // every run for a week.
     { name: '3News',        icon: '📰', official: false, type: 'rss', url: 'https://3news.com/feed/' },
-    { name: 'Pulse Ghana',  icon: '📰', official: false, type: 'rss', url: 'https://www.pulse.com.gh/rss' },
-    { name: 'Peace FM',     icon: '📰', official: false, type: 'rss', url: 'https://www.peacefmonline.com/pages/rss/local.xml' },
     { name: 'Starr FM',     icon: '📰', official: false, type: 'rss', url: 'https://starrfm.com.gh/feed/' },
+    // Pulse Ghana (/rss) and Peace FM (/pages/rss/local.xml) both
+    // confirmed 404ing on every real cycle — removed rather than left
+    // to fail forever. If you find their actual current feed path,
+    // just add a new entry above with the same shape.
     // Google News search feeds — see googleNewsUrl() above.
     ...GOOGLE_NEWS_QUERIES.map(q => ({
         name: 'Google News', icon: '🔎', official: false, type: 'google-news', url: googleNewsUrl(q), query: q
@@ -358,6 +360,52 @@ function titleDedupeKey(title) {
         .join(' ');
 }
 
+// Catches the case where Google News' "Headline - Outlet" title format
+// didn't parse cleanly and what's left is a URL slug instead of real
+// prose (e.g. "govt-averts-dumsor") — all-lowercase, hyphen-joined,
+// no spaces, no punctuation. A genuine headline never looks like this,
+// so it's a safe, narrow pattern to catch and clean up rather than
+// show users a slug verbatim.
+const SLUG_TITLE_REGEX = /^[a-z0-9]+(?:-[a-z0-9]+){2,}$/;
+function humanizeSlugTitle(title) {
+    const t = String(title || '').trim();
+    if (!SLUG_TITLE_REGEX.test(t)) return t;
+    return t.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+
+// Last-resort fallback for a feed that STILL fails to parse as XML
+// even after sanitizeFeedXml() — pulls title/link/pubDate/description
+// out of each <item>...</item> block with plain regex instead of a
+// real parser, tolerant of exactly the kind of malformed nesting that
+// makes rss-parser give up entirely. Deliberately dumb (no attempt at
+// full RSS spec compliance) — this only runs as a fallback, and
+// "some fields, roughly right" beats "nothing at all" for a feed
+// that's otherwise unusable. Logged distinctly so it's obvious in the
+// logs when a feed is limping along on this path rather than parsing
+// cleanly, in case it's worth debugging the actual XML at some point.
+function extractItemsWithRegex(rawXml) {
+    const items = [];
+    const itemBlocks = rawXml.match(/<item[\s\S]*?<\/item>/gi) || [];
+    for (const block of itemBlocks) {
+        const grab = (tag) => {
+            const m = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i').exec(block);
+            if (!m) return '';
+            return m[1].replace(/^<!\[CDATA\[([\s\S]*?)\]\]>$/i, '$1').trim();
+        };
+        const title = stripHtml(grab('title'));
+        const link = grab('link').trim();
+        if (!title || !link) continue;
+        const pubDateRaw = grab('pubdate') || grab('dc:date');
+        let isoDate = null;
+        if (pubDateRaw) {
+            const d = new Date(pubDateRaw);
+            if (!isNaN(d)) isoDate = d.toISOString();
+        }
+        items.push({ title, link, contentSnippet: stripHtml(grab('description')), isoDate });
+    }
+    return items;
+}
+
 function stripHtml(html) {
     return String(html || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -373,6 +421,44 @@ function resolveUrl(maybeRelative, base) {
     if (!maybeRelative) return null;
     try { return new URL(maybeRelative, base).toString(); }
     catch { return null; }
+}
+
+// "2 minutes ago" / "3 hours ago" / "5 days ago" — computed fresh on
+// every response (not stored) so it's never stale sitting in the DB.
+// Falls back to a plain date once it's old enough that "N days ago"
+// stops being useful.
+function formatTimeAgo(date) {
+    if (!date) return '';
+    const d = date instanceof Date ? date : new Date(date);
+    if (isNaN(d)) return '';
+    const seconds = Math.floor((Date.now() - d.getTime()) / 1000);
+    if (seconds < 0) return 'just now';
+    if (seconds < 45) return 'just now';
+    if (seconds < 90) return '1 minute ago';
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `${minutes} minutes ago`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 24) return hours === 1 ? '1 hour ago' : `${hours} hours ago`;
+    const days = Math.round(hours / 24);
+    if (days < 7) return days === 1 ? '1 day ago' : `${days} days ago`;
+    const weeks = Math.round(days / 7);
+    if (weeks < 5) return weeks === 1 ? '1 week ago' : `${weeks} weeks ago`;
+    return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+// Real per-source logo, not a hand-picked emoji — resolved from
+// whichever URL that source's article actually lives at, via Google's
+// public favicon endpoint. This is what "fetches" the logo: the
+// browser loads this URL directly as an <img src>, and it works out
+// of the box for any outlet (including ones added later) without a
+// logo image having to be uploaded/hosted for each one.
+function sourceLogoUrl(articleUrl) {
+    try {
+        const host = new URL(articleUrl).hostname.replace(/^www\./, '');
+        return `https://www.google.com/s2/favicons?sz=64&domain=${host}`;
+    } catch {
+        return null;
+    }
 }
 
 // Google News RSS titles are "Headline - Outlet"; the outlet name is
@@ -437,6 +523,7 @@ module.exports = function initNewsSystem(app, deps) {
         eventType: { type: String, required: true }, // e.g. "Planned Outage", "Power Restoration"
         headline:  { type: String, required: true }, // most-recently-updated headline
         summary:   { type: String, default: '' },
+        imageUrl:  { type: String, default: null },
         affectedLocations: { type: [String], default: [] },
         isNationwide: { type: Boolean, default: false },
         startTimeText: { type: String, default: null },
@@ -497,6 +584,15 @@ module.exports = function initNewsSystem(app, deps) {
     }
 
     // ---- Notifications ---------------------------------------------
+    // Set only for the duration of runNewsFetchCycle() below — while
+    // it's set, notifyForEvent() queues instead of sending immediately,
+    // so several distinct events discovered in the same 7-minute cycle
+    // (real example from your logs: 4 separate dumsor maintenance
+    // notices in one cycle) land as ONE digest push instead of four
+    // back-to-back ones. Outside a scheduled cycle (e.g. the admin
+    // manual-publish route) this stays null and sends immediately.
+    let activeCycleQueue = null;
+
     async function notifyLocationMentions(event, locationKeys) {
         if (!locationKeys.length) return;
         try {
@@ -539,6 +635,65 @@ module.exports = function initNewsSystem(app, deps) {
         }
     }
 
+    async function notifyAllUsersDigest(events) {
+        try {
+            const subscribers = await PushSubscription.find({}).lean();
+            if (!subscribers.length) return;
+            const headlines = events.slice(0, 3).map(e => e.headline);
+            const more = events.length > 3 ? ` +${events.length - 3} more` : '';
+            const payload = {
+                title: `LightWatch News — ${events.length} power updates`,
+                body: headlines.join(' • ') + more,
+                url: '/pages/chat.html',
+                tag: `news-digest-broadcast-${Date.now()}`,
+                requireInteraction: false,
+                vibrate: [200, 90, 200, 90, 200],
+                tone: 'chat'
+            };
+            console.log(`[news] Broadcasting DIGEST to ${subscribers.length} subscriber(s) — ${events.length} events bundled`);
+            await sendPushToSubscribers(subscribers, payload);
+        } catch (err) {
+            console.error('[news] Digest broadcast push error:', err.message);
+        }
+    }
+
+    async function notifyLocationDigest(locationKey, events) {
+        try {
+            const subscribers = await PushSubscription.find({ location: locationKey }).lean();
+            if (!subscribers.length) return;
+            const displayLocation = titleCaseLocation(locationKey);
+            const headlines = events.slice(0, 3).map(e => e.headline);
+            const more = events.length > 3 ? ` +${events.length - 3} more` : '';
+            const payload = {
+                title: `LightWatch News — ${displayLocation} (${events.length} updates)`,
+                body: headlines.join(' • ') + more,
+                url: '/pages/chat.html',
+                tag: `news-digest-${locationKey}-${Date.now()}`,
+                requireInteraction: false,
+                vibrate: [200, 90, 200],
+                tone: 'chat'
+            };
+            console.log(`[news] Notifying ${subscribers.length} subscriber(s) [digest] — ${displayLocation}: ${events.length} events bundled`);
+            await sendPushToSubscribers(subscribers, payload);
+        } catch (err) {
+            console.error('[news] Location digest push error:', err.message);
+        }
+    }
+
+    async function flushCycleQueue(queue) {
+        if (!queue) return;
+        const { broadcasts, byLocation } = queue;
+        if (broadcasts.length === 1) {
+            await notifyAllUsers(broadcasts[0].event, broadcasts[0].reason);
+        } else if (broadcasts.length > 1) {
+            await notifyAllUsersDigest(broadcasts.map(b => b.event));
+        }
+        for (const [loc, events] of byLocation.entries()) {
+            if (events.length === 1) await notifyLocationMentions(events[0], [loc]);
+            else await notifyLocationDigest(loc, events);
+        }
+    }
+
     // Fires whenever an event is created, or an existing one changes to
     // a status it hasn't already notified for (see notifiedStates).
     // Deliberately does NOT fire again just because a 2nd/3rd/4th source
@@ -548,8 +703,19 @@ module.exports = function initNewsSystem(app, deps) {
         if (event.notifiedStates.includes(event.category)) return;
 
         const broadcast = shouldBroadcastToAll(combinedText, event.isNationwide);
-        if (broadcast) {
-            await notifyAllUsers(event, event.isNationwide ? 'nationwide' : 'dumsor-keyword');
+        const reason = event.isNationwide ? 'nationwide' : 'dumsor-keyword';
+
+        if (activeCycleQueue) {
+            if (broadcast) {
+                activeCycleQueue.broadcasts.push({ event, reason });
+            } else if (event.affectedLocations.length) {
+                for (const loc of event.affectedLocations) {
+                    if (!activeCycleQueue.byLocation.has(loc)) activeCycleQueue.byLocation.set(loc, []);
+                    activeCycleQueue.byLocation.get(loc).push(event);
+                }
+            }
+        } else if (broadcast) {
+            await notifyAllUsers(event, reason);
         } else if (event.affectedLocations.length) {
             await notifyLocationMentions(event, event.affectedLocations);
         }
@@ -629,6 +795,7 @@ module.exports = function initNewsSystem(app, deps) {
                 eventType: label,
                 headline: article.title,
                 summary: article.summary,
+                imageUrl: article.imageUrl || null,
                 affectedLocations: mentionedLocations,
                 isNationwide: nationwide,
                 startTimeText, endTimeText,
@@ -670,6 +837,7 @@ module.exports = function initNewsSystem(app, deps) {
             event.lastUpdatedAt = article.publishedAt;
             event.headline = article.title;
             event.summary = article.summary || event.summary;
+            if (article.imageUrl) event.imageUrl = article.imageUrl;
             event.category = category;
             event.eventType = label;
             if (startTimeText) event.startTimeText = startTimeText;
@@ -704,7 +872,7 @@ module.exports = function initNewsSystem(app, deps) {
     // `opts.skipRelevanceFilter` is used only by the admin manual-publish
     // route — an admin curating a story has already made that call.
     async function storeArticle(raw, source, opts = {}) {
-        const title = String(raw.title || '').trim();
+        const title = humanizeSlugTitle(String(raw.title || '').trim());
         const articleUrl = raw.url;
         if (!title || !articleUrl) return null;
 
@@ -770,8 +938,20 @@ module.exports = function initNewsSystem(app, deps) {
             });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const rawXml = await res.text();
-            const feed = await rssParser.parseString(sanitizeFeedXml(rawXml));
-            items = feed.items || [];
+            const sanitized = sanitizeFeedXml(rawXml);
+            try {
+                const feed = await rssParser.parseString(sanitized);
+                items = feed.items || [];
+            } catch (parseErr) {
+                // Sanitized XML STILL didn't parse — try the dumb regex
+                // fallback rather than losing this source's items outright.
+                items = extractItemsWithRegex(rawXml);
+                if (items.length) {
+                    console.warn(`[news] ${source.name}: rss-parser rejected the feed (${parseErr.message}) — recovered ${items.length} item(s) via regex fallback instead.`);
+                } else {
+                    throw parseErr; // fallback found nothing either — report the real error below
+                }
+            }
         } catch (err) {
             console.error(`[news] RSS fetch FAILED for ${source.name} (${source.url}): ${err.message}`);
             return { fetched: 0, stored: 0 };
@@ -862,12 +1042,20 @@ module.exports = function initNewsSystem(app, deps) {
         const stats = { startedAt: new Date(), sources: {} };
         const knownKeys = await getKnownLocationKeys();
 
-        for (const source of NEWS_SOURCES) {
-            let result;
-            if (source.type === 'rss' || source.type === 'google-news') result = await fetchRssSource(source, knownKeys);
-            else if (source.type === 'scrape-ecg') result = await scrapeEcgSite(source, knownKeys);
-            const label = source.query ? `${source.name} (${source.query})` : source.name;
-            stats.sources[label] = result || { fetched: 0, stored: 0 };
+        const cycleQueue = { broadcasts: [], byLocation: new Map() };
+        activeCycleQueue = cycleQueue;
+
+        try {
+            for (const source of NEWS_SOURCES) {
+                let result;
+                if (source.type === 'rss' || source.type === 'google-news') result = await fetchRssSource(source, knownKeys);
+                else if (source.type === 'scrape-ecg') result = await scrapeEcgSite(source, knownKeys);
+                const label = source.query ? `${source.name} (${source.query})` : source.name;
+                stats.sources[label] = result || { fetched: 0, stored: 0 };
+            }
+        } finally {
+            activeCycleQueue = null; // stop queuing before flushing, so nothing sent here loops back into itself
+            await flushCycleQueue(cycleQueue);
         }
 
         stats.finishedAt = new Date();
@@ -920,23 +1108,37 @@ module.exports = function initNewsSystem(app, deps) {
 
         try {
             const events = await NewsEvent.find(query).sort({ lastUpdatedAt: -1 }).limit(limit).lean();
-            const body = events.map(e => ({
-                id: e._id,
-                eventType: e.eventType,
-                headline: e.headline,
-                summary: e.summary,
-                affectedLocations: e.affectedLocations,
-                isNationwide: !!e.isNationwide,
-                startTime: e.startTimeText,
-                endTime: e.endTimeText,
-                firstPublishedAt: e.firstPublishedAt,
-                lastUpdatedAt: e.lastUpdatedAt,
-                status: e.status,
-                confidenceScore: e.confidenceScore,
-                sourceCount: new Set(e.sources.map(s => s.name)).size,
-                sources: e.sources.map(s => ({ name: s.name, icon: s.icon, official: s.official, url: s.url, headline: s.headline, publishedAt: s.publishedAt })),
-                history: e.history
-            }));
+            const body = events.map(e => {
+                const officialSource = e.sources.find(s => s.official);
+                const mainSource = officialSource || e.sources[e.sources.length - 1] || {};
+                return {
+                    id: e._id,
+                    eventType: e.eventType,
+                    headline: e.headline,
+                    summary: e.summary,
+                    image: e.imageUrl || null,
+                    affectedLocations: e.affectedLocations,
+                    isNationwide: !!e.isNationwide,
+                    startTime: e.startTimeText,
+                    endTime: e.endTimeText,
+                    firstPublishedAt: e.firstPublishedAt,
+                    lastUpdatedAt: e.lastUpdatedAt,
+                    timeAgo: formatTimeAgo(e.lastUpdatedAt),
+                    firstPublishedTimeAgo: formatTimeAgo(e.firstPublishedAt),
+                    status: e.status,
+                    confidenceScore: e.confidenceScore,
+                    sourceCount: new Set(e.sources.map(s => s.name)).size,
+                    // Main source's real logo — this is span.news-item__source-icon.
+                    sourceIcon: sourceLogoUrl(mainSource.url) || null,
+                    sourceName: mainSource.name || 'LightWatch',
+                    sources: e.sources.map(s => ({
+                        name: s.name, official: s.official, url: s.url, headline: s.headline,
+                        publishedAt: s.publishedAt, timeAgo: formatTimeAgo(s.publishedAt),
+                        logo: sourceLogoUrl(s.url)
+                    })),
+                    history: e.history
+                };
+            });
             newsResponseCache.set(cacheKey, { expiresAt: Date.now() + NEWS_CACHE_TTL_MS, body });
             return res.json(body);
         } catch (err) {
@@ -985,17 +1187,28 @@ module.exports = function initNewsSystem(app, deps) {
             const body = events.map(e => {
                 const latestSource = e.sources[e.sources.length - 1] || {};
                 const officialSource = e.sources.find(s => s.official);
+                const mainSource = officialSource || latestSource;
                 return {
                     id: e._id,
                     title: e.headline,
                     summary: e.summary,
-                    image: null,
-                    source: (officialSource || latestSource).name || 'LightWatch',
-                    sourceIcon: (officialSource || latestSource).icon || '📰',
+                    // Was hardcoded to null — that was the regression that
+                    // broke article images. Now carried through from
+                    // whichever source article had one (see imageUrl on
+                    // NewsEvent, set/merged in attachArticleToEvent).
+                    image: e.imageUrl || null,
+                    source: mainSource.name || 'LightWatch',
+                    // Real fetched logo for the main source (span.news-item__source-icon),
+                    // not the old static emoji. iconEmoji kept alongside for
+                    // any UI that still wants a text/emoji fallback.
+                    sourceIcon: sourceLogoUrl(mainSource.url) || null,
+                    iconEmoji: mainSource.icon || '📰',
                     isOfficial: !!officialSource,
                     category: e.category,
                     publishedAt: e.lastUpdatedAt,
-                    url: (officialSource || latestSource).url,
+                    // What span.news-item__time should show.
+                    timeAgo: formatTimeAgo(e.lastUpdatedAt),
+                    url: mainSource.url,
                     locations: e.affectedLocations,
                     isNationwide: !!e.isNationwide,
                     isAdminPosted: false,
@@ -1003,7 +1216,7 @@ module.exports = function initNewsSystem(app, deps) {
                     // to ignore until it's updated to show them.
                     eventType: e.eventType,
                     sourceCount: new Set(e.sources.map(s => s.name)).size,
-                    sources: e.sources,
+                    sources: e.sources.map(s => ({ ...s, logo: sourceLogoUrl(s.url), timeAgo: formatTimeAgo(s.publishedAt) })),
                     confidenceScore: e.confidenceScore,
                     status: e.status
                 };
