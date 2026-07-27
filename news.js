@@ -1014,8 +1014,27 @@ module.exports = function initNewsSystem(app, deps) {
         // layer below wants to see (extra corroboration), so they're
         // no longer dropped/replaced here the way the old version of
         // this file did.
-        const existing = await NewsArticle.findOne({ articleUrl }).select('_id').lean();
-        if (existing) return opts.throwOnDuplicate ? 'duplicate' : null;
+        const existing = await NewsArticle.findOne({ articleUrl }).select('_id imageUrl eventId').lean();
+        if (existing) {
+            // Self-heal: articles stored before the media:content/
+            // media:thumbnail extraction fix (see extractImageFromRssItem)
+            // are sitting in the DB with imageUrl: null forever, since a
+            // repeat fetch of the same URL stops right here without ever
+            // looking at raw.imageUrl again. If this cycle's fetch of the
+            // same URL DOES carry an image now, patch it into the stored
+            // article, and into its event too if that event still has no
+            // image of its own. Nothing else about the existing row changes.
+            if (raw.imageUrl && !existing.imageUrl) {
+                await NewsArticle.updateOne({ _id: existing._id }, { $set: { imageUrl: raw.imageUrl } });
+                if (existing.eventId) {
+                    await NewsEvent.updateOne(
+                        { _id: existing.eventId, $or: [{ imageUrl: null }, { imageUrl: { $exists: false } }] },
+                        { $set: { imageUrl: raw.imageUrl } }
+                    );
+                }
+            }
+            return opts.throwOnDuplicate ? 'duplicate' : null;
+        }
 
         const category = raw.category || detectCategory(combinedText);
         const nationwide = isNationwideArticle(combinedText, category);
@@ -1481,9 +1500,27 @@ module.exports = function initNewsSystem(app, deps) {
         const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter(Boolean) : [];
         try {
             if (ids.length) {
-                await NewsArticle.deleteMany({ _id: { $in: ids } });
+                // The admin news table is populated from GET /news, and
+                // every `id` it hands back is a NewsEvent._id (see the
+                // events-based response body in GET /news above) — NOT a
+                // raw NewsArticle._id. Deleting only from NewsArticle (the
+                // old behavior) matched nothing and silently no-opped,
+                // which is why a "deleted" story kept reappearing.
+                // Delete the event itself, plus every raw NewsArticle
+                // folded into it (via eventId), so it can't just get
+                // re-clustered back together next cycle. Also still
+                // matches directly against NewsArticle._id for backward
+                // compatibility with any caller that already has a raw
+                // article id instead of an event id.
+                await Promise.all([
+                    NewsEvent.deleteMany({ _id: { $in: ids } }),
+                    NewsArticle.deleteMany({ $or: [{ _id: { $in: ids } }, { eventId: { $in: ids } }] })
+                ]);
             } else {
-                await NewsArticle.deleteMany({});
+                await Promise.all([
+                    NewsEvent.deleteMany({}),
+                    NewsArticle.deleteMany({})
+                ]);
             }
             clearNewsCache();
             return res.json({ success: true });
