@@ -543,6 +543,16 @@ async function scrapeOgImage(url) {
             headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0)' }
         });
         if (!res.ok) return null;
+        // If the redirect never actually left Google (res.url is still
+        // news.google.com/google.com), this is Google's own interstitial
+        // page, not the publisher's article — its og:image is a generic
+        // "G News" branding logo, which is exactly the ugly fallback that
+        // was showing up on every article whose redirect didn't resolve.
+        // Bail out here instead of scraping that page at all.
+        let finalHost = '';
+        try { finalHost = new URL(res.url).hostname; } catch (_) { /* leave empty */ }
+        if (/(^|\.)google\.com$/i.test(finalHost) || /(^|\.)gstatic\.com$/i.test(finalHost)) return null;
+
         // Bail early on non-HTML responses (PDFs, images, etc.) rather
         // than reading a potentially huge body just to find no match.
         const contentType = res.headers.get('content-type') || '';
@@ -559,7 +569,17 @@ async function scrapeOgImage(url) {
         ];
         for (const re of patterns) {
             const match = re.exec(html);
-            if (match && match[1]) return match[1];
+            if (match && match[1]) {
+                // Extra safety net: even on a non-Google host, don't accept
+                // an image that's itself served from a Google-owned domain
+                // (e.g. a page that embeds Google's share-card image
+                // somewhere in its markup) — that's still the same ugly
+                // logo, not a real article photo.
+                let imgHost = '';
+                try { imgHost = new URL(match[1], res.url).hostname; } catch (_) { /* leave empty */ }
+                if (/(^|\.)google\.com$/i.test(imgHost) || /(^|\.)gstatic\.com$/i.test(imgHost) || /(^|\.)googleusercontent\.com$/i.test(imgHost)) continue;
+                return match[1];
+            }
         }
         return null;
     } catch (err) {
@@ -1078,12 +1098,35 @@ module.exports = function initNewsSystem(app, deps) {
             // same URL DOES carry an image now, patch it into the stored
             // article, and into its event too if that event still has no
             // image of its own. Nothing else about the existing row changes.
-            if (raw.imageUrl && !existing.imageUrl) {
+            //
+            // Also clears out the Google "G News" logo that scrapeOgImage
+            // could briefly return for redirect links that never actually
+            // left news.google.com (fixed above, but rows saved during that
+            // window need cleaning up here rather than staying stuck on it
+            // forever) — an existing bad-domain image is treated the same
+            // as no image at all for the purposes of this heal.
+            const isBadImage = (u) => {
+                if (!u) return true;
+                try { return /(^|\.)google\.com$|(^|\.)gstatic\.com$|(^|\.)googleusercontent\.com$/i.test(new URL(u).hostname); }
+                catch (_) { return false; }
+            };
+            if (raw.imageUrl && isBadImage(existing.imageUrl)) {
                 await NewsArticle.updateOne({ _id: existing._id }, { $set: { imageUrl: raw.imageUrl } });
                 if (existing.eventId) {
                     await NewsEvent.updateOne(
-                        { _id: existing.eventId, $or: [{ imageUrl: null }, { imageUrl: { $exists: false } }] },
+                        { _id: existing.eventId, $or: [{ imageUrl: null }, { imageUrl: { $exists: false } }, { imageUrl: { $regex: /google\.com|gstatic\.com|googleusercontent\.com/i } }] },
                         { $set: { imageUrl: raw.imageUrl } }
+                    );
+                }
+            } else if (isBadImage(existing.imageUrl) && existing.imageUrl) {
+                // No fresh replacement available this cycle, but the stored
+                // value is still the bad logo — clear it so the frontend
+                // just shows no image (graceful) instead of the ugly one.
+                await NewsArticle.updateOne({ _id: existing._id }, { $set: { imageUrl: null } });
+                if (existing.eventId) {
+                    await NewsEvent.updateOne(
+                        { _id: existing.eventId, imageUrl: { $regex: /google\.com|gstatic\.com|googleusercontent\.com/i } },
+                        { $set: { imageUrl: null } }
                     );
                 }
             }
@@ -1464,8 +1507,30 @@ module.exports = function initNewsSystem(app, deps) {
     // only reads articles already sitting in the DB. Safe to call more
     // than once — events that still have no image anywhere in their
     // source articles are simply left as null and skipped.
+    //
+    // Also does an immediate cleanup pass for the Google "G News" logo
+    // that scrapeOgImage could briefly return for redirect links that
+    // never left news.google.com (see the domain guard added there) —
+    // rows saved with that logo URL before the guard existed would
+    // otherwise only get fixed whenever their article URL happens to
+    // come through a future fetch cycle, which could be days away.
+    // Cleared straight to null here instead (frontend already handles a
+    // missing image gracefully), then the normal candidate-search below
+    // gets a chance to fill in a real one from another source article.
+    const GOOGLE_LOGO_IMAGE_REGEX = /google\.com|gstatic\.com|googleusercontent\.com/i;
     app.post('/admin/news/backfill-images', verifyAdminToken, async (req, res) => {
         try {
+            const [articleCleanup, eventCleanup] = await Promise.all([
+                NewsArticle.updateMany(
+                    { imageUrl: { $regex: GOOGLE_LOGO_IMAGE_REGEX } },
+                    { $set: { imageUrl: null } }
+                ),
+                NewsEvent.updateMany(
+                    { imageUrl: { $regex: GOOGLE_LOGO_IMAGE_REGEX } },
+                    { $set: { imageUrl: null } }
+                )
+            ]);
+
             const events = await NewsEvent.find({
                 $or: [{ imageUrl: null }, { imageUrl: { $exists: false } }]
             }).select('_id');
@@ -1474,12 +1539,18 @@ module.exports = function initNewsSystem(app, deps) {
             let stillMissing = 0;
 
             for (const { _id } of events) {
-                const candidate = await NewsArticle.findOne({ eventId: _id, imageUrl: { $ne: null } })
+                // Filtered in JS rather than via a $not/$regex combo in the
+                // query itself (that combination behaves inconsistently
+                // across MongoDB/Mongoose versions) — this event's article
+                // set is small, so pulling a few candidates and picking the
+                // first clean one is simpler and more reliable.
+                const candidates = await NewsArticle.find({ eventId: _id, imageUrl: { $ne: null } })
                     .sort({ publishedAt: -1 })
                     .select('imageUrl')
                     .lean();
+                const candidate = candidates.find(c => c.imageUrl && !GOOGLE_LOGO_IMAGE_REGEX.test(c.imageUrl));
 
-                if (candidate && candidate.imageUrl) {
+                if (candidate) {
                     await NewsEvent.updateOne({ _id }, { $set: { imageUrl: candidate.imageUrl } });
                     updated++;
                 } else {
@@ -1488,7 +1559,11 @@ module.exports = function initNewsSystem(app, deps) {
             }
 
             clearNewsCache();
-            return res.json({ success: true, eventsChecked: events.length, updated, stillMissing });
+            return res.json({
+                success: true,
+                badLogoImagesCleared: { articles: articleCleanup.modifiedCount, events: eventCleanup.modifiedCount },
+                eventsChecked: events.length, updated, stillMissing
+            });
         } catch (err) {
             console.error('Admin image backfill error:', err.message);
             return res.status(500).json({ error: 'Server error backfilling images' });
