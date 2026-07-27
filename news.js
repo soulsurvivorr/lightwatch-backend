@@ -829,6 +829,20 @@ module.exports = function initNewsSystem(app, deps) {
             });
         }
 
+        // Image backfill runs independently of which article is
+        // "current" below. Google News RSS items almost never carry a
+        // photo (extractImageFromRssItem has nothing to find in their
+        // feed), so gating this behind "is this article the newest"
+        // meant a newer Google News corroboration permanently blocked
+        // an older direct-feed article's real image from ever reaching
+        // the event — even though that image was sitting right there
+        // in the same event's source list. Now: always take an image
+        // if the event doesn't have one yet, and let a newer article
+        // that DOES have one replace an older image.
+        if (article.imageUrl && (!event.imageUrl || article.publishedAt >= event.lastUpdatedAt)) {
+            event.imageUrl = article.imageUrl;
+        }
+
         // A newer article always wins on "current" fields — that's what
         // keeps the event reflecting the LATEST information (e.g. a
         // restoration notice replacing an outage's status) rather than
@@ -837,7 +851,6 @@ module.exports = function initNewsSystem(app, deps) {
             event.lastUpdatedAt = article.publishedAt;
             event.headline = article.title;
             event.summary = article.summary || event.summary;
-            if (article.imageUrl) event.imageUrl = article.imageUrl;
             event.category = category;
             event.eventType = label;
             if (startTimeText) event.startTimeText = startTimeText;
@@ -1251,6 +1264,47 @@ module.exports = function initNewsSystem(app, deps) {
             totalArticles, totalEvents, lastFetchStats,
             sources: NEWS_SOURCES.map(s => ({ name: s.name, url: s.url, type: s.type, query: s.query }))
         });
+    });
+
+    // POST /admin/news/backfill-images — ONE-OFF. Repairs events that
+    // were merged before the imageUrl-gating bug above was fixed: for
+    // every event still missing an image, look at the raw NewsArticle
+    // docs already folded into it (via eventId) and pull an image from
+    // whichever one has it — preferring the most recently published
+    // article that actually has one, same preference order the merge
+    // logic uses going forward. No re-fetching, no data reset; this
+    // only reads articles already sitting in the DB. Safe to call more
+    // than once — events that still have no image anywhere in their
+    // source articles are simply left as null and skipped.
+    app.post('/admin/news/backfill-images', verifyAdminToken, async (req, res) => {
+        try {
+            const events = await NewsEvent.find({
+                $or: [{ imageUrl: null }, { imageUrl: { $exists: false } }]
+            }).select('_id');
+
+            let updated = 0;
+            let stillMissing = 0;
+
+            for (const { _id } of events) {
+                const candidate = await NewsArticle.findOne({ eventId: _id, imageUrl: { $ne: null } })
+                    .sort({ publishedAt: -1 })
+                    .select('imageUrl')
+                    .lean();
+
+                if (candidate && candidate.imageUrl) {
+                    await NewsEvent.updateOne({ _id }, { $set: { imageUrl: candidate.imageUrl } });
+                    updated++;
+                } else {
+                    stillMissing++;
+                }
+            }
+
+            clearNewsCache();
+            return res.json({ success: true, eventsChecked: events.length, updated, stillMissing });
+        } catch (err) {
+            console.error('Admin image backfill error:', err.message);
+            return res.status(500).json({ error: 'Server error backfilling images' });
+        }
     });
 
     app.post('/admin/news', verifyAdminToken, async (req, res) => {
