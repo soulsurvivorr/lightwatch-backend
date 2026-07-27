@@ -59,7 +59,21 @@ const cheerio = require('cheerio');
 
 const rssParser = new Parser({
     timeout: 15000,
-    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0; +https://lightwatch-backend.onrender.com)' }
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0; +https://lightwatch-backend.onrender.com)' },
+    // Without this, rss-parser silently drops <media:content> and
+    // <media:thumbnail> — the tags WordPress/Yoast-based outlets (Adom
+    // Online, and most of what Google News surfaces) use to carry their
+    // featured image instead of a plain <enclosure>. That silent drop is
+    // why images that used to show up (from feeds/snippets that happened
+    // to embed a raw <img> in the description) later stopped for sources
+    // that only ever provided the image this way — extractImageFromRssItem
+    // had nothing to find, with no error to point at.
+    customFields: {
+        item: [
+            ['media:content', 'mediaContent', { keepArray: true }],
+            ['media:thumbnail', 'mediaThumbnail', { keepArray: true }]
+        ]
+    }
 });
 
 // ---------------------------------------------------------------
@@ -233,6 +247,71 @@ const NEWS_KEYWORD_REGEX = new RegExp(
 );
 function isRelevantArticle(text) {
     return NEWS_KEYWORD_REGEX.test(text);
+}
+
+// ---- Ghana-signal check (Google News items only) -----------------
+// Google News search is NOT a strict AND-match — a query like
+// "planned power outage Ghana" can still return an article that's
+// really about somewhere like Oro-Medonte, Ontario, just because it
+// happens to say "planned power outage" and Google's own ranking
+// pulled it into the result set. Direct RSS feeds (Citi News,
+// GhanaWeb, MyJoyOnline, etc.) don't need this extra check — every
+// outlet in NEWS_SOURCES is a Ghanaian outlet by definition, so they
+// only ever cover Ghana anyway.
+//
+// This deliberately does NOT lean on PushSubscription/User city data
+// (mentionedLocations) as its main signal — on a fresh app with no
+// subscribers yet, that list is empty, which would make this filter
+// reject almost everything. Instead it checks against a static
+// gazetteer of Ghanaian places, so it works from day one regardless
+// of how many users have signed up.
+//
+// A Ghana-specific institutional term is treated as sufficient proof
+// on its own — no foreign outage story is going to organically
+// mention ECG, GRIDCo, or "dumsor". Otherwise, require an explicit
+// "Ghana" mention, or a hit against a known Ghanaian region/city/town.
+const GHANA_SPECIFIC_KEYWORDS = [
+    'ecg', 'electricity company of ghana', 'gridco', 'ghana grid company',
+    'dumsor', 'purc', 'energy commission'
+];
+const GHANA_SPECIFIC_REGEX = new RegExp(
+    '\\b(' + GHANA_SPECIFIC_KEYWORDS.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')\\b',
+    'i'
+);
+const GHANA_MENTION_REGEX = /\bghana(ian)?\b/i;
+
+// Regions (ambiguous single-word region names require a "region" suffix
+// so "western outage" etc. can't match on its own) plus major cities/
+// towns across all regions. Not exhaustive, but wide enough to catch
+// the vast majority of real Ghanaian datelines.
+const GHANA_REGION_KEYWORDS = [
+    'greater accra', 'ashanti region', 'western region', 'western north',
+    'central region', 'eastern region', 'volta region', 'oti region',
+    'northern region', 'north east region', 'upper east', 'upper west',
+    'bono region', 'bono east', 'ahafo region', 'savannah region'
+];
+const GHANA_CITY_KEYWORDS = [
+    'accra', 'kumasi', 'tamale', 'takoradi', 'sekondi', 'sunyani',
+    'koforidua', 'cape coast', 'bolgatanga', 'techiman', 'tema',
+    'ashaiman', 'obuasi', 'kasoa', 'madina', 'adenta', 'achimota',
+    'dansoman', 'nungua', 'teshie', 'dodowa', 'aburi', 'nkawkaw',
+    'konongo', 'ejisu', 'mampong', 'berekum', 'dunkwa', 'axim', 'elmina',
+    'winneba', 'swedru', 'nsawam', 'suhum', 'asamankese', 'tarkwa',
+    'prestea', 'bogoso', 'wenchi', 'kintampo', 'yendi', 'savelugu',
+    'bawku', 'navrongo', 'nalerigu', 'damongo', 'salaga', 'hohoe',
+    'keta', 'anloga', 'akatsi', 'sogakope'
+];
+const GHANA_PLACE_REGEX = new RegExp(
+    '\\b(' + [...GHANA_REGION_KEYWORDS, ...GHANA_CITY_KEYWORDS]
+        .map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')\\b',
+    'i'
+);
+
+function isGhanaRelevant(text, mentionedLocations) {
+    return GHANA_SPECIFIC_REGEX.test(text)
+        || GHANA_MENTION_REGEX.test(text)
+        || GHANA_PLACE_REGEX.test(text)
+        || mentionedLocations.length > 0;
 }
 
 // ---- Event type detection -------------------------------------
@@ -410,8 +489,27 @@ function stripHtml(html) {
     return String(html || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+// Pulls a $.url (or bare .url) out of an rss-parser customField value,
+// which can come back as either a single object or an array depending
+// on the feed — keepArray:true above always gives us an array, but this
+// stays defensive in case a feed shape changes.
+function firstMediaUrl(field) {
+    const list = Array.isArray(field) ? field : (field ? [field] : []);
+    for (const entry of list) {
+        const url = entry?.$?.url || entry?.url;
+        if (url) return url;
+    }
+    return null;
+}
+
 function extractImageFromRssItem(item) {
     if (item.enclosure && item.enclosure.url) return item.enclosure.url;
+    // media:content / media:thumbnail — see the customFields comment on
+    // rssParser above for why these need checking explicitly.
+    const mediaContentUrl = firstMediaUrl(item.mediaContent);
+    if (mediaContentUrl) return mediaContentUrl;
+    const mediaThumbnailUrl = firstMediaUrl(item.mediaThumbnail);
+    if (mediaThumbnailUrl) return mediaThumbnailUrl;
     const html = item['content:encoded'] || item.content || item.summary || '';
     const match = /<img[^>]+src="([^"]+)"/i.exec(html);
     return match ? match[1] : null;
@@ -892,7 +990,22 @@ module.exports = function initNewsSystem(app, deps) {
         const summary = stripHtml(raw.summary || '').slice(0, 500) || title;
         const combinedText = `${title} ${summary}`;
 
-        if (!opts.skipRelevanceFilter && !isRelevantArticle(combinedText)) return null;
+        // Moved up (used to run after the relevance check below) so the
+        // Google News Ghana-gate can use mentionedLocations too, e.g. a
+        // story that names a subscriber's city but never says "Ghana"
+        // out loud still counts as relevant.
+        const knownKeys = opts.knownKeys || await getKnownLocationKeys();
+        const mentionedLocations = findMentionedLocations(combinedText, knownKeys);
+
+        if (!opts.skipRelevanceFilter) {
+            if (!isRelevantArticle(combinedText)) return null;
+            // Extra gate for Google News search results only — see
+            // isGhanaRelevant() above for why direct feeds don't need it.
+            if (opts.isGoogleNews && !isGhanaRelevant(combinedText, mentionedLocations)) {
+                console.log(`[news] Dropped non-Ghana Google News result: "${title}"`);
+                return null;
+            }
+        }
 
         const dedupeKey = titleDedupeKey(title);
 
@@ -904,8 +1017,6 @@ module.exports = function initNewsSystem(app, deps) {
         const existing = await NewsArticle.findOne({ articleUrl }).select('_id').lean();
         if (existing) return opts.throwOnDuplicate ? 'duplicate' : null;
 
-        const knownKeys = opts.knownKeys || await getKnownLocationKeys();
-        const mentionedLocations = findMentionedLocations(combinedText, knownKeys);
         const category = raw.category || detectCategory(combinedText);
         const nationwide = isNationwideArticle(combinedText, category);
 
@@ -987,7 +1098,7 @@ module.exports = function initNewsSystem(app, deps) {
                 url: item.link,
                 imageUrl: extractImageFromRssItem(item),
                 publishedAt: item.isoDate ? new Date(item.isoDate) : new Date()
-            }, sourceForItem, { knownKeys });
+            }, sourceForItem, { knownKeys, isGoogleNews: source.type === 'google-news' });
             if (doc) stored++;
         }
 
