@@ -1581,6 +1581,86 @@ module.exports = function initNewsSystem(app, deps) {
         }
     });
 
+    // POST /admin/news/backfill-images-live?limit=10 — separate from the
+    // route above on purpose. That one only reads what's already in the
+    // DB; this one actually goes out and fetches pages, using the exact
+    // same scrapeOgImage() the live fetch cycle already relies on (same
+    // domain guards, same 6s timeout, same "quiet failure" behavior) — so
+    // nothing new or untested is happening here, just applied to old
+    // events on demand instead of waiting for their URL to resurface.
+    //
+    // Deliberately batched (default 10, capped at 25 per call) rather
+    // than doing all image-less events in one request: each event can
+    // need several outbound fetches (one per candidate source article,
+    // until one yields a real image), and a single request looping over
+    // dozens of events with 6s-timeout fetches each could run long enough
+    // to hit a platform request timeout and get killed mid-write. Call it
+    // repeatedly — already-fixed events won't be picked up again since
+    // the query only ever selects imageUrl: null.
+    app.post('/admin/news/backfill-images-live', verifyAdminToken, async (req, res) => {
+        const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 25);
+        try {
+            const events = await NewsEvent.find({
+                $or: [{ imageUrl: null }, { imageUrl: { $exists: false } }]
+            }).select('_id').limit(limit).lean();
+
+            let updated = 0;
+            let stillMissing = 0;
+            const errors = [];
+
+            for (const { _id } of events) {
+                try {
+                    // Newest source article first — most likely to still
+                    // be reachable, and most representative of the story.
+                    const articles = await NewsArticle.find({ eventId: _id, articleUrl: { $ne: null } })
+                        .sort({ publishedAt: -1 })
+                        .select('_id articleUrl imageUrl')
+                        .lean();
+
+                    let found = null;
+                    for (const article of articles) {
+                        // Skip anything already known bad; don't re-scrape it.
+                        if (article.imageUrl && !GOOGLE_LOGO_IMAGE_REGEX.test(article.imageUrl)) {
+                            found = article.imageUrl;
+                            break;
+                        }
+                        const scraped = await scrapeOgImage(article.articleUrl);
+                        if (scraped) {
+                            await NewsArticle.updateOne({ _id: article._id }, { $set: { imageUrl: scraped } });
+                            found = scraped;
+                            break;
+                        }
+                    }
+
+                    if (found) {
+                        await NewsEvent.updateOne({ _id }, { $set: { imageUrl: found } });
+                        updated++;
+                    } else {
+                        stillMissing++;
+                    }
+                } catch (innerErr) {
+                    // One event failing (bad URL, network hiccup, etc.)
+                    // must never abort the whole batch.
+                    stillMissing++;
+                    errors.push({ eventId: String(_id), error: innerErr.message });
+                }
+            }
+
+            clearNewsCache();
+            return res.json({
+                success: true,
+                eventsChecked: events.length,
+                updated,
+                stillMissing,
+                remaining: await NewsEvent.countDocuments({ $or: [{ imageUrl: null }, { imageUrl: { $exists: false } }] }),
+                errors: errors.length ? errors : undefined
+            });
+        } catch (err) {
+            console.error('Admin live image backfill error:', err.message);
+            return res.status(500).json({ error: 'Server error backfilling images' });
+        }
+    });
+
     app.post('/admin/news', verifyAdminToken, async (req, res) => {
         const { title, summary, url, image, category, sourceName, isOfficial, publishedAt } = req.body || {};
 
