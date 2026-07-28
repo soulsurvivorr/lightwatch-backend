@@ -544,7 +544,18 @@ function extractImageFromRssItem(item) {
 // Best-effort and deliberately quiet on failure: a slow or blocking
 // publisher site should never take down the whole fetch cycle over one
 // missing thumbnail.
-async function scrapeOgImage(url) {
+async function scrapeOgImage(url, debugInfo) {
+    // debugInfo is optional and purely additive — when a caller passes an
+    // object, this fills in .reason (and sometimes .detail) explaining
+    // why null came back. The live fetch cycle doesn't pass one and
+    // behaves exactly as before; the backfill-images-live route below
+    // does, so failures are visible instead of just silently absent.
+    const setReason = (reason, detail) => {
+        if (debugInfo) {
+            debugInfo.reason = reason;
+            if (detail !== undefined) debugInfo.detail = detail;
+        }
+    };
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 6000);
     try {
@@ -553,7 +564,7 @@ async function scrapeOgImage(url) {
             signal: controller.signal,
             headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0)' }
         });
-        if (!res.ok) return null;
+        if (!res.ok) { setReason('http-error', res.status); return null; }
         // If the redirect never actually left Google (res.url is still
         // news.google.com/google.com), this is Google's own interstitial
         // page, not the publisher's article — its og:image is a generic
@@ -562,12 +573,15 @@ async function scrapeOgImage(url) {
         // Bail out here instead of scraping that page at all.
         let finalHost = '';
         try { finalHost = new URL(res.url).hostname; } catch (_) { /* leave empty */ }
-        if (/(^|\.)google\.com$/i.test(finalHost) || /(^|\.)gstatic\.com$/i.test(finalHost)) return null;
+        if (/(^|\.)google\.com$/i.test(finalHost) || /(^|\.)gstatic\.com$/i.test(finalHost)) {
+            setReason('redirect-stayed-on-google', finalHost);
+            return null;
+        }
 
         // Bail early on non-HTML responses (PDFs, images, etc.) rather
         // than reading a potentially huge body just to find no match.
         const contentType = res.headers.get('content-type') || '';
-        if (!contentType.includes('html')) return null;
+        if (!contentType.includes('html')) { setReason('non-html-response', contentType); return null; }
         const html = await res.text();
         // og:image first, twitter:image as a fallback — attribute order
         // varies by site (content-before-property is common), so this
@@ -592,8 +606,10 @@ async function scrapeOgImage(url) {
                 return match[1];
             }
         }
+        setReason('no-og-image-tag-found');
         return null;
     } catch (err) {
+        setReason('fetch-threw', err.message);
         return null;
     } finally {
         clearTimeout(timeout);
@@ -1617,14 +1633,23 @@ module.exports = function initNewsSystem(app, deps) {
                         .select('_id articleUrl imageUrl')
                         .lean();
 
+                    if (articles.length === 0) {
+                        stillMissing++;
+                        errors.push({ eventId: String(_id), note: 'no NewsArticle rows reference this eventId' });
+                        continue;
+                    }
+
                     let found = null;
+                    const attempts = [];
                     for (const article of articles) {
                         // Skip anything already known bad; don't re-scrape it.
                         if (article.imageUrl && !GOOGLE_LOGO_IMAGE_REGEX.test(article.imageUrl)) {
                             found = article.imageUrl;
                             break;
                         }
-                        const scraped = await scrapeOgImage(article.articleUrl);
+                        const debugInfo = {};
+                        const scraped = await scrapeOgImage(article.articleUrl, debugInfo);
+                        attempts.push({ articleUrl: article.articleUrl, ...debugInfo });
                         if (scraped) {
                             await NewsArticle.updateOne({ _id: article._id }, { $set: { imageUrl: scraped } });
                             found = scraped;
@@ -1637,6 +1662,7 @@ module.exports = function initNewsSystem(app, deps) {
                         updated++;
                     } else {
                         stillMissing++;
+                        if (attempts.length) errors.push({ eventId: String(_id), attempts });
                     }
                 } catch (innerErr) {
                     // One event failing (bad URL, network hiccup, etc.)
