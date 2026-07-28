@@ -577,6 +577,11 @@ async function scrapeOgImage(url, debugInfo) {
             setReason('redirect-stayed-on-google', finalHost);
             return null;
         }
+        // The redirect DID resolve to a real publisher page — surface
+        // that resolved URL via debugInfo even before we know whether an
+        // og:image is present, so callers can use it for the source
+        // favicon (real outlet domain) instead of Google's wrapper link.
+        if (debugInfo) debugInfo.resolvedUrl = res.url;
 
         // Bail early on non-HTML responses (PDFs, images, etc.) rather
         // than reading a potentially huge body just to find no match.
@@ -694,6 +699,12 @@ module.exports = function initNewsSystem(app, deps) {
         isOfficial:   { type: Boolean, default: false },
         category:     { type: String, enum: ['maintenance', 'outage', 'tariff', 'restoration', 'general'], default: 'general' },
         articleUrl:   { type: String, required: true, unique: true },
+        // Populated only for Google News items whose redirect actually
+        // resolves through to the real publisher page (see scrapeOgImage).
+        // Lets sourceLogoUrl() show the real outlet's favicon instead of
+        // Google's own — articleUrl itself stays untouched since it's
+        // still the correct click-through link.
+        resolvedUrl:  { type: String, default: null },
         dedupeKey:    { type: String, required: true },
         publishedAt:  { type: Date, required: true },
         fetchedAt:    { type: Date, default: Date.now },
@@ -713,6 +724,24 @@ module.exports = function initNewsSystem(app, deps) {
     newsArticleSchema.index({ eventId: 1 });
 
     const NewsArticle = mongoose.models.NewsArticle || mongoose.model('NewsArticle', newsArticleSchema);
+
+    // ---- Schema / model: NEW — permanent delete blocklist ----------
+    // Deleting an event/article previously only removed the current
+    // rows — if the source (Google News especially, with its 14-day
+    // search window) still served the same story on a later fetch
+    // cycle, storeArticle saw a "new" URL (since the old row was gone)
+    // and recreated it, complete with re-firing push notifications.
+    // Every delete now also records the deleted article's articleUrl
+    // and dedupeKey here; storeArticle checks both before creating
+    // anything, so a deliberately-deleted story stays gone for good,
+    // even under a different outlet's URL for the same headline.
+    const newsBlocklistSchema = new mongoose.Schema({
+        articleUrl: { type: String, required: true, unique: true },
+        dedupeKey:  { type: String, default: null },
+        deletedAt:  { type: Date, default: Date.now }
+    });
+    newsBlocklistSchema.index({ dedupeKey: 1 });
+    const NewsBlocklist = mongoose.models.NewsBlocklist || mongoose.model('NewsBlocklist', newsBlocklistSchema);
 
     // ---- Schema / model: NEW — clustered events -------------------
     const newsEventSchema = new mongoose.Schema({
@@ -736,7 +765,7 @@ module.exports = function initNewsSystem(app, deps) {
         sources: {
             type: [{
                 name: String, icon: String, official: Boolean,
-                url: String, headline: String, publishedAt: Date
+                url: String, resolvedUrl: String, headline: String, publishedAt: Date
             }], default: []
         },
         confidenceScore: { type: Number, default: 0 }, // 0-100
@@ -1004,7 +1033,7 @@ module.exports = function initNewsSystem(app, deps) {
                 titleTokens: titleTokens(article.title),
                 sources: [{
                     name: article.sourceName, icon: article.sourceIcon, official: article.isOfficial,
-                    url: article.articleUrl, headline: article.title, publishedAt: article.publishedAt
+                    url: article.articleUrl, resolvedUrl: article.resolvedUrl || null, headline: article.title, publishedAt: article.publishedAt
                 }],
                 confidenceScore: 0,
                 history: [{ at: article.publishedAt, note: `Event opened from ${article.sourceName}` }]
@@ -1024,7 +1053,7 @@ module.exports = function initNewsSystem(app, deps) {
         if (!alreadyHasSource) {
             event.sources.push({
                 name: article.sourceName, icon: article.sourceIcon, official: article.isOfficial,
-                url: article.articleUrl, headline: article.title, publishedAt: article.publishedAt
+                url: article.articleUrl, resolvedUrl: article.resolvedUrl || null, headline: article.title, publishedAt: article.publishedAt
             });
         }
 
@@ -1090,6 +1119,15 @@ module.exports = function initNewsSystem(app, deps) {
 
         const summary = stripHtml(raw.summary || '').slice(0, 500) || title;
         const combinedText = `${title} ${summary}`;
+        const dedupeKey = titleDedupeKey(title);
+
+        // A story an admin explicitly deleted stays deleted, even if the
+        // source (Google News especially) keeps serving it on later
+        // fetch cycles — see the NewsBlocklist comment above. Checked by
+        // both articleUrl (this exact link) and dedupeKey (same headline
+        // from a different outlet/URL), before any other work happens.
+        const blocked = await NewsBlocklist.findOne({ $or: [{ articleUrl }, { dedupeKey }] }).select('_id').lean();
+        if (blocked) return opts.throwOnDuplicate ? 'duplicate' : null;
 
         // Moved up (used to run after the relevance check below) so the
         // Google News Ghana-gate can use mentionedLocations too, e.g. a
@@ -1108,14 +1146,12 @@ module.exports = function initNewsSystem(app, deps) {
             }
         }
 
-        const dedupeKey = titleDedupeKey(title);
-
         // Only reject on an EXACT url repeat now — near-duplicate
         // titles from a different outlet are exactly what the event
         // layer below wants to see (extra corroboration), so they're
         // no longer dropped/replaced here the way the old version of
         // this file did.
-        const existing = await NewsArticle.findOne({ articleUrl }).select('_id imageUrl eventId').lean();
+        const existing = await NewsArticle.findOne({ articleUrl }).select('_id imageUrl resolvedUrl eventId').lean();
         if (existing) {
             // Self-heal: articles stored before the media:content/
             // media:thumbnail extraction fix (see extractImageFromRssItem)
@@ -1157,6 +1193,19 @@ module.exports = function initNewsSystem(app, deps) {
                     );
                 }
             }
+            // Same idea for resolvedUrl — only ever fills a blank, never
+            // overwrites a real one, and pushes into the event's sources
+            // entry too so the favicon fixes itself without needing the
+            // image backfill routes to also run.
+            if (raw.resolvedUrl && !existing.resolvedUrl) {
+                await NewsArticle.updateOne({ _id: existing._id }, { $set: { resolvedUrl: raw.resolvedUrl } });
+                if (existing.eventId) {
+                    await NewsEvent.updateOne(
+                        { _id: existing.eventId, 'sources.url': articleUrl },
+                        { $set: { 'sources.$.resolvedUrl': raw.resolvedUrl } }
+                    );
+                }
+            }
             return opts.throwOnDuplicate ? 'duplicate' : null;
         }
 
@@ -1169,6 +1218,7 @@ module.exports = function initNewsSystem(app, deps) {
                 title,
                 summary,
                 imageUrl: raw.imageUrl || null,
+                resolvedUrl: raw.resolvedUrl || null,
                 sourceName: source.name,
                 sourceIcon: source.icon,
                 isOfficial: !!source.official,
@@ -1236,14 +1286,18 @@ module.exports = function initNewsSystem(app, deps) {
                 sourceForItem = { name: parsed.outlet, icon: '📰', official: false };
             }
             let imageUrl = extractImageFromRssItem(item);
+            let resolvedUrl = null;
             if (!imageUrl && source.type === 'google-news') {
-                imageUrl = await scrapeOgImage(item.link);
+                const debugInfo = {};
+                imageUrl = await scrapeOgImage(item.link, debugInfo);
+                resolvedUrl = debugInfo.resolvedUrl || null;
             }
             const doc = await storeArticle({
                 title,
                 summary: item.contentSnippet || item.content || item.summary || '',
                 url: item.link,
                 imageUrl,
+                resolvedUrl,
                 publishedAt: item.isoDate ? new Date(item.isoDate) : new Date()
             }, sourceForItem, { knownKeys, isGoogleNews: source.type === 'google-news' });
             if (doc) stored++;
@@ -1400,12 +1454,12 @@ module.exports = function initNewsSystem(app, deps) {
                     confidenceScore: e.confidenceScore,
                     sourceCount: new Set(e.sources.map(s => s.name)).size,
                     // Main source's real logo — this is span.news-item__source-icon.
-                    sourceIcon: sourceLogoUrl(mainSource.url) || null,
+                    sourceIcon: sourceLogoUrl(mainSource.resolvedUrl || mainSource.url) || null,
                     sourceName: mainSource.name || 'LightWatch',
                     sources: e.sources.map(s => ({
                         name: s.name, official: s.official, url: s.url, headline: s.headline,
                         publishedAt: s.publishedAt, timeAgo: formatTimeAgo(s.publishedAt),
-                        logo: sourceLogoUrl(s.url)
+                        logo: sourceLogoUrl(s.resolvedUrl || s.url)
                     })),
                     history: e.history
                 };
@@ -1472,7 +1526,7 @@ module.exports = function initNewsSystem(app, deps) {
                     // Real fetched logo for the main source (span.news-item__source-icon),
                     // not the old static emoji. iconEmoji kept alongside for
                     // any UI that still wants a text/emoji fallback.
-                    sourceIcon: sourceLogoUrl(mainSource.url) || null,
+                    sourceIcon: sourceLogoUrl(mainSource.resolvedUrl || mainSource.url) || null,
                     iconEmoji: mainSource.icon || '📰',
                     isOfficial: !!officialSource,
                     category: e.category,
@@ -1487,7 +1541,7 @@ module.exports = function initNewsSystem(app, deps) {
                     // to ignore until it's updated to show them.
                     eventType: e.eventType,
                     sourceCount: new Set(e.sources.map(s => s.name)).size,
-                    sources: e.sources.map(s => ({ ...s, logo: sourceLogoUrl(s.url), timeAgo: formatTimeAgo(s.publishedAt) })),
+                    sources: e.sources.map(s => ({ ...s, logo: sourceLogoUrl(s.resolvedUrl || s.url), timeAgo: formatTimeAgo(s.publishedAt) })),
                     confidenceScore: e.confidenceScore,
                     status: e.status
                 };
@@ -1750,6 +1804,35 @@ module.exports = function initNewsSystem(app, deps) {
         const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter(Boolean) : [];
         try {
             if (ids.length) {
+                // Record every article being deleted in the permanent
+                // blocklist BEFORE actually deleting it — storeArticle
+                // checks this on every future fetch, so the same story
+                // can't quietly resurface just because Google News (or a
+                // direct feed) still serves it on a later cycle. Fetched
+                // first as a separate query since deleteMany doesn't hand
+                // back the deleted documents' fields.
+                const articlesToBlock = await NewsArticle.find({
+                    $or: [{ _id: { $in: ids } }, { eventId: { $in: ids } }]
+                }).select('articleUrl dedupeKey').lean();
+
+                if (articlesToBlock.length) {
+                    try {
+                        await NewsBlocklist.insertMany(
+                            articlesToBlock.map(a => ({ articleUrl: a.articleUrl, dedupeKey: a.dedupeKey })),
+                            { ordered: false }
+                        );
+                    } catch (blockErr) {
+                        // Re-deleting something already blocklisted trips
+                        // the unique index on articleUrl — expected and
+                        // harmless with ordered:false (other inserts in
+                        // the batch still go through); only worth logging
+                        // if it's some other kind of failure.
+                        if (blockErr.code !== 11000 && blockErr.name !== 'MongoBulkWriteError') {
+                            console.error('Blocklist insert warning:', blockErr.message);
+                        }
+                    }
+                }
+
                 // The admin news table is populated from GET /news, and
                 // every `id` it hands back is a NewsEvent._id (see the
                 // events-based response body in GET /news above) — NOT a
