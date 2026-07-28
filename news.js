@@ -213,6 +213,17 @@ const NEWS_SOURCES = [
     // every run for a week.
     { name: '3News',        icon: '📰', official: false, type: 'rss', url: 'https://3news.com/feed/' },
     { name: 'Starr FM',     icon: '📰', official: false, type: 'rss', url: 'https://starrfm.com.gh/feed/' },
+    // Confirmed live (application/rss+xml, WordPress /feed/) — added
+    // specifically to get Ghanaian Times off the Google News path. Its
+    // Google News-routed items were coming through with no image at all,
+    // because Google's redirect link for that outlet's articles wasn't
+    // resolving to the real page (see scrapeOgImage's domain guard above
+    // for the related "resolves to news.google.com itself" case this
+    // isn't — this is the redirect just not resolving, no logo). A
+    // direct WordPress feed sidesteps the redirect problem entirely and
+    // gets the media:content-based image extraction from earlier for
+    // free.
+    { name: 'Ghanaian Times', icon: '📰', official: false, type: 'rss', url: 'https://ghanaiantimes.com.gh/feed' },
     // Pulse Ghana (/rss) and Peace FM (/pages/rss/local.xml) both
     // confirmed 404ing on every real cycle — removed rather than left
     // to fail forever. If you find their actual current feed path,
