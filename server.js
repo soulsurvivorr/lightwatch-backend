@@ -1,3 +1,4 @@
+const path = require('path');
 const dns = require('dns');
 dns.setDefaultResultOrder('ipv4first');
 
@@ -332,14 +333,14 @@ app.use(express.json());
 // unchanged static assets (logo, css, js, service-worker) on every load.
 // Purely a response-header change — same files, same routes, same
 // content — so it doesn't affect API functionality at all.
-app.use(express.static('../frontend', {
+app.use(express.static(path.join(__dirname, '../frontend'), {
     maxAge: process.env.NODE_ENV === 'production' ? '1d' : 0,
     etag: true
 }));
 
 // Set this to your real Render URL (e.g. https://lightwatch-api.onrender.com)
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://lightwatch-backend.onrender.com';
-const LOGO_URL = `${PUBLIC_BASE_URL}/dev-logo.png`;
+const LOGO_URL = `${PUBLIC_BASE_URL}/images/dev-logo.png`;
 
 // ---- REQUEST PERFORMANCE LOGGING ----
 // Times every request end-to-end and logs method, path, status, and
@@ -2406,7 +2407,7 @@ app.get('/', (req, res) => {
 
 // SPA routing: serve index.html for all non-API routes
 app.get('*', (req, res) => {
-    res.sendFile(__dirname + '/../frontend/index.html');
+    res.sendFile(path.join(__dirname, '../frontend/index.html'));
 });
 
 // START
