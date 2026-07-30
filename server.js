@@ -339,7 +339,7 @@ app.use(express.static('../frontend', {
 
 // Set this to your real Render URL (e.g. https://lightwatch-api.onrender.com)
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://lightwatch-backend.onrender.com';
-const LOGO_URL = `${PUBLIC_BASE_URL}/logo.png`;
+const LOGO_URL = `${PUBLIC_BASE_URL}/dev-logo.png`;
 
 // ---- REQUEST PERFORMANCE LOGGING ----
 // Times every request end-to-end and logs method, path, status, and
