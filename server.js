@@ -1,5 +1,6 @@
 const path = require('path');
 const dns = require('dns');
+const fs = require('fs');
 dns.setDefaultResultOrder('ipv4first');
 
 require('dotenv').config();
@@ -337,6 +338,29 @@ app.use(express.static(path.join(__dirname, '../frontend'), {
     maxAge: process.env.NODE_ENV === 'production' ? '1d' : 0,
     etag: true
 }));
+
+// Serves assets that live inside the backend itself (e.g. the logo used
+// in emails). This is separate from the frontend static folder above —
+// the frontend deploys independently to Netlify, so files that only
+// live in frontend/ are NOT guaranteed to exist on Render at runtime.
+// Put files like dev-logo.png in backend/public/images/ so they're
+// always available wherever the backend is deployed.
+app.use('/images', express.static(path.join(__dirname, 'public/images'), {
+    maxAge: process.env.NODE_ENV === 'production' ? '1d' : 0,
+    etag: true
+}));
+
+// If a logo file was placed at the backend root (e.g. backend/dev-logo.png),
+// serve that single file at /images/dev-logo.png so email templates and
+// LOGO_URL point to a hosted asset even when the frontend is deployed
+// separately (Netlify). This keeps the rest of the backend's files
+// private while exposing only that one image path.
+const backendLogoPath = path.join(__dirname, 'dev-logo.png');
+if (fs.existsSync(backendLogoPath)) {
+    app.get('/images/dev-logo.png', (req, res) => {
+        res.sendFile(backendLogoPath);
+    });
+}
 
 // Set this to your real Render URL (e.g. https://lightwatch-api.onrender.com)
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://lightwatch-backend.onrender.com';
