@@ -53,6 +53,13 @@ if (!process.env.JWT_SECRET) {
     console.warn("WARNING: JWT_SECRET not set in environment. Using default (insecure). Set it on Render.");
 }
 
+// The signup page's "use my location" button reverse-geocodes lat/lng
+// into a city name via /geocode/reverse below, which calls Google's
+// Geocoding API server-side so the key never reaches the browser.
+if (!process.env.GOOGLE_MAPS_API_KEY) {
+    console.warn("WARNING: GOOGLE_MAPS_API_KEY not set. The signup page's \"use my location\" button will not be able to resolve a city name.");
+}
+
 // VAPID setup for push notifications
 if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
     webpush.setVapidDetails(
@@ -423,16 +430,49 @@ function verifyAdminToken(req, res, next) {
 }
 
 // HELPERS
-const HANDLE_WORDS = [
+// FIX: this used to be one template — `anon-<word>-<number>` — drawn
+// from a single 12-word pool, so with enough users most handles read
+// as visibly-the-same-shape ("anon-glow-482", "anon-glow-119", ...).
+// Now several independent word pools plus several handle *shapes*, so
+// two handles rarely even look like they were built the same way.
+const HANDLE_NOUNS = [
     "fern", "river", "glow", "cedar", "amber", "quartz",
-    "willow", "ember", "harbor", "maple", "drift", "stone"
+    "willow", "ember", "harbor", "maple", "drift", "stone",
+    "comet", "lagoon", "orbit", "prairie", "thicket", "tundra",
+    "canyon", "meadow", "granite", "cove", "spark", "grove"
+];
+const HANDLE_ADJECTIVES = [
+    "quiet", "swift", "hidden", "bright", "calm", "bold",
+    "gentle", "distant", "steady", "wandering", "silent", "dusty",
+    "restless", "faint", "curious", "sturdy"
+];
+const HANDLE_ANIMALS = [
+    "heron", "otter", "falcon", "sparrow", "fox", "badger",
+    "kingfisher", "lynx", "swallow", "hare", "crane", "wren"
+];
+
+function randomFrom(list) {
+    return list[Math.floor(Math.random() * list.length)];
+}
+
+function randomNumber(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+// Each shape returns a full candidate handle. Picked at random per
+// attempt so the pool of *formats* is as varied as the words feeding
+// them, not just one template with different words dropped in.
+const HANDLE_SHAPES = [
+    () => `anon-${randomFrom(HANDLE_NOUNS)}-${randomNumber(100, 999)}`,
+    () => `${randomFrom(HANDLE_ADJECTIVES)}-${randomFrom(HANDLE_NOUNS)}`,
+    () => `${randomFrom(HANDLE_ADJECTIVES)}-${randomFrom(HANDLE_ANIMALS)}`,
+    () => `${randomFrom(HANDLE_ANIMALS)}-${randomNumber(10, 99)}`,
+    () => `${randomFrom(HANDLE_NOUNS)}${randomNumber(2, 88)}`
 ];
 
 async function generateUniqueChatHandle() {
     while (true) {
-        const word = HANDLE_WORDS[Math.floor(Math.random() * HANDLE_WORDS.length)];
-        const number = Math.floor(Math.random() * 900) + 100;
-        const handle = `anon-${word}-${number}`;
+        const handle = randomFrom(HANDLE_SHAPES)();
         const existing = await User.findOne({ chatHandle: handle }).select('_id').lean();
         if (!existing) return handle;
     }
@@ -762,9 +802,64 @@ function maskContact(value) {
     return value;
 }
 
+// ── Reverse geocoding for the signup page's "use my location" button ──
+// The browser only ever sends us a lat/lng; the Google Maps API key
+// stays server-side. Returns a best-guess city/town name, or null if
+// nothing usable came back (caller falls back to manual entry).
+async function reverseGeocodeCity(lat, lng) {
+    if (!process.env.GOOGLE_MAPS_API_KEY) {
+        console.log('[DEV MODE — no GOOGLE_MAPS_API_KEY set] Skipping reverse geocode lookup.');
+        return null;
+    }
+
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${process.env.GOOGLE_MAPS_API_KEY}`;
+    const response = await fetch(url);
+    if (!response.ok) {
+        throw new Error(`Geocode request failed: ${response.status}`);
+    }
+
+    const data = await response.json();
+    if (data.status !== 'OK' || !Array.isArray(data.results) || !data.results.length) {
+        return null;
+    }
+
+    // Prefer an actual city/town over a broader region — first address
+    // component of the first result that matches one of these types,
+    // checked in order of specificity.
+    const preferredTypes = ['locality', 'postal_town', 'sublocality', 'administrative_area_level_2', 'administrative_area_level_1'];
+    for (const type of preferredTypes) {
+        for (const result of data.results) {
+            const match = (result.address_components || []).find(c => c.types.includes(type));
+            if (match) return match.long_name;
+        }
+    }
+    return data.results[0].formatted_address || null;
+}
+
 // ---------------------------------------------------------------------------
 // ROUTES
 // ---------------------------------------------------------------------------
+
+// ---- REVERSE GEOCODE (signup city/town "use my location" button) ----
+// Public — this runs before an account exists, so it can't require auth.
+app.get('/geocode/reverse', async (req, res) => {
+    const lat = parseFloat(req.query.lat);
+    const lng = parseFloat(req.query.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        return res.status(400).json({ error: 'lat and lng query params are required' });
+    }
+
+    try {
+        const city = await reverseGeocodeCity(lat, lng);
+        if (!city) {
+            return res.status(404).json({ error: 'Could not determine a city for this location' });
+        }
+        res.json({ city });
+    } catch (err) {
+        console.error('Reverse geocode error:', err);
+        res.status(502).json({ error: 'Location lookup failed' });
+    }
+});
 
 // ---- SIGN UP ----
 app.post('/signup', async (req, res) => {
@@ -1707,6 +1802,32 @@ app.get('/lightstatus', async (req, res) => {
             stats
         });
     } catch (err) {
+        return res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// GET /areas/known — real towns/cities the app actually has data for
+// (either someone signed up with that city, or a light status was ever
+// reported there), instead of a fixed, hardcoded neighborhood list.
+// Location.js's "Nearby Locations" panel and map pins use this to figure
+// out which other areas to show alongside the signed-in user's own city,
+// so newly added towns show up automatically instead of only the
+// original hardcoded Kumasi set.
+app.get('/areas/known', async (req, res) => {
+    try {
+        const [userCities, statusKeys] = await Promise.all([
+            User.distinct('city'),
+            LightStatus.distinct('locationKey')
+        ]);
+        const seen = new Map(); // normalized -> title-cased display name
+        [...userCities, ...statusKeys].forEach(raw => {
+            const normalized = normalizeLocation(raw).split(',')[0].trim();
+            if (!normalized || normalized === 'global') return;
+            if (!seen.has(normalized)) seen.set(normalized, titleCaseLocation(normalized));
+        });
+        return res.json({ areas: Array.from(seen.values()).sort((a, b) => a.localeCompare(b)) });
+    } catch (err) {
+        console.error('Known-areas lookup error:', err.message);
         return res.status(500).json({ error: 'Server error' });
     }
 });
