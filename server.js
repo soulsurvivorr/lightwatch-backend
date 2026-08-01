@@ -511,7 +511,7 @@ function sanitizeAvatarImageDataUrl(raw) {
 function sanitizeMediaImageDataUrl(raw) {
     const value = String(raw || '').trim();
     if (!value) return null;
-    if (!/^data:image\/(png|jpe?g|webp);base64,/i.test(value)) return null;
+    if (!/^data:image\/(png|jpe?g|webp|heic|heif);base64,/i.test(value)) return null;
     // Smaller cap for in-feed media snapshots.
     if (value.length > 1_200_000) return null;
     return value;
