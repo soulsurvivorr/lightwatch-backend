@@ -199,6 +199,18 @@ const chatSchema = new mongoose.Schema({
         kind: { type: String, enum: ['image'] },
         url: { type: String }
     },
+    // Persisted like state so counts are shared across every user/device
+    // instead of living only in that one browser tab's DOM (see POST
+    // /chats/:chatId/like below). likedBy gates one like per user.
+    likeCount: { type: Number, default: 0 },
+    likedBy: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], default: [] },
+    // Same idea for reposts: repostCount is what every viewer sees on
+    // the original post's Repost button. repostedBy stops a single user
+    // from inflating it by reposting the same report more than once
+    // (each repost still creates its own new top-level Chat doc, same
+    // as before — this only guards the counter on the ORIGINAL).
+    repostCount: { type: Number, default: 0 },
+    repostedBy: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], default: [] },
     location: { type: String, required: true },
     locationKey: { type: String, required: true },
     // Who has seen this message (excluding the author). Used to show a
@@ -354,7 +366,12 @@ app.use(compression({
 }));
 
 app.use(cors());
-app.use(express.json());
+// Default express.json() limit is 100kb, which silently rejected (413)
+// any post carrying composer media (data URLs up to ~1.2MB, see
+// sanitizeMediaImageDataUrl) or an avatar image (up to ~2MB, see
+// sanitizeAvatarImageDataUrl). Raised so those requests actually reach
+// the route handlers instead of failing before postChat() gets a response.
+app.use(express.json({ limit: '6mb' }));
 
 // Serves frontend files from the frontend folder during development
 // In production, copy built frontend files to a 'public' folder or adjust path
@@ -1260,6 +1277,17 @@ app.post('/chats', async (req, res) => {
         // since there's no request left to report them to.
         res.status(201).json(chatObj);
 
+        // Bump the original post's persisted repost count so every
+        // viewer sees it, not just the reposting browser tab. $ne guard
+        // means this only fires once per user per original post, even
+        // if they somehow repost it again later.
+        if (hasRepost && repost?.chatId && mongoose.Types.ObjectId.isValid(repost.chatId)) {
+            Chat.updateOne(
+                { _id: repost.chatId, repostedBy: { $ne: userId } },
+                { $inc: { repostCount: 1 }, $addToSet: { repostedBy: userId } }
+            ).catch(err => console.error('Repost count update error:', err.message));
+        }
+
         (async () => {
             const key = normalizeLocation(saved.location).split(',')[0].trim();
             const isGlobalChat = normalizedScope === 'global';
@@ -1434,6 +1462,42 @@ app.delete('/chats/:chatId', async (req, res) => {
     } catch (err) {
         console.error('Delete chat error:', err.message);
         return res.status(500).json({ error: 'Server error deleting post' });
+    }
+});
+
+// POST /chats/:chatId/like { userId }
+// Toggles the caller's like on/off (one like per user, persisted server
+// side) and returns the up-to-date total so every viewer's like count
+// stays in sync instead of living only in one browser's DOM.
+app.post('/chats/:chatId/like', async (req, res) => {
+    const { chatId } = req.params;
+    const { userId } = req.body || {};
+
+    if (!mongoose.Types.ObjectId.isValid(chatId)) {
+        return res.status(400).json({ error: 'Invalid chat id' });
+    }
+    if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
+        return res.status(400).json({ error: 'Valid userId is required' });
+    }
+
+    try {
+        const chat = await Chat.findById(chatId).select('likedBy likeCount');
+        if (!chat) {
+            return res.status(404).json({ error: 'Post not found' });
+        }
+
+        const alreadyLiked = chat.likedBy.some(id => String(id) === String(userId));
+        const update = alreadyLiked
+            ? { $pull: { likedBy: userId }, $inc: { likeCount: -1 } }
+            : { $addToSet: { likedBy: userId }, $inc: { likeCount: 1 } };
+
+        const updated = await Chat.findByIdAndUpdate(chatId, update, { new: true }).select('likeCount');
+        const likeCount = Math.max(0, updated?.likeCount || 0);
+
+        return res.json({ liked: !alreadyLiked, likeCount });
+    } catch (err) {
+        console.error('Like chat error:', err.message);
+        return res.status(500).json({ error: 'Server error toggling like' });
     }
 });
 
