@@ -1007,24 +1007,32 @@ async function sendOtpEmail(email, code, name) {
         console.log(`[DEV MODE — no BREVO_API_KEY set] OTP for ${email} is ${code}`);
         return;
     }
-    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'api-key': process.env.BREVO_API_KEY
-        },
-        body: JSON.stringify({
-            sender: {
-                name: 'LightWatch',
-                email: process.env.BREVO_SENDER_EMAIL || 'no-reply@lightwatch.app'
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
+    let response;
+    try {
+        response = await fetch('https://api.brevo.com/v3/smtp/email', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'api-key': process.env.BREVO_API_KEY
             },
-            to: [{ email }],
-            subject: 'Your LightWatch verification code',
-            htmlContent: buildOtpEmailHtml(code, name),
-            // Plain-text fallback for clients that block/strip HTML.
-            textContent: `Your LightWatch verification code is ${code}. It expires in 10 minutes. If you didn't request this, you can ignore this email.`
-        })
-    });
+            signal: controller.signal,
+            body: JSON.stringify({
+                sender: {
+                    name: 'LightWatch',
+                    email: process.env.BREVO_SENDER_EMAIL || 'no-reply@lightwatch.app'
+                },
+                to: [{ email }],
+                subject: 'Your LightWatch verification code',
+                htmlContent: buildOtpEmailHtml(code, name),
+                // Plain-text fallback for clients that block/strip HTML.
+                textContent: `Your LightWatch verification code is ${code}. It expires in 10 minutes. If you didn't request this, you can ignore this email.`
+            })
+        });
+    } finally {
+        clearTimeout(timeoutId);
+    }
     if (!response.ok) {
         const errText = await response.text();
         throw new Error(`Email send failed: ${response.status} ${errText}`);
@@ -1040,18 +1048,26 @@ async function sendOtpSms(phoneNumber, code) {
         console.log(`[DEV MODE — no SMS provider configured] OTP for ${phoneNumber} is ${code}`);
         return;
     }
-    const response = await fetch('https://sms.arkesel.com/api/v2/sms/send', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'api-key': process.env.ARKESEL_API_KEY
-        },
-        body: JSON.stringify({
-            sender: process.env.ARKESEL_SENDER_ID || 'LightWatch',
-            message: `Your LightWatch verification code is ${code}. It expires in 10 minutes.`,
-            recipients: [phoneNumber]
-        })
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
+    let response;
+    try {
+        response = await fetch('https://sms.arkesel.com/api/v2/sms/send', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'api-key': process.env.ARKESEL_API_KEY
+            },
+            signal: controller.signal,
+            body: JSON.stringify({
+                sender: process.env.ARKESEL_SENDER_ID || 'LightWatch',
+                message: `Your LightWatch verification code is ${code}. It expires in 10 minutes.`,
+                recipients: [phoneNumber]
+            })
+        });
+    } finally {
+        clearTimeout(timeoutId);
+    }
     if (!response.ok) {
         const errText = await response.text();
         throw new Error(`SMS send failed: ${response.status} ${errText}`);
