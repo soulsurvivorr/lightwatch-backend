@@ -94,7 +94,7 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
         console.error("FIREBASE_SERVICE_ACCOUNT_KEY is set but invalid JSON:", err.message);
     }
 } else {
-    console.warn("WARNING: FIREBASE_SERVICE_ACCOUNT_KEY not set. Native Android push notifications will not work.");
+    console.log("Firebase Admin (FCM) ready for native Android push delivery.");
 }
 
 // Log a masked version of the URI so we can confirm which form is being used (no secrets printed)
@@ -1370,9 +1370,12 @@ app.post('/chats', async (req, res) => {
                     title: isPriorityMention
                         ? `Reply in ${audienceTitle}`
                         : `LightWatch chat — ${audienceTitle}`,
+                    // Keep push notifications as a signal only. The message
+                    // body belongs in the thread, not in the browser/app
+                    // notification surface.
                     body: isPriorityMention
-                        ? `${saved.handle} replied to your message: ${saved.text}`
-                        : `${saved.handle}: ${saved.text}`,
+                        ? 'New reply in the community'
+                        : 'New community activity',
                     url: `/chat?${deepLinkParams.toString()}`,
                     tag: isPriorityMention ? 'chat-reply' : 'chat-message',
                     requireInteraction: true,
@@ -2314,6 +2317,7 @@ async function sendFcmToOne(sub, notification) {
     if (notification.tone === 'power-on') soundResource = 'lw_power_on';
     else if (notification.tone === 'power-off') soundResource = 'lw_power_off';
     else if (notification.tone === 'chat') soundResource = 'lw_chat';
+    else if (notification.tone === 'news') soundResource = 'lw_news';
     const channelId = soundResource; // channel IDs in MainActivity.java match these 1:1
 
     try {

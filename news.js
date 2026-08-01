@@ -834,7 +834,7 @@ module.exports = function initNewsSystem(app, deps) {
                 tag: `news-event-${event._id}-${event.category}`,
                 requireInteraction: false,
                 vibrate: [200, 90, 200],
-                tone: 'chat'
+                tone: 'news'
             };
             console.log(`[news] Notifying ${subscribers.length} subscriber(s) — "${event.headline}" mentions ${locationKeys.join(', ')}`);
             await sendPushToSubscribers(subscribers, payload);
@@ -854,7 +854,7 @@ module.exports = function initNewsSystem(app, deps) {
                 tag: `news-event-broadcast-${event._id}-${event.category}`,
                 requireInteraction: false,
                 vibrate: [200, 90, 200, 90, 200],
-                tone: 'chat'
+                tone: 'news'
             };
             console.log(`[news] Broadcasting to ${subscribers.length} subscriber(s) [${reason}] — "${event.headline}"`);
             await sendPushToSubscribers(subscribers, payload);
@@ -876,7 +876,7 @@ module.exports = function initNewsSystem(app, deps) {
                 tag: `news-digest-broadcast-${Date.now()}`,
                 requireInteraction: false,
                 vibrate: [200, 90, 200, 90, 200],
-                tone: 'chat'
+                tone: 'news'
             };
             console.log(`[news] Broadcasting DIGEST to ${subscribers.length} subscriber(s) — ${events.length} events bundled`);
             await sendPushToSubscribers(subscribers, payload);
@@ -899,7 +899,7 @@ module.exports = function initNewsSystem(app, deps) {
                 tag: `news-digest-${locationKey}-${Date.now()}`,
                 requireInteraction: false,
                 vibrate: [200, 90, 200],
-                tone: 'chat'
+                tone: 'news'
             };
             console.log(`[news] Notifying ${subscribers.length} subscriber(s) [digest] — ${displayLocation}: ${events.length} events bundled`);
             await sendPushToSubscribers(subscribers, payload);
