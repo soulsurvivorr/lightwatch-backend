@@ -451,8 +451,8 @@ if (fs.existsSync(backendLogoPath)) {
     });
 }
 
-// Set this to your real Render URL (e.g. https://lightwatch-api.onrender.com)
-const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://lightwatch-backend.onrender.com';
+// Set this to your real Railway URL (e.g. https://lightwatch-backend-production.up.railway.app)
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://lightwatch-backend-production.up.railway.app';
 const LOGO_URL = `${PUBLIC_BASE_URL}/images/dev-logo.png`;
 
 // ---- REQUEST PERFORMANCE LOGGING ----
