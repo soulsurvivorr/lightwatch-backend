@@ -170,7 +170,8 @@ const chatSchema = new mongoose.Schema({
     // saved directly as Chat docs with userId omitted + isAdmin: true.
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: false },
     handle: { type: String, required: true },
-    text: { type: String, required: true },
+    // Text can be empty when the post is image-only.
+    text: { type: String, default: '' },
     // Snapshot of sender avatar at post time so feeds can render
     // without extra user lookups per message.
     avatarImage: { type: String, default: null },
