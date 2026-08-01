@@ -206,6 +206,7 @@ const chatSchema = new mongoose.Schema({
     // client-side (not from this array) once a reply targets the
     // message, so we keep the raw read history here regardless.
     seenBy: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], default: [] },
+    editedAt: { type: Date, default: null },
     createdAt: { type: Date, default: Date.now }
 });
 // Every existing Chat query is one of these access patterns — indexes
@@ -1349,6 +1350,90 @@ app.post('/chats', async (req, res) => {
     } catch (err) {
         console.error("Post chat error:", err.message);
         return res.status(500).json({ error: "Server error saving chat" });
+    }
+});
+
+const CHAT_EDIT_DELETE_WINDOW_MS = 15 * 60 * 1000;
+
+function canUserModifyChat(chat, userId) {
+    if (!chat) return { allowed: false, status: 404, error: 'Post not found' };
+    if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
+        return { allowed: false, status: 400, error: 'Valid userId is required' };
+    }
+
+    if (!chat.userId || String(chat.userId) !== String(userId)) {
+        return { allowed: false, status: 403, error: 'You can only modify your own posts' };
+    }
+
+    const createdAtMs = chat.createdAt ? new Date(chat.createdAt).getTime() : NaN;
+    if (!Number.isFinite(createdAtMs)) {
+        return { allowed: false, status: 400, error: 'Post timestamp is invalid' };
+    }
+
+    if ((Date.now() - createdAtMs) > CHAT_EDIT_DELETE_WINDOW_MS) {
+        return { allowed: false, status: 403, error: 'Edit/delete allowed only within 15 minutes of posting' };
+    }
+
+    return { allowed: true };
+}
+
+// PATCH /chats/:chatId { userId, text }
+// Owner-only and only within 15 minutes from createdAt.
+app.patch('/chats/:chatId', async (req, res) => {
+    const { chatId } = req.params;
+    const { userId, text } = req.body || {};
+
+    if (!mongoose.Types.ObjectId.isValid(chatId)) {
+        return res.status(400).json({ error: 'Invalid chat id' });
+    }
+
+    try {
+        const chat = await Chat.findById(chatId);
+        const gate = canUserModifyChat(chat, userId);
+        if (!gate.allowed) {
+            return res.status(gate.status).json({ error: gate.error });
+        }
+
+        const normalizedText = String(text || '').trim();
+        const canBeTextless = Boolean(chat.media?.url || chat.repost?.chatId || chat.quote?.chatId);
+        if (!normalizedText && !canBeTextless) {
+            return res.status(400).json({ error: 'Post text cannot be empty' });
+        }
+
+        chat.text = normalizedText;
+        chat.editedAt = new Date();
+        const saved = await chat.save();
+        const chatObj = saved.toObject();
+        chatObj.userId = chatObj.userId ? String(chatObj.userId) : null;
+        return res.json(chatObj);
+    } catch (err) {
+        console.error('Edit chat error:', err.message);
+        return res.status(500).json({ error: 'Server error editing post' });
+    }
+});
+
+// DELETE /chats/:chatId { userId }
+// Owner-only and only within 15 minutes from createdAt.
+app.delete('/chats/:chatId', async (req, res) => {
+    const { chatId } = req.params;
+    const { userId } = req.body || {};
+
+    if (!mongoose.Types.ObjectId.isValid(chatId)) {
+        return res.status(400).json({ error: 'Invalid chat id' });
+    }
+
+    try {
+        const chat = await Chat.findById(chatId);
+        const gate = canUserModifyChat(chat, userId);
+        if (!gate.allowed) {
+            return res.status(gate.status).json({ error: gate.error });
+        }
+
+        await Chat.deleteOne({ _id: chatId });
+        return res.json({ ok: true, deletedId: chatId });
+    } catch (err) {
+        console.error('Delete chat error:', err.message);
+        return res.status(500).json({ error: 'Server error deleting post' });
     }
 });
 
