@@ -211,6 +211,10 @@ const chatSchema = new mongoose.Schema({
     // as before — this only guards the counter on the ORIGINAL).
     repostCount: { type: Number, default: 0 },
     repostedBy: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], default: [] },
+    // Quote-count tracking mirrors repost tracking so the original post
+    // can surface how many quote posts have pointed back at it.
+    quoteCount: { type: Number, default: 0 },
+    quotedBy: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], default: [] },
     location: { type: String, required: true },
     locationKey: { type: String, required: true },
     // Who has seen this message (excluding the author). Used to show a
@@ -1288,6 +1292,16 @@ app.post('/chats', async (req, res) => {
             ).catch(err => console.error('Repost count update error:', err.message));
         }
 
+        // Quote posts need the same counted parent-reference behavior as
+        // reposts: the original report keeps a shared quoteCount so other
+        // people can see how many quote posts reference it.
+        if (hasQuote && quote?.chatId && mongoose.Types.ObjectId.isValid(quote.chatId)) {
+            Chat.updateOne(
+                { _id: quote.chatId, quotedBy: { $ne: userId } },
+                { $inc: { quoteCount: 1 }, $addToSet: { quotedBy: userId } }
+            ).catch(err => console.error('Quote count update error:', err.message));
+        }
+
         (async () => {
             const key = normalizeLocation(saved.location).split(',')[0].trim();
             const isGlobalChat = normalizedScope === 'global';
@@ -1481,7 +1495,7 @@ app.post('/chats/:chatId/like', async (req, res) => {
     }
 
     try {
-        const chat = await Chat.findById(chatId).select('likedBy likeCount');
+        const chat = await Chat.findById(chatId).select('likedBy likeCount repost quote');
         if (!chat) {
             return res.status(404).json({ error: 'Post not found' });
         }
@@ -1493,6 +1507,17 @@ app.post('/chats/:chatId/like', async (req, res) => {
 
         const updated = await Chat.findByIdAndUpdate(chatId, update, { new: true }).select('likeCount');
         const likeCount = Math.max(0, updated?.likeCount || 0);
+
+        const parentId = chat?.repost?.chatId || chat?.quote?.chatId;
+        if (parentId && mongoose.Types.ObjectId.isValid(parentId)) {
+            const parentSync = alreadyLiked
+                ? { $pull: { likedBy: userId }, $inc: { likeCount: -1 } }
+                : { $addToSet: { likedBy: userId }, $inc: { likeCount: 1 } };
+            await Chat.updateOne(
+                { _id: parentId },
+                parentSync
+            ).catch(err => console.error('Linked like count sync error:', err.message));
+        }
 
         return res.json({ liked: !alreadyLiked, likeCount });
     } catch (err) {
