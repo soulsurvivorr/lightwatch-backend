@@ -146,6 +146,8 @@ const userSchema = new mongoose.Schema({
     cityChangeLocked: { type: Boolean, default: false },
     cityChangedAt: { type: Date, default: null },
     chatHandle: { type: String },
+    // Optional uploaded avatar image (data URL) used as profile photo.
+    avatarImage: { type: String, default: null },
     // Optional second monitored location (e.g. "Work") — separate from the
     // primary signup region/city above, which stays the account's home base.
     secondaryLocation: {
@@ -169,6 +171,9 @@ const chatSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: false },
     handle: { type: String, required: true },
     text: { type: String, required: true },
+    // Snapshot of sender avatar at post time so feeds can render
+    // without extra user lookups per message.
+    avatarImage: { type: String, default: null },
     scope: { type: String, enum: ['local', 'global'], default: 'local' },
     // True only for messages created by POST /admin/broadcast — lets the
     // Reports feed always surface them (see GET /reports below) and lets
@@ -178,6 +183,20 @@ const chatSchema = new mongoose.Schema({
         chatId: { type: String },
         handle: { type: String },
         text: { type: String }
+    },
+    repost: {
+        chatId: { type: String },
+        handle: { type: String },
+        text: { type: String }
+    },
+    quote: {
+        chatId: { type: String },
+        handle: { type: String },
+        text: { type: String }
+    },
+    media: {
+        kind: { type: String, enum: ['image'] },
+        url: { type: String }
     },
     location: { type: String, required: true },
     locationKey: { type: String, required: true },
@@ -232,7 +251,7 @@ lightStatusEventSchema.index({ userId: 1 });
 const pushSubscriptionSchema = new mongoose.Schema({
     userId:       { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     location:     { type: String, required: true }, // normalised location key
-    muteGlobalChat: { type: Boolean, default: false },
+    text: { type: String, default: '' },
     chatMentionsEnabled: { type: Boolean, default: true },
     // Second location this device wants "status changed" alerts for.
     // null/unset = not watching a second location. Set/cleared from the
@@ -435,21 +454,19 @@ function verifyAdminToken(req, res, next) {
 // as visibly-the-same-shape ("anon-glow-482", "anon-glow-119", ...).
 // Now several independent word pools plus several handle *shapes*, so
 // two handles rarely even look like they were built the same way.
-const HANDLE_NOUNS = [
-    "fern", "river", "glow", "cedar", "amber", "quartz",
-    "willow", "ember", "harbor", "maple", "drift", "stone",
-    "comet", "lagoon", "orbit", "prairie", "thicket", "tundra",
-    "canyon", "meadow", "granite", "cove", "spark", "grove"
+const HANDLE_LEFT = [
+    'akwa', 'kofi', 'ama', 'esi', 'nana', 'kwame', 'adwoa', 'yaw',
+    'solar', 'nova', 'ember', 'echo', 'atlas', 'pixel', 'luma', 'zephyr',
+    'breeze', 'mango', 'cocoa', 'kente', 'adinkra', 'harbor', 'cedar', 'onyx',
+    'sable', 'lotus', 'mist', 'ripple', 'drift', 'aurora', 'safari', 'tide'
 ];
-const HANDLE_ADJECTIVES = [
-    "quiet", "swift", "hidden", "bright", "calm", "bold",
-    "gentle", "distant", "steady", "wandering", "silent", "dusty",
-    "restless", "faint", "curious", "sturdy"
+const HANDLE_RIGHT = [
+    'sparrow', 'falcon', 'otter', 'ibis', 'lynx', 'comet', 'voyager', 'runner',
+    'weaver', 'anchor', 'ranger', 'keeper', 'garden', 'grove', 'meadow', 'horizon',
+    'ember', 'quartz', 'canyon', 'summit', 'harvest', 'orbit', 'ripple', 'sunrise',
+    'moon', 'river', 'coconut', 'baobab', 'palms', 'lagoon', 'thunder', 'bloom'
 ];
-const HANDLE_ANIMALS = [
-    "heron", "otter", "falcon", "sparrow", "fox", "badger",
-    "kingfisher", "lynx", "swallow", "hare", "crane", "wren"
-];
+const HANDLE_CONNECTOR = ['', '', '', '-', '_'];
 
 function randomFrom(list) {
     return list[Math.floor(Math.random() * list.length)];
@@ -463,17 +480,52 @@ function randomNumber(min, max) {
 // attempt so the pool of *formats* is as varied as the words feeding
 // them, not just one template with different words dropped in.
 const HANDLE_SHAPES = [
-    () => `anon-${randomFrom(HANDLE_NOUNS)}-${randomNumber(100, 999)}`,
-    () => `${randomFrom(HANDLE_ADJECTIVES)}-${randomFrom(HANDLE_NOUNS)}`,
-    () => `${randomFrom(HANDLE_ADJECTIVES)}-${randomFrom(HANDLE_ANIMALS)}`,
-    () => `${randomFrom(HANDLE_ANIMALS)}-${randomNumber(10, 99)}`,
-    () => `${randomFrom(HANDLE_NOUNS)}${randomNumber(2, 88)}`
+    () => `${randomFrom(HANDLE_LEFT)}${randomFrom(HANDLE_CONNECTOR)}${randomFrom(HANDLE_RIGHT)}`,
+    () => `${randomFrom(HANDLE_RIGHT)}${randomFrom(HANDLE_CONNECTOR)}${randomFrom(HANDLE_LEFT)}`,
+    () => `${randomFrom(HANDLE_LEFT)}${randomFrom(HANDLE_RIGHT)}`
 ];
 
+function sanitizeHandle(raw) {
+    return String(raw || '')
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, '')
+        .replace(/[^a-z0-9_-]/g, '')
+        .slice(0, 24);
+}
+
+function isValidHandle(handle) {
+    return /^[a-z0-9](?:[a-z0-9_-]{1,22}[a-z0-9])$/.test(handle);
+}
+
+function sanitizeAvatarImageDataUrl(raw) {
+    const value = String(raw || '').trim();
+    if (!value) return null;
+    if (!/^data:image\/(png|jpe?g|webp);base64,/i.test(value)) return null;
+    // Rough cap: ~1.5MB payload as base64 string.
+    if (value.length > 2_000_000) return null;
+    return value;
+}
+
+function sanitizeMediaImageDataUrl(raw) {
+    const value = String(raw || '').trim();
+    if (!value) return null;
+    if (!/^data:image\/(png|jpe?g|webp);base64,/i.test(value)) return null;
+    // Smaller cap for in-feed media snapshots.
+    if (value.length > 1_200_000) return null;
+    return value;
+}
+
 async function generateUniqueChatHandle() {
+    for (let tries = 0; tries < 200; tries += 1) {
+        const handle = sanitizeHandle(randomFrom(HANDLE_SHAPES)());
+        const existing = await User.findOne({ chatHandle: new RegExp(`^${escapeRegex(handle)}$`, 'i') }).select('_id').lean();
+        if (!existing) return handle;
+    }
+    // Very unlikely fallback: add a short random suffix.
     while (true) {
-        const handle = randomFrom(HANDLE_SHAPES)();
-        const existing = await User.findOne({ chatHandle: handle }).select('_id').lean();
+        const handle = sanitizeHandle(`${randomFrom(HANDLE_LEFT)}-${randomFrom(HANDLE_RIGHT)}-${Math.random().toString(36).slice(2, 6)}`);
+        const existing = await User.findOne({ chatHandle: new RegExp(`^${escapeRegex(handle)}$`, 'i') }).select('_id').lean();
         if (!existing) return handle;
     }
 }
@@ -1136,10 +1188,14 @@ app.get('/chats', async (req, res) => {
 });
 
 app.post('/chats', async (req, res) => {
-    const { userId, text, location, replyTo, scope } = req.body;
+    const { userId, text, location, replyTo, repost, quote, media, scope } = req.body;
     const normalizedScope = (scope || 'local').toString().toLowerCase() === 'global' ? 'global' : 'local';
-    if (!userId || !text || (normalizedScope === 'local' && !location)) {
-        return res.status(400).json({ error: "Missing user, text, or location" });
+    const normalizedText = String(text || '').trim();
+    const normalizedMedia = sanitizeMediaImageDataUrl(media?.url);
+    const hasQuote = Boolean(quote && (quote.chatId || quote.handle || quote.text));
+    const hasRepost = Boolean(repost && (repost.chatId || repost.handle || repost.text));
+    if (!userId || (!normalizedText && !normalizedMedia && !hasQuote && !hasRepost) || (normalizedScope === 'local' && !location)) {
+        return res.status(400).json({ error: "Missing user, content, or location" });
     }
 
     try {
@@ -1163,13 +1219,25 @@ app.post('/chats', async (req, res) => {
         const newChat = new Chat({
             userId,
             handle: user.chatHandle,
-            text,
+            text: normalizedText,
+            avatarImage: user.avatarImage || null,
             scope: normalizedScope,
             replyTo: replyTo ? {
                 chatId: String(replyTo.chatId || ''),
                 handle: String(replyTo.handle || '').slice(0, 80),
                 text: String(replyTo.text || '').slice(0, 220)
             } : undefined,
+            repost: repost ? {
+                chatId: String(repost.chatId || ''),
+                handle: String(repost.handle || '').slice(0, 80),
+                text: String(repost.text || '').slice(0, 220)
+            } : undefined,
+            quote: quote ? {
+                chatId: String(quote.chatId || ''),
+                handle: String(quote.handle || '').slice(0, 80),
+                text: String(quote.text || '').slice(0, 220)
+            } : undefined,
+            media: normalizedMedia ? { kind: 'image', url: normalizedMedia } : undefined,
             location: savedLocation,
             locationKey: normalizedLocation
         });
@@ -2469,6 +2537,67 @@ app.patch('/user/:id/city', async (req, res) => {
     } catch (err) {
         console.error('City update error:', err.message);
         return res.status(500).json({ error: 'Server error updating city' });
+    }
+});
+
+// PATCH /user/:id/profile  { chatHandle?, avatarImage? }
+// Lets users customize their public identity used in community chat.
+app.patch('/user/:id/profile', async (req, res) => {
+    const { id } = req.params;
+    const hasChatHandle = Object.prototype.hasOwnProperty.call(req.body || {}, 'chatHandle');
+    const hasAvatarImage = Object.prototype.hasOwnProperty.call(req.body || {}, 'avatarImage');
+
+    if (!hasChatHandle && !hasAvatarImage) {
+        return res.status(400).json({ error: 'At least one of chatHandle or avatarImage is required' });
+    }
+
+    try {
+        const user = await User.findById(id);
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        if (hasChatHandle) {
+            const requestedHandle = sanitizeHandle(req.body.chatHandle);
+            if (!isValidHandle(requestedHandle)) {
+                return res.status(400).json({
+                    error: 'Handle must be 3-24 chars, letters/numbers, and can include - or _ in the middle.'
+                });
+            }
+
+            const taken = await User.findOne({
+                _id: { $ne: user._id },
+                chatHandle: new RegExp(`^${escapeRegex(requestedHandle)}$`, 'i')
+            }).select('_id').lean();
+
+            if (taken) {
+                return res.status(409).json({ error: 'That chat handle is already in use.' });
+            }
+
+            user.chatHandle = requestedHandle;
+        }
+
+        if (hasAvatarImage) {
+            const normalizedAvatar = sanitizeAvatarImageDataUrl(req.body.avatarImage);
+            if (req.body.avatarImage && !normalizedAvatar) {
+                return res.status(400).json({ error: 'Avatar must be a PNG, JPG, or WEBP image and within size limits.' });
+            }
+            user.avatarImage = normalizedAvatar;
+        }
+
+        await user.save();
+
+        return res.json({
+            success: true,
+            user: {
+                id: user._id,
+                chatHandle: user.chatHandle,
+                avatarImage: user.avatarImage || null
+            }
+        });
+    } catch (err) {
+        console.error('Profile update error:', err.message);
+        return res.status(500).json({ error: 'Server error updating profile' });
     }
 });
 
