@@ -145,6 +145,14 @@ const userSchema = new mongoose.Schema({
     city: { type: String, required: true },
     cityChangeLocked: { type: Boolean, default: false },
     cityChangedAt: { type: Date, default: null },
+    // Real position for the primary city, set when the user picks a
+    // result from the location search dropdown or taps "use my
+    // location" on signup/account — see js/utils/location-picker.js.
+    // Absent for anyone who just typed a name with no picker
+    // confirmation; GET /locations/map falls back to
+    // GHANA_TOWN_COORDS / Nominatim geocoding when this is null.
+    lat: { type: Number, default: null },
+    lng: { type: Number, default: null },
     chatHandle: { type: String },
     // Optional uploaded avatar image (data URL) used as profile photo.
     avatarImage: { type: String, default: null },
@@ -1137,6 +1145,13 @@ app.post('/signup', async (req, res) => {
     console.log("SIGNUP ROUTE HIT");
     const { name, region, city } = req.body;
     const emailPhone = (req.body.emailPhone || "").toLowerCase().trim();
+    // Optional — set when the person picked a location-search result or
+    // used "use my location" on the signup form (see location-picker.js).
+    // A hand-typed city with no picker confirmation just leaves these
+    // null, same as before; /locations/map's resolveLocationCoords()
+    // falls back to its table/geocoder in that case.
+    const lat = Number.isFinite(Number(req.body.lat)) ? Number(req.body.lat) : null;
+    const lng = Number.isFinite(Number(req.body.lng)) ? Number(req.body.lng) : null;
 
     if (!name || !emailPhone || !region || !city) {
         return res.status(400).json({ error: "Please fill these required fields" });
@@ -1175,7 +1190,7 @@ app.post('/signup', async (req, res) => {
                 code,
                 expiresAt: new Date(Date.now() + OTP_EXPIRY_MS),
                 attempts: 0,
-                userData: { name, emailPhone, region, city }
+                userData: { name, emailPhone, region, city, lat, lng }
             },
             { upsert: true, new: true }
         );
@@ -2283,34 +2298,45 @@ app.get('/areas/known', async (req, res) => {
 app.get('/locations/map', async (req, res) => {
     try {
         const [users, statuses] = await Promise.all([
-            User.find().select('city region secondaryLocation').lean(),
+            User.find().select('city region lat lng secondaryLocation').lean(),
             LightStatus.find().lean()
         ]);
 
         const statusByKey = new Map(statuses.map(s => [s.locationKey, s]));
         const keys = new Set(statusByKey.keys());
-        // key -> { label, region } — carries the real place name + region
-        // through to geocoding below, so Nominatim gets "Aputuogya, Ashanti,
-        // Ghana" instead of just the bare (possibly ambiguous) town name.
+        // key -> { label, region, lat, lng } — carries the real place name +
+        // region through to geocoding below (so Nominatim gets "Aputuogya,
+        // Ashanti, Ghana" instead of just the bare, possibly ambiguous town
+        // name), and a user-picker-confirmed lat/lng when one exists, so a
+        // real position always wins over guessing.
         const metaByKey = new Map();
-        const addKeyMeta = (rawCity, rawRegion) => {
+        const addKeyMeta = (rawCity, rawRegion, rawLat, rawLng) => {
             const key = normalizeLocation(rawCity).split(',')[0].trim();
             if (!key || key === 'global') return;
             keys.add(key);
-            if (!metaByKey.has(key)) {
-                metaByKey.set(key, { label: titleCaseLocation(rawCity), region: rawRegion || null });
+            const existing = metaByKey.get(key);
+            if (!existing) {
+                metaByKey.set(key, { label: titleCaseLocation(rawCity), region: rawRegion || null, lat: rawLat ?? null, lng: rawLng ?? null });
+            } else if ((existing.lat == null || existing.lng == null) && rawLat != null && rawLng != null) {
+                // First entry for this key had no confirmed position (e.g. it
+                // came in via secondaryLocation, which has none) — a later
+                // user with a real picked fix for the same key fills it in.
+                existing.lat = rawLat;
+                existing.lng = rawLng;
             }
         };
         users.forEach(u => {
-            addKeyMeta(u.city, u.region);
-            if (u.secondaryLocation?.city) addKeyMeta(u.secondaryLocation.city, u.secondaryLocation.region);
+            addKeyMeta(u.city, u.region, u.lat, u.lng);
+            if (u.secondaryLocation?.city) addKeyMeta(u.secondaryLocation.city, u.secondaryLocation.region, null, null);
         });
 
         const locations = await Promise.all(Array.from(keys).map(async (key) => {
             const record = statusByKey.get(key) || null;
             const meta = metaByKey.get(key) || null;
             const stats = await getLightStatusStats(key);
-            const coords = await resolveLocationCoords(key, record?.lat, record?.lng, meta?.label, meta?.region);
+            const storedLat = record?.lat ?? meta?.lat ?? null;
+            const storedLng = record?.lng ?? meta?.lng ?? null;
+            const coords = await resolveLocationCoords(key, storedLat, storedLng, meta?.label, meta?.region);
             const reportedAt = record?.reportedAt || null;
             const minutesAgo = reportedAt ? Math.max(0, Math.round((Date.now() - new Date(reportedAt).getTime()) / 60000)) : null;
 
@@ -2957,6 +2983,14 @@ app.patch('/user/:id/city', async (req, res) => {
     if (city.length < 2 || city.length > 60) {
         return res.status(400).json({ error: 'city must be between 2 and 60 characters' });
     }
+    // Optional — set when the person picked a location-search result or
+    // used "use my location" on this form (see location-picker.js). A
+    // hand-typed city with no picker confirmation just leaves these
+    // unset, same as before.
+    const hasLat = Number.isFinite(Number(req.body?.lat));
+    const hasLng = Number.isFinite(Number(req.body?.lng));
+    const lat = hasLat ? Number(req.body.lat) : null;
+    const lng = hasLng ? Number(req.body.lng) : null;
 
     try {
         const user = await User.findById(id);
@@ -2971,6 +3005,13 @@ app.patch('/user/:id/city', async (req, res) => {
         user.city = city;
         user.cityChangeLocked = true;
         user.cityChangedAt = new Date();
+        // Only overwrite existing coords if this save actually supplied a
+        // fresh pair — a plain typed edit with no picker confirmation
+        // shouldn't wipe out a previously-picked position.
+        if (hasLat && hasLng) {
+            user.lat = lat;
+            user.lng = lng;
+        }
         await user.save();
 
         return res.json({
@@ -2979,6 +3020,8 @@ app.patch('/user/:id/city', async (req, res) => {
                 id: user._id,
                 city: user.city,
                 region: user.region,
+                lat: user.lat,
+                lng: user.lng,
                 cityChangeLocked: true,
                 cityChangedAt: user.cityChangedAt
             }
