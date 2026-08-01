@@ -351,12 +351,36 @@ analyticsEventSchema.index({ type: 1, createdAt: -1 });
 analyticsEventSchema.index({ screen: 1, createdAt: -1 });
 analyticsEventSchema.index({ deviceId: 1, createdAt: -1 });
 
+// Persistent cache of real-world Nominatim geocoding results, keyed on
+// the same normalized locationKey + region GHANA_TOWN_COORDS already
+// uses. Without this, every restart (or every cold GHANA_TOWN_COORDS
+// miss) would re-hit the Nominatim API for the same town repeatedly —
+// this table makes that a one-time lookup per town/region pair, ever,
+// and also gives resolveLocationCoords() something durable to check
+// before it falls back to approximateCoordsFor()'s scatter position.
+const geocodeCacheSchema = new mongoose.Schema({
+    // e.g. "aputuogya|ashanti" — locationKey + normalized region, so
+    // two differently-regioned towns that happen to share a bare name
+    // (see GHANA_TOWN_COORDS's own comment about this) get separate
+    // entries instead of colliding on the town name alone.
+    cacheKey: { type: String, required: true, unique: true },
+    locationKey: { type: String, required: true },
+    region: { type: String, default: null },
+    lat: { type: Number, required: true },
+    lng: { type: Number, required: true },
+    // Nominatim's own display_name for the match, kept for debugging/
+    // admin visibility into what the geocoder actually resolved to.
+    displayName: { type: String, default: null },
+    geocodedAt: { type: Date, default: Date.now }
+});
+
 const User             = mongoose.model('User', userSchema);
 const Chat             = mongoose.model('Chat', chatSchema);
 const LightStatus      = mongoose.model('LightStatus', lightStatusSchema);
 const LightStatusEvent = mongoose.model('LightStatusEvent', lightStatusEventSchema);
 const PushSubscription = mongoose.model('PushSubscription', pushSubscriptionSchema);
 const AnalyticsEvent    = mongoose.model('AnalyticsEvent', analyticsEventSchema);
+const GeocodeCache      = mongoose.model('GeocodeCache', geocodeCacheSchema);
 
 console.log("MY SERVER FILE IS RUNNING");
 
@@ -654,14 +678,104 @@ function approximateCoordsFor(name) {
     return { lat, lng, approximate: true };
 }
 
-// Resolves the best coordinates available for a location: a real reported
-// fix first, then the curated table, then the deterministic fallback.
-function resolveLocationCoords(locationKey, storedLat, storedLng) {
+// ── Nominatim forward geocoding (OpenStreetMap) ─────────────────────
+// Nominatim's usage policy caps this at 1 request/second and requires
+// a real identifying User-Agent. geocodeChain below serializes every
+// call through a single chain (with the delay applied AFTER each
+// request finishes, success or failure) so however many towns
+// GET /locations/map needs to look up in one pass — or however many
+// requests land concurrently — they still go out no faster than one
+// per second, no matter how many resolveLocationCoords() calls are
+// in flight at once.
+let geocodeChain = Promise.resolve();
+const NOMINATIM_MIN_INTERVAL_MS = 1100;
+
+function scheduleAfterPreviousGeocode(task) {
+    const result = geocodeChain.then(() => task());
+    geocodeChain = result.catch(() => {}).then(
+        () => new Promise((resolve) => setTimeout(resolve, NOMINATIM_MIN_INTERVAL_MS))
+    );
+    return result;
+}
+
+// Region is included in the query string whenever we have one, since
+// Ghana has multiple towns/suburbs that share a bare name (e.g. more
+// than one "Aputuogya") — "<name>, <region>, Ghana" disambiguates the
+// same way it would for a human searching a map by hand.
+async function geocodeViaNominatim(name, region) {
+    const query = region ? `${name}, ${region}, Ghana` : `${name}, Ghana`;
+    const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=gh&q=${encodeURIComponent(query)}`;
+    try {
+        const response = await fetch(url, {
+            headers: {
+                // Nominatim silently deprioritizes/blocks requests with a
+                // generic or missing User-Agent — this identifies the app
+                // per their usage policy.
+                'User-Agent': 'LightWatch-Kumasi/1.0 (community power-outage tracker for Kumasi, Ghana)'
+            }
+        });
+        if (!response.ok) return null;
+        const results = await response.json();
+        const hit = Array.isArray(results) ? results[0] : null;
+        if (!hit || typeof hit.lat === 'undefined' || typeof hit.lon === 'undefined') return null;
+        const lat = parseFloat(hit.lat);
+        const lng = parseFloat(hit.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+        return { lat, lng, displayName: hit.display_name || null };
+    } catch (err) {
+        console.error('Nominatim geocoding error:', err.message);
+        return null;
+    }
+}
+
+// Checks the persistent cache first, geocodes via Nominatim (rate-limited)
+// on a miss, and saves a hit before returning it — so any given
+// locationKey/region pair only ever calls out to Nominatim once, ever.
+async function geocodeWithCache(locationKey, displayLabel, region) {
+    const normalizedRegion = normalizeLocation(region) || null;
+    const cacheKey = `${locationKey}|${normalizedRegion || 'unknown'}`;
+    try {
+        const cached = await GeocodeCache.findOne({ cacheKey }).lean();
+        if (cached) return { lat: cached.lat, lng: cached.lng };
+    } catch (err) {
+        console.error('GeocodeCache lookup error:', err.message);
+    }
+
+    const geocoded = await scheduleAfterPreviousGeocode(() => geocodeViaNominatim(displayLabel, region));
+    if (!geocoded) return null;
+
+    try {
+        await GeocodeCache.findOneAndUpdate(
+            { cacheKey },
+            { cacheKey, locationKey, region: normalizedRegion, lat: geocoded.lat, lng: geocoded.lng, displayName: geocoded.displayName, geocodedAt: new Date() },
+            { upsert: true }
+        );
+    } catch (err) {
+        // A failed cache write shouldn't lose a perfectly good geocode result.
+        console.error('GeocodeCache save error:', err.message);
+    }
+    return { lat: geocoded.lat, lng: geocoded.lng };
+}
+
+// Resolves the best coordinates available for a location, in order:
+//   1. A real reported GPS fix on the LightStatus doc.
+//   2. The curated GHANA_TOWN_COORDS table (instant, no network call).
+//   3. A cached or fresh Nominatim geocode of the real place name
+//      (+ region, when known) — so an unrecognized town gets its
+//      actual position on the map instead of a random scattered one.
+//   4. The deterministic scatter fallback, only if Nominatim has
+//      nothing either (offline, unresolvable name, etc.).
+// Now async because of step 3 — callers must await this.
+async function resolveLocationCoords(locationKey, storedLat, storedLng, displayLabel, region) {
     if (typeof storedLat === 'number' && typeof storedLng === 'number') {
         return { lat: storedLat, lng: storedLng, approximate: false };
     }
     const tableHit = GHANA_TOWN_COORDS[String(locationKey || '').replace(/[^a-z0-9]/g, '')];
     if (tableHit) return { lat: tableHit[0], lng: tableHit[1], approximate: false };
+
+    const geocoded = await geocodeWithCache(locationKey, displayLabel || locationKey, region);
+    if (geocoded) return { lat: geocoded.lat, lng: geocoded.lng, approximate: false };
+
     return approximateCoordsFor(locationKey);
 }
 
@@ -2168,22 +2282,35 @@ app.get('/areas/known', async (req, res) => {
 // position for every entry — see resolveLocationCoords()).
 app.get('/locations/map', async (req, res) => {
     try {
-        const [userCities, statuses] = await Promise.all([
-            User.distinct('city'),
+        const [users, statuses] = await Promise.all([
+            User.find().select('city region secondaryLocation').lean(),
             LightStatus.find().lean()
         ]);
 
         const statusByKey = new Map(statuses.map(s => [s.locationKey, s]));
         const keys = new Set(statusByKey.keys());
-        userCities.forEach(city => {
-            const key = normalizeLocation(city).split(',')[0].trim();
-            if (key && key !== 'global') keys.add(key);
+        // key -> { label, region } — carries the real place name + region
+        // through to geocoding below, so Nominatim gets "Aputuogya, Ashanti,
+        // Ghana" instead of just the bare (possibly ambiguous) town name.
+        const metaByKey = new Map();
+        const addKeyMeta = (rawCity, rawRegion) => {
+            const key = normalizeLocation(rawCity).split(',')[0].trim();
+            if (!key || key === 'global') return;
+            keys.add(key);
+            if (!metaByKey.has(key)) {
+                metaByKey.set(key, { label: titleCaseLocation(rawCity), region: rawRegion || null });
+            }
+        };
+        users.forEach(u => {
+            addKeyMeta(u.city, u.region);
+            if (u.secondaryLocation?.city) addKeyMeta(u.secondaryLocation.city, u.secondaryLocation.region);
         });
 
         const locations = await Promise.all(Array.from(keys).map(async (key) => {
             const record = statusByKey.get(key) || null;
+            const meta = metaByKey.get(key) || null;
             const stats = await getLightStatusStats(key);
-            const coords = resolveLocationCoords(key, record?.lat, record?.lng);
+            const coords = await resolveLocationCoords(key, record?.lat, record?.lng, meta?.label, meta?.region);
             const reportedAt = record?.reportedAt || null;
             const minutesAgo = reportedAt ? Math.max(0, Math.round((Date.now() - new Date(reportedAt).getTime()) / 60000)) : null;
 
