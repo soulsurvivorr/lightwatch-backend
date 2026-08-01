@@ -248,7 +248,15 @@ const lightStatusSchema = new mongoose.Schema({
     locationKey: { type: String, required: true, unique: true },
     status: { type: String, enum: ['on', 'off', 'unknown'], default: 'unknown' },
     reportedBy: { type: String },
-    reportedAt: { type: Date, default: Date.now }
+    reportedAt: { type: Date, default: Date.now },
+    // Real device coordinates, opportunistically supplied by a reporting
+    // client (see POST /lightstatus). Absent until the first geolocated
+    // report for a location comes in — GET /locations/map falls back to
+    // GHANA_TOWN_COORDS / approximateCoordsFor() until then. Once a real
+    // fix lands here it takes priority over the approximation, so pin
+    // accuracy improves organically as real reports accumulate.
+    lat: { type: Number, default: null },
+    lng: { type: Number, default: null }
 });
 
 const lightStatusEventSchema = new mongoose.Schema({
@@ -581,6 +589,80 @@ function escapeRegex(value) {
 function locationsFuzzyMatch(a, b) {
     if (!a || !b) return false;
     return a === b || a.includes(b) || b.includes(a);
+}
+
+// ── Coordinates for the Locations map (GET /locations/map) ───────────
+// There's no geocoding persistence anywhere else in this codebase today
+// — signup's /geocode/reverse only turns a GPS fix into a display string,
+// it never saves lat/lng. This table is a best-effort stand-in so every
+// monitored town still gets a real, plottable position on the map:
+//   1. A real reported fix on the LightStatus doc (lat/lng saved by
+//      POST /lightstatus when the reporting device supplied one) always
+//      wins — see resolveLocationCoords() below.
+//   2. Otherwise this curated table of known Ghanaian towns/cities.
+//   3. Otherwise a deterministic (same name -> same spot every time)
+//      fallback scattered across Ghana's bounding box, so an unrecognized
+//      town still renders somewhere sane instead of being dropped or
+//      stacking on top of another pin.
+// Coordinates below are approximate town-centre fixes, not survey-grade —
+// good enough for a country-level monitoring map, and every entry is
+// superseded automatically the moment a real GPS-tagged report comes in
+// for that location.
+const GHANA_TOWN_COORDS = {
+    accra: [5.6037, -0.1870], kumasi: [6.6885, -1.6244], tamale: [9.4034, -0.8424],
+    sekonditakoradi: [4.9438, -1.7554], takoradi: [4.8956, -1.7554], sekondi: [4.9438, -1.7554],
+    capecoast: [5.1053, -1.2466], sunyani: [7.3399, -2.3268], koforidua: [6.0940, -0.2591],
+    ho: [6.6108, 0.4708], bolgatanga: [10.7854, -0.8513], wa: [10.0601, -2.5099],
+    techiman: [7.5833, -1.9333], obuasi: [6.2020, -1.6700], tema: [5.6698, -0.0166],
+    nsawam: [5.8083, -0.3500], winneba: [5.3511, -0.6231], akimoda: [5.9260, -0.9877],
+    berekum: [7.4531, -2.5850], nkawkaw: [6.5500, -0.7667], dunkwa: [5.9667, -1.7833],
+    yendi: [9.4427, -0.0093], bawku: [11.0575, -0.2417], navrongo: [10.8956, -1.0925],
+    hohoe: [7.1517, 0.4747], kpando: [6.9922, 0.2919], keta: [5.9186, 0.9897],
+    aflao: [6.1167, 1.1833], axim: [4.8667, -2.2333], elmina: [5.0836, -1.3506],
+    tarkwa: [5.3006, -1.9931], prestea: [5.4333, -2.1500], halfassini: [5.0667, -2.8833],
+    kintampo: [8.0561, -1.7306], salaga: [8.5539, -0.5186], damongo: [9.0833, -1.8167],
+    bimbilla: [8.8489, -0.0500], nalerigu: [10.5333, -0.3667], jirapa: [10.5167, -2.7167],
+    lawra: [10.6500, -2.9000], tumu: [10.8667, -1.9833], sefwiwiawso: [6.2167, -2.4833],
+    goaso: [6.8022, -2.5164], konongo: [6.6167, -1.2167], mampong: [7.0625, -1.4006],
+    ejura: [7.3833, -1.3667], effiduase: [6.9333, -1.2833], newedubiase: [6.1833, -1.4000],
+    agonaswedru: [5.5333, -0.7000], kasoa: [5.5333, -0.4167], madina: [5.6833, -0.1667],
+    ashaiman: [5.6947, -0.0328], nungua: [5.6000, -0.0667], teshie: [5.5833, -0.1000],
+    dansoman: [5.5333, -0.2500], adenta: [5.7083, -0.1667], dome: [5.6333, -0.2167],
+    kaneshie: [5.5500, -0.2333], osu: [5.5558, -0.1825], labadi: [5.5556, -0.1611],
+    // Kumasi neighborhoods — this is the set location.js previously
+    // hand-placed on the old static map image (MAP_POSITIONS).
+    bantama: [6.7075, -1.6317], asokwa: [6.6650, -1.6100], adum: [6.6926, -1.6244],
+    suame: [6.7239, -1.6367], ahodwo: [6.6650, -1.6350], nhyiaeso: [6.6733, -1.6067],
+    tafo: [6.7264, -1.5850], knust: [6.6745, -1.5716], ejisu: [6.7333, -1.3667],
+    kwadaso: [6.6975, -1.6600]
+};
+
+// Ghana's approximate bounding box, used only by approximateCoordsFor()'s
+// fallback so an unrecognized name still lands inside the country.
+const GHANA_BOUNDS = { latMin: 4.7, latMax: 11.2, lngMin: -3.3, lngMax: 1.3 };
+
+function approximateCoordsFor(name) {
+    let hash = 0;
+    const str = String(name || '');
+    for (let i = 0; i < str.length; i++) {
+        hash = (hash * 31 + str.charCodeAt(i)) >>> 0;
+    }
+    const latSpan = GHANA_BOUNDS.latMax - GHANA_BOUNDS.latMin;
+    const lngSpan = GHANA_BOUNDS.lngMax - GHANA_BOUNDS.lngMin;
+    const lat = GHANA_BOUNDS.latMin + ((hash % 1000) / 1000) * latSpan;
+    const lng = GHANA_BOUNDS.lngMin + (((hash >> 10) % 1000) / 1000) * lngSpan;
+    return { lat, lng, approximate: true };
+}
+
+// Resolves the best coordinates available for a location: a real reported
+// fix first, then the curated table, then the deterministic fallback.
+function resolveLocationCoords(locationKey, storedLat, storedLng) {
+    if (typeof storedLat === 'number' && typeof storedLng === 'number') {
+        return { lat: storedLat, lng: storedLng, approximate: false };
+    }
+    const tableHit = GHANA_TOWN_COORDS[String(locationKey || '').replace(/[^a-z0-9]/g, '')];
+    if (tableHit) return { lat: tableHit[0], lng: tableHit[1], approximate: false };
+    return approximateCoordsFor(locationKey);
 }
 
 // ---- TYPING INDICATOR (in-memory only — never touches Mongo) ----
@@ -2078,6 +2160,56 @@ app.get('/areas/known', async (req, res) => {
     }
 });
 
+// GET /locations/map — every monitored town/city in the database, each
+// with resolved coordinates + current status + confidence, for the
+// Mapbox locations map. Same "union of signed-up cities + ever-reported
+// locations" set as /areas/known, but with the extra fields the map
+// needs (and unlike /areas/known, this always returns a plottable
+// position for every entry — see resolveLocationCoords()).
+app.get('/locations/map', async (req, res) => {
+    try {
+        const [userCities, statuses] = await Promise.all([
+            User.distinct('city'),
+            LightStatus.find().lean()
+        ]);
+
+        const statusByKey = new Map(statuses.map(s => [s.locationKey, s]));
+        const keys = new Set(statusByKey.keys());
+        userCities.forEach(city => {
+            const key = normalizeLocation(city).split(',')[0].trim();
+            if (key && key !== 'global') keys.add(key);
+        });
+
+        const locations = await Promise.all(Array.from(keys).map(async (key) => {
+            const record = statusByKey.get(key) || null;
+            const stats = await getLightStatusStats(key);
+            const coords = resolveLocationCoords(key, record?.lat, record?.lng);
+            const reportedAt = record?.reportedAt || null;
+            const minutesAgo = reportedAt ? Math.max(0, Math.round((Date.now() - new Date(reportedAt).getTime()) / 60000)) : null;
+
+            return {
+                name: titleCaseLocation(key),
+                locationKey: key,
+                lat: coords.lat,
+                lng: coords.lng,
+                coordsApproximate: coords.approximate,
+                status: record?.status || 'unknown',
+                reportedAt,
+                minutesAgo,
+                confirmations: stats.uniqueContributors,
+                totalChecks: stats.totalChecks,
+                confidence: stats.sourceConfidence
+            };
+        }));
+
+        locations.sort((a, b) => a.name.localeCompare(b.name));
+        return res.json({ locations });
+    } catch (err) {
+        console.error('Locations-map lookup error:', err.message);
+        return res.status(500).json({ error: 'Server error' });
+    }
+});
+
 app.get('/reports', async (req, res) => {
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 100);
 
@@ -2362,9 +2494,10 @@ async function sendFcmToOne(sub, notification) {
 // admin-set status shows up on users' home pages (poll + push) exactly
 // the same way a real user report does. `reportedByOverride` lets the
 // admin route label events as "LightWatch Admin" instead of a handle. ──
-async function applyLightStatusUpdate(rawLocation, status, { userId = null, reportedByOverride = null } = {}) {
+async function applyLightStatusUpdate(rawLocation, status, { userId = null, reportedByOverride = null, lat = null, lng = null } = {}) {
     const key = normalizeLocation(rawLocation).split(',')[0].trim();
     const keyTitle = titleCaseLocation(key);
+    const hasFix = typeof lat === 'number' && typeof lng === 'number' && !Number.isNaN(lat) && !Number.isNaN(lng);
 
     // The reporter's chatHandle lookup and the "what was the status
     // before this update" lookup don't depend on each other — fetch both
@@ -2388,7 +2521,7 @@ async function applyLightStatusUpdate(rawLocation, status, { userId = null, repo
 
     const record = await LightStatus.findOneAndUpdate(
         { locationKey: key },
-        { status, reportedBy, reportedAt: new Date() },
+        { status, reportedBy, reportedAt: new Date(), ...(hasFix ? { lat, lng } : {}) },
         { upsert: true, new: true }
     );
 
@@ -2461,12 +2594,22 @@ async function applyLightStatusUpdate(rawLocation, status, { userId = null, repo
 
 // POST /lightstatus  { location, status, userId }
 app.post('/lightstatus', async (req, res) => {
-    const { location, status, userId } = req.body;
+    const { location, status, userId, lat, lng } = req.body;
     if (!location || !status) return res.status(400).json({ error: 'location and status required' });
     if (!['on', 'off'].includes(status)) return res.status(400).json({ error: 'status must be on or off' });
 
     try {
-        const { record } = await applyLightStatusUpdate(location, status, { userId });
+        // lat/lng are optional — sent by clients that had a GPS fix handy
+        // when they reported (e.g. the map view's report action). They
+        // refine that location's pin on GET /locations/map going forward;
+        // a report with no fix just leaves the existing coordinates alone.
+        const parsedLat = typeof lat === 'number' ? lat : parseFloat(lat);
+        const parsedLng = typeof lng === 'number' ? lng : parseFloat(lng);
+        const { record } = await applyLightStatusUpdate(location, status, {
+            userId,
+            lat: Number.isFinite(parsedLat) ? parsedLat : null,
+            lng: Number.isFinite(parsedLng) ? parsedLng : null
+        });
         return res.json(record);
     } catch (err) {
         console.error('Light status error:', err.message);
