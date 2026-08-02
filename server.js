@@ -1007,8 +1007,12 @@ async function sendOtpEmail(email, code, name) {
         console.log(`[DEV MODE — no BREVO_API_KEY set] OTP for ${email} is ${code}`);
         return;
     }
+    const timeoutMs = Number(process.env.OTP_SEND_TIMEOUT_MS || 25000);
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 12000);
+    const timeoutId = setTimeout(() => {
+        controller.abort();
+        console.error(`[OTP] Email send timed out after ${timeoutMs}ms for ${email}`);
+    }, timeoutMs);
     let response;
     try {
         response = await fetch('https://api.brevo.com/v3/smtp/email', {
@@ -1030,6 +1034,11 @@ async function sendOtpEmail(email, code, name) {
                 textContent: `Your LightWatch verification code is ${code}. It expires in 10 minutes. If you didn't request this, you can ignore this email.`
             })
         });
+    } catch (err) {
+        if (err.name === 'AbortError') {
+            throw new Error(`Email send timed out after ${timeoutMs}ms for ${email}`);
+        }
+        throw err;
     } finally {
         clearTimeout(timeoutId);
     }
@@ -1048,8 +1057,12 @@ async function sendOtpSms(phoneNumber, code) {
         console.log(`[DEV MODE — no SMS provider configured] OTP for ${phoneNumber} is ${code}`);
         return;
     }
+    const timeoutMs = Number(process.env.OTP_SEND_TIMEOUT_MS || 25000);
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 12000);
+    const timeoutId = setTimeout(() => {
+        controller.abort();
+        console.error(`[OTP] SMS send timed out after ${timeoutMs}ms for ${phoneNumber}`);
+    }, timeoutMs);
     let response;
     try {
         response = await fetch('https://sms.arkesel.com/api/v2/sms/send', {
@@ -1065,6 +1078,11 @@ async function sendOtpSms(phoneNumber, code) {
                 recipients: [phoneNumber]
             })
         });
+    } catch (err) {
+        if (err.name === 'AbortError') {
+            throw new Error(`SMS send timed out after ${timeoutMs}ms for ${phoneNumber}`);
+        }
+        throw err;
     } finally {
         clearTimeout(timeoutId);
     }
@@ -1227,13 +1245,14 @@ app.post('/signup', async (req, res) => {
 
 // ---- SIGN IN ----
 app.post('/signin', async (req, res) => {
-    console.log("SIGNIN ROUTE HIT");
     const emailPhone = (req.body.emailPhone || "").toLowerCase().trim();
+    console.log(`[SIGNIN] request received for ${emailPhone || '(empty)'}`);
 
     try {
         const foundUser = await User.findOne({ emailPhone });
 
         if (!foundUser) {
+            console.warn(`[SIGNIN] no account found for ${emailPhone}`);
             return res.status(400).json({ error: "No account found" });
         }
 
@@ -1249,9 +1268,13 @@ app.post('/signin', async (req, res) => {
         } else {
             try {
                 await sendOtp(emailPhone, code, foundUser.name);
+                console.log(`[SIGNIN] verification code sent for ${emailPhone}`);
             } catch (sendErr) {
-                console.error("Failed to send signin OTP:", sendErr.message);
-                return res.status(500).json({ error: "Could not send verification code. Please try again." });
+                const reason = sendErr?.message || 'Unknown error while sending the code';
+                console.error(`[SIGNIN] failed for ${emailPhone}: ${reason}`);
+                return res.status(502).json({
+                    error: `We couldn't send the verification code to ${maskContact(emailPhone)}. ${reason}`
+                });
             }
         }
 
@@ -1267,7 +1290,7 @@ app.post('/signin', async (req, res) => {
             { upsert: true, new: true }
         );
 
-        console.log(`Pending signin created for ${emailPhone}`);
+        console.log(`[SIGNIN] pending verification created for ${emailPhone}`);
 
         return res.json({
             userId: foundUser._id.toString(),
@@ -1277,8 +1300,8 @@ app.post('/signin', async (req, res) => {
             // it only goes out via the SMS/email send above.
         });
     } catch (err) {
-        console.error("Signin error:", err.message);
-        return res.status(500).json({ error: "Server error during signin" });
+        console.error(`[SIGNIN] unexpected failure for ${emailPhone}:`, err);
+        return res.status(500).json({ error: `Server error during signin for ${maskContact(emailPhone)}` });
     }
 });
 
