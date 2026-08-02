@@ -118,6 +118,24 @@ try {
 // connection is allowed to use concurrently under load.
 mongoose.connect(MONGO_URI, {
     serverSelectionTimeoutMS: 10000,
+    // NEW: serverSelectionTimeoutMS only covers picking a server for a
+    // NEW operation — once a socket is established and in use, nothing
+    // was bounding how long Mongoose would wait on it. Cloud networking
+    // (Railway <-> Atlas, or any NAT/load-balancer in between) can leave
+    // a connection "half-open" — no FIN, no RST, just silence — and
+    // without socketTimeoutMS the driver just keeps waiting on that
+    // read, sometimes for minutes, while still holding the connection
+    // out of the pool. Every OTHER query then queues behind maxPoolSize
+    // (10) for a connection that's never coming back. That's consistent
+    // with what the logs showed: GET / (no DB call) stayed at ~1ms the
+    // whole time, while every Mongo-touching route (GET /news, GET
+    // /reports) simultaneously spiked to 80-160+ seconds, then
+    // eventually recovered on its own once the dead socket finally
+    // timed out. Setting an explicit bound here means a stalled
+    // operation fails in ~20s with a clear Mongo error instead of
+    // silently hanging the whole app for minutes.
+    socketTimeoutMS: 20000,
+    connectTimeoutMS: 10000,
     family: 4,
     maxPoolSize: Number(process.env.MONGO_MAX_POOL_SIZE) || 10,
     minPoolSize: Number(process.env.MONGO_MIN_POOL_SIZE) || 1
