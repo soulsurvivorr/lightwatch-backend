@@ -59,7 +59,7 @@ const cheerio = require('cheerio');
 
 const rssParser = new Parser({
     timeout: 15000,
-    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0; +https://lightwatch-backend-production.up.railway.app)' },
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0; +https://lightwatch-backend-lightwatch-backend.up.railway.app)' },
     // Without this, rss-parser silently drops <media:content> and
     // <media:thumbnail> — the tags WordPress/Yoast-based outlets (Adom
     // Online, and most of what Google News surfaces) use to carry their
