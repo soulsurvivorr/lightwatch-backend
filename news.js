@@ -1250,9 +1250,26 @@ module.exports = function initNewsSystem(app, deps) {
     async function fetchRssSource(source, knownKeys) {
         let items = [];
         try {
-            const res = await fetch(source.url, {
-                headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0)' }
-            });
+            // 15s bound — RSS/XML feeds are small and should respond fast.
+            // Without this, an unresponsive/slow host leaves this await
+            // hanging for undici's default timeout (well over a minute),
+            // and since fetch()'s DNS resolution shares Node's small
+            // (4-slot) libuv threadpool with zlib — the same pool
+            // compression() uses on every JSON response this backend
+            // sends — one hung source here was enough to stall completely
+            // unrelated API responses (e.g. GET /news reads) for minutes,
+            // not just delay this fetch cycle.
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 15000);
+            let res;
+            try {
+                res = await fetch(source.url, {
+                    signal: controller.signal,
+                    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0)' }
+                });
+            } finally {
+                clearTimeout(timeout);
+            }
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const rawXml = await res.text();
             const sanitized = sanitizeFeedXml(rawXml);
@@ -1310,9 +1327,20 @@ module.exports = function initNewsSystem(app, deps) {
     async function scrapeEcgSite(source, knownKeys) {
         let html;
         try {
-            const res = await fetch(source.url, {
-                headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0)' }
-            });
+            // Same 15s bound as fetchRssSource — see its comment for why an
+            // untimed fetch here is a real, shared-threadpool problem, not
+            // just a slow crawl.
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 15000);
+            let res;
+            try {
+                res = await fetch(source.url, {
+                    signal: controller.signal,
+                    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0)' }
+                });
+            } finally {
+                clearTimeout(timeout);
+            }
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             html = await res.text();
         } catch (err) {
