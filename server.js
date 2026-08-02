@@ -3155,9 +3155,23 @@ app.get('/', (req, res) => {
     });
 });
 
-// SPA routing: serve index.html for all non-API routes
+// This backend is API-only — the frontend deploys independently to
+// Netlify (see the express.static comment above), so there is no
+// index.html to serve here and there never will be. This used to try
+// res.sendFile(path.join(__dirname, '../frontend/index.html')) as an
+// SPA fallback for every unmatched request, with no error handling.
+// That path never resolves on Render, so it failed on essentially
+// every stray/bot/probe request that didn't match an API route —
+// and each failed attempt queues an fs.stat on Node's shared libuv
+// threadpool (default size 4), the SAME pool zlib uses for the
+// compression() middleware wrapping every JSON response above. Enough
+// of these piling up at once was starving that pool and stalling
+// unrelated API responses for tens of seconds — the random
+// across-every-endpoint slowness this was originally reported as.
+// A plain, fast JSON 404 does no filesystem I/O at all, so it can't
+// contend for that pool no matter how often it's hit.
 app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, '../frontend/index.html'));
+    res.status(404).json({ error: 'Not found' });
 });
 
 // START
