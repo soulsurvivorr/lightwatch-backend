@@ -570,15 +570,32 @@ function sanitizeMediaImageDataUrl(raw) {
 }
 
 async function generateUniqueChatHandle() {
+    // NOTE: this used to look up existing handles with a case-insensitive
+    // regex (`new RegExp(..., 'i')`). There IS an index on chatHandle
+    // (see userSchema.index above), but MongoDB can only use a standard
+    // index for a regex when it's case-SENSITIVE — the 'i' flag forced a
+    // full collection scan of the entire User collection on every single
+    // attempt, and this loop can run up to 200 times per call. That's
+    // what was behind /signup and /signin occasionally taking many
+    // seconds (worse the bigger the User collection gets) — this
+    // function runs on every first sign-in for any account that doesn't
+    // have a chatHandle yet.
+    // The case-insensitivity was also never actually needed: every
+    // handle that can ever reach this collection — generated here, or
+    // user-submitted via sanitizeHandle() at the /account route — is
+    // already forced to lowercase by sanitizeHandle() before it's
+    // stored. So an exact match against the already-lowercase `handle`
+    // variable finds the same rows a case-insensitive scan would, using
+    // the index as a fast, indexed lookup instead of a table scan.
     for (let tries = 0; tries < 200; tries += 1) {
         const handle = sanitizeHandle(randomFrom(HANDLE_SHAPES)());
-        const existing = await User.findOne({ chatHandle: new RegExp(`^${escapeRegex(handle)}$`, 'i') }).select('_id').lean();
+        const existing = await User.findOne({ chatHandle: handle }).select('_id').lean();
         if (!existing) return handle;
     }
     // Very unlikely fallback: add a short random suffix.
     while (true) {
         const handle = sanitizeHandle(`${randomFrom(HANDLE_LEFT)}-${randomFrom(HANDLE_RIGHT)}-${Math.random().toString(36).slice(2, 6)}`);
-        const existing = await User.findOne({ chatHandle: new RegExp(`^${escapeRegex(handle)}$`, 'i') }).select('_id').lean();
+        const existing = await User.findOne({ chatHandle: handle }).select('_id').lean();
         if (!existing) return handle;
     }
 }
@@ -789,7 +806,16 @@ async function resolveLocationCoords(locationKey, storedLat, storedLng, displayL
 // perf fix. Trimmed the fetched fields in the meantime so at least each
 // event only carries what's actually used below.
 async function getLightStatusStats(locationKey) {
-    const events = await LightStatusEvent.find({ locationKey })
+    // Bounded to a rolling 90 days. Every stat this function computes is
+    // either "this week" (needs 7 days) or an outage-duration average
+    // that's only meaningful using reasonably recent history — neither
+    // needs a location's full lifetime history. This was previously an
+    // unbounded find() (no .limit(), no date filter at all), which meant
+    // this query — called on every GET /lightstatus, including the 45s
+    // background poll every location/home screen runs — got slower
+    // forever as a location's event history grew, with no ceiling.
+    const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+    const events = await LightStatusEvent.find({ locationKey, reportedAt: { $gte: ninetyDaysAgo } })
         .select('status reportedAt reportedBy')
         .sort({ reportedAt: 1 })
         .lean();
@@ -2398,7 +2424,21 @@ app.get('/reports', async (req, res) => {
 
         const [candidateLocationChats, ownChats] = await Promise.all([
             normalizedLocation
-                ? Chat.find({ scope: 'local' }).sort({ createdAt: -1 }).limit(200).lean()
+                // .select() here matters a lot more than it looks: Chat
+                // documents can carry an avatarImage snapshot (up to ~2MB
+                // base64) and/or a media image (up to ~1.1MB base64) — see
+                // the chatSchema comments above. Nothing built below ever
+                // reads either field, but without this, every call to this
+                // route (including nav-badges.js's own 30s background
+                // poll) was pulling full image blobs for up to 200
+                // documents from Mongo just to immediately discard them —
+                // real bandwidth/memory/CPU spent on data that was never
+                // going to reach the client either way.
+                ? Chat.find({ scope: 'local' })
+                    .select('userId location locationKey handle text createdAt scope')
+                    .sort({ createdAt: -1 })
+                    .limit(200)
+                    .lean()
                 : Promise.resolve([]),
             Chat.find({ userId: requestingUserId }).select('_id').lean()
         ]);
@@ -2419,7 +2459,11 @@ app.get('/reports', async (req, res) => {
             ? await Chat.find({
                 'replyTo.chatId': { $in: [...ownChatIdSet] },
                 userId: { $ne: requestingUserId }
-            }).sort({ createdAt: -1 }).limit(limit).lean()
+            })
+                .select('location locationKey handle text createdAt scope replyTo')
+                .sort({ createdAt: -1 })
+                .limit(limit)
+                .lean()
             : [];
 
         const usedChatIds = new Set();
@@ -2476,6 +2520,7 @@ app.get('/reports', async (req, res) => {
             // Recent-only (7 days) so this can't grow into an unbounded
             // always-fetched list.
             Chat.find({ isAdmin: true, createdAt: { $gte: sevenDaysAgo } })
+                .select('handle text createdAt scope location')
                 .sort({ createdAt: -1 })
                 .limit(20)
                 .lean()
@@ -3041,9 +3086,15 @@ app.patch('/user/:id/profile', async (req, res) => {
                 });
             }
 
+            // requestedHandle is already lowercase (sanitizeHandle above),
+            // so an exact match hits the chatHandle index directly instead
+            // of forcing a full collection scan — see the comment on
+            // generateUniqueChatHandle() for why the case-insensitive
+            // regex this replaced was a real performance bug, not just
+            // theoretical.
             const taken = await User.findOne({
                 _id: { $ne: user._id },
-                chatHandle: new RegExp(`^${escapeRegex(requestedHandle)}$`, 'i')
+                chatHandle: requestedHandle
             }).select('_id').lean();
 
             if (taken) {

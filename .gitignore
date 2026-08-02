@@ -1,10 +1,4 @@
-backend/.env
-backend/dot.env
-backend/node_modules/
-backend/package-lock.json
-android/
-build.js
-www/
+package-lock.json
 node_modules/
 .env
 .dot.env
