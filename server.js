@@ -817,8 +817,22 @@ function pruneTypingRoom(room) {
     }
 }
 
+// NOTE: this fetches the location's ENTIRE reporting history, unbounded,
+// every call — no .limit(), and it only grows over time. It's called once
+// per known location inside GET /locations/map's Promise.all (so a
+// single home/map load fans this out across every town in the app) and
+// once per call from GET /lightstatus. Cheap today; worth capping to a
+// rolling window (with totalChecks/uniqueContributors becoming
+// "in that window" rather than all-time) once any location's history
+// grows large — didn't change that here since it changes what those
+// numbers mean, which felt like a product call rather than a pure
+// perf fix. Trimmed the fetched fields in the meantime so at least each
+// event only carries what's actually used below.
 async function getLightStatusStats(locationKey) {
-    const events = await LightStatusEvent.find({ locationKey }).sort({ reportedAt: 1 }).lean();
+    const events = await LightStatusEvent.find({ locationKey })
+        .select('status reportedAt reportedBy')
+        .sort({ reportedAt: 1 })
+        .lean();
     const now = Date.now();
     const oneWeekAgo = now - 7 * 24 * 60 * 60 * 1000;
 
@@ -1206,15 +1220,12 @@ app.post('/signup', async (req, res) => {
 
         const code = isDevLoginContact(emailPhone) ? DEV_LOGIN_CODE : generateOtpCode();
 
+        // Same fix as /signin below: write the pending record and respond
+        // first, send the actual OTP after, so the client isn't blocked on
+        // Brevo/Arkesel's API round trip before it can move to the
+        // verification screen.
         if (isDevLoginContact(emailPhone)) {
             console.log(`[DEV LOGIN BYPASS] Signup code for ${emailPhone} is ${code} — not actually sent.`);
-        } else {
-            try {
-                await sendOtp(emailPhone, code, name);
-            } catch (sendErr) {
-                console.error("Failed to send signup OTP:", sendErr.message);
-                return res.status(500).json({ error: "Could not send verification code. Please try again." });
-            }
         }
 
         await PendingVerification.findOneAndUpdate(
@@ -1231,12 +1242,19 @@ app.post('/signup', async (req, res) => {
 
         console.log(`Pending signup created for ${emailPhone}`);
 
-        return res.status(200).json({
+        res.status(200).json({
             emailPhone,
             maskedContact: maskContact(emailPhone)
             // NOTE: the code itself is intentionally NOT included here —
             // it only goes out via the SMS/email send above.
         });
+
+        if (!isDevLoginContact(emailPhone)) {
+            sendOtp(emailPhone, code, name).catch(sendErr => {
+                console.error(`[SIGNUP] OTP send failed for ${emailPhone}:`, sendErr.message);
+            });
+        }
+        return;
     } catch (err) {
         console.error("Signup error:", err.message);
         return res.status(500).json({ error: "Server error during signup" });
@@ -1263,19 +1281,18 @@ app.post('/signin', async (req, res) => {
 
         const code = isDevLoginContact(emailPhone) ? DEV_LOGIN_CODE : generateOtpCode();
 
+        // Was: await sendOtp(...) here, BEFORE responding — the client's
+        // fetch to /signin didn't resolve (and the frontend didn't route to
+        // the verification screen) until Brevo/Arkesel's API round trip
+        // finished, which is what the multi-second "delay when code was
+        // requested and when new page was opened" was. The pending record
+        // is written first (fast, local DB write) and the response goes out
+        // immediately; the actual send happens after, without the user
+        // waiting on it. The "Resend" flow already exists as the recovery
+        // path if the send genuinely fails — see the catch below, which
+        // just logs so a broken provider key doesn't fail silently.
         if (isDevLoginContact(emailPhone)) {
             console.log(`[DEV LOGIN BYPASS] Signin code for ${emailPhone} is ${code} — not actually sent.`);
-        } else {
-            try {
-                await sendOtp(emailPhone, code, foundUser.name);
-                console.log(`[SIGNIN] verification code sent for ${emailPhone}`);
-            } catch (sendErr) {
-                const reason = sendErr?.message || 'Unknown error while sending the code';
-                console.error(`[SIGNIN] failed for ${emailPhone}: ${reason}`);
-                return res.status(502).json({
-                    error: `We couldn't send the verification code to ${maskContact(emailPhone)}. ${reason}`
-                });
-            }
         }
 
         await PendingVerification.findOneAndUpdate(
@@ -1292,13 +1309,22 @@ app.post('/signin', async (req, res) => {
 
         console.log(`[SIGNIN] pending verification created for ${emailPhone}`);
 
-        return res.json({
+        res.json({
             userId: foundUser._id.toString(),
             maskedContact: maskContact(foundUser.emailPhone),
             chatHandle: foundUser.chatHandle
             // NOTE: the code itself is intentionally NOT included here —
             // it only goes out via the SMS/email send above.
         });
+
+        if (!isDevLoginContact(emailPhone)) {
+            sendOtp(emailPhone, code, foundUser.name)
+                .then(() => console.log(`[SIGNIN] verification code sent for ${emailPhone}`))
+                .catch(sendErr => {
+                    console.error(`[SIGNIN] OTP send failed for ${emailPhone}:`, sendErr?.message || sendErr);
+                });
+        }
+        return;
     } catch (err) {
         console.error(`[SIGNIN] unexpected failure for ${emailPhone}:`, err);
         return res.status(500).json({ error: `Server error during signin for ${maskContact(emailPhone)}` });
@@ -1336,6 +1362,7 @@ app.post('/verify', async (req, res) => {
     try {
         let userId;
         let chatHandle;
+        let name, city, region;
 
         if (pending.type === 'signup') {
             const chatHandleValue = await generateUniqueChatHandle();
@@ -1346,6 +1373,9 @@ app.post('/verify', async (req, res) => {
             await newUser.save();
             userId = newUser._id.toString();
             chatHandle = newUser.chatHandle;
+            name = newUser.name;
+            city = newUser.city;
+            region = newUser.region;
             console.log("User saved to MongoDB:", newUser.emailPhone);
         } else if (pending.type === 'signin') {
             const existingUser = await User.findById(pending.userId);
@@ -1355,15 +1385,27 @@ app.post('/verify', async (req, res) => {
             }
             userId = pending.userId;
             chatHandle = existingUser?.chatHandle;
+            name = existingUser?.name;
+            city = existingUser?.city;
+            region = existingUser?.region;
         }
 
         await PendingVerification.deleteOne({ emailPhone });
 
+        // name/city/region are included here (not just userId) so
+        // verification.js can build its session `user` object straight from
+        // this response instead of firing a second GET /user/:id round
+        // trip — that second request also isn't cheap (it recomputes
+        // chatCount/reportCount via two more DB queries this screen never
+        // used), so this cuts real time off "verify & continue" too.
         return res.json({
             success: true,
             userId,
             maskedContact: maskContact(emailPhone),
-            chatHandle
+            chatHandle,
+            name,
+            city,
+            region
         });
     } catch (err) {
         console.error("Verify error:", err.message);
@@ -1438,21 +1480,44 @@ app.get('/chats', async (req, res) => {
         // always treated as local by the old `(chat.scope || 'local')`
         // fallback) — same result set as before, just filtered in Mongo.
         const scopeQuery = scope === 'global' ? { scope: 'global' } : { scope: { $ne: 'global' } };
-        const allChats = await Chat.find(scopeQuery).sort({ createdAt: -1 }).limit(500).lean();
 
         if (scope === 'global') {
+            const allChats = await Chat.find(scopeQuery).sort({ createdAt: -1 }).limit(500).lean();
             return res.json(allChats);
         }
 
         if (location) {
+            // Was: fetch the 500 most recent LOCAL chats system-wide (every
+            // neighborhood, each one potentially carrying a full base64
+            // avatarImage snapshot plus up to a ~1.1MB base64 media image —
+            // see chatSchema), then filter down to this one location in JS
+            // afterward. That meant loading (or polling every 1.5s, per
+            // report.js's pollChatsOnce) a single neighborhood's feed always
+            // dragged along up to 500 other neighborhoods' worth of images
+            // first, and — worse — a location with real activity could still
+            // come back empty if 500 *other* locations were noisier in the
+            // same window.
+            //
+            // Same locationsFuzzyMatch() rule (exact match, or either string
+            // containing the other), just evaluated by Mongo per-document via
+            // $expr/$indexOfCP instead of in JS after the fetch, so only
+            // documents that actually match this location are ever read out
+            // of the collection or sent over the wire.
             const normalizedLocation = normalizeLocation(location);
-            const filtered = allChats.filter(chat => {
-                const chatLoc = normalizeLocation(chat.location || chat.locationKey || '');
-                return locationsFuzzyMatch(chatLoc, normalizedLocation);
-            });
+            const locationQuery = {
+                ...scopeQuery,
+                $expr: {
+                    $or: [
+                        { $gte: [{ $indexOfCP: ['$locationKey', normalizedLocation] }, 0] },
+                        { $gte: [{ $indexOfCP: [normalizedLocation, '$locationKey'] }, 0] }
+                    ]
+                }
+            };
+            const filtered = await Chat.find(locationQuery).sort({ createdAt: -1 }).limit(500).lean();
             return res.json(filtered);
         }
 
+        const allChats = await Chat.find(scopeQuery).sort({ createdAt: -1 }).limit(500).lean();
         return res.json(allChats);
     } catch (err) {
         console.error("Get chats error:", err.message);
