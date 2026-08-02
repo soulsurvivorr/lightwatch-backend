@@ -1390,7 +1390,31 @@ module.exports = function initNewsSystem(app, deps) {
 
     let lastFetchStats = null;
 
+    // Guards against two cycles running at once. NEWS_FETCH_INTERVAL_MS
+    // (below) is comfortably longer than a normal cycle takes today, but
+    // this cycle sequentially awaits ~19 outbound HTTP fetches, each with
+    // its own up-to-15s timeout — a bad run (several sources timing out
+    // back to back) can realistically take longer than the interval. Without
+    // this guard, the next setInterval tick would fire anyway and start a
+    // second cycle on top of the first: two loops hitting the same outlets,
+    // double the outbound requests in flight, and — worse — both cycles
+    // writing to the same module-level `activeCycleQueue` used for
+    // broadcast/notification batching, which is only safe with one cycle
+    // active at a time. The admin "Refresh now" button (POST
+    // /admin/news/refresh) shares this same guard so it can't stack a
+    // second cycle on top of a scheduled one either.
+    let cycleInFlight = null;
+
     async function runNewsFetchCycle() {
+        if (cycleInFlight) {
+            console.log('[news] Fetch cycle requested while one is already running — reusing it instead of starting a second.');
+            return cycleInFlight;
+        }
+        cycleInFlight = runNewsFetchCycleInner().finally(() => { cycleInFlight = null; });
+        return cycleInFlight;
+    }
+
+    async function runNewsFetchCycleInner() {
         console.log('[news] Fetch cycle starting...');
         const stats = { startedAt: new Date(), sources: {} };
         const knownKeys = await getKnownLocationKeys();

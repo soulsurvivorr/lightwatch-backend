@@ -1448,66 +1448,93 @@ app.post('/resend', async (req, res) => {
 });
 
 // ---- CHATS ----
+// Builds the same scope/location filter GET /chats and GET /chats/counts
+// both need, so the two routes can never drift out of sync with each
+// other. scope === 'global' → exact match. scope === 'local' → { $ne:
+// 'global' } rather than { scope: 'local' }, so this still matches legacy
+// Chat docs saved before the `scope` field existed (undefined scope was
+// always treated as local by the old `(chat.scope || 'local')` fallback).
+function buildChatsFilter(scope, location) {
+    const scopeQuery = scope === 'global' ? { scope: 'global' } : { scope: { $ne: 'global' } };
+    if (scope === 'global' || !location) return scopeQuery;
+
+    // Same locationsFuzzyMatch() rule (exact match, or either string
+    // containing the other), evaluated by Mongo per-document via
+    // $expr/$indexOfCP instead of in JS after the fetch, so only
+    // documents that actually match this location are ever read out of
+    // the collection or sent over the wire.
+    const normalizedLocation = normalizeLocation(location);
+    return {
+        ...scopeQuery,
+        $expr: {
+            $or: [
+                { $gte: [{ $indexOfCP: ['$locationKey', normalizedLocation] }, 0] },
+                { $gte: [{ $indexOfCP: [normalizedLocation, '$locationKey'] }, 0] }
+            ]
+        }
+    };
+}
+
 app.get('/chats', async (req, res) => {
     const location = req.query.location;
     const scope = (req.query.scope || 'local').toString().toLowerCase() === 'global' ? 'global' : 'local';
 
     try {
-        // Was: Chat.find() (no filter) pulling up to 500 docs of BOTH
-        // scopes on every call, then filtering scope in JS. This is the
+        const filter = buildChatsFilter(scope, location);
+
+        // Optional delta cursor: ?since=<ISO timestamp>. This is the
         // single hottest polling route in the app (it's in
-        // NOISY_GET_ROUTES), so pushing the scope filter into the query
-        // lets it use the existing { scope: 1, createdAt: -1 } index and
-        // return only the docs the caller actually wants — same result,
-        // less data read from Mongo and sent over the wire every poll.
-        // scope === 'global' → exact match. scope === 'local' → { $ne: 'global' }
-        // rather than { scope: 'local' }, so this still matches legacy Chat
-        // docs saved before the `scope` field existed (undefined scope was
-        // always treated as local by the old `(chat.scope || 'local')`
-        // fallback) — same result set as before, just filtered in Mongo.
-        const scopeQuery = scope === 'global' ? { scope: 'global' } : { scope: { $ne: 'global' } };
+        // NOISY_GET_ROUTES, and report.js's pollChatsOnce hits it every
+        // 1.5s for as long as the Reports view is open) — and every doc
+        // it returns can carry a full base64 avatarImage snapshot (up to
+        // ~2MB) plus a base64 media image (up to ~1.1MB, see chatSchema).
+        // Without `since`, every single poll re-fetched, re-serialized,
+        // and re-gzipped up to 500 of those full documents even when
+        // nothing new had actually been posted — that's the thing that
+        // was quietly starving the whole process (event loop + the
+        // shared Mongo connection pool) a few minutes into every
+        // deploy, worse the more people had the Reports page open at
+        // once. `since` lets the client ask for "just what's new since
+        // I last checked" so a poll with nothing new costs almost
+        // nothing, while first-load / scope-or-location switches (no
+        // `since` sent) still get the full up-to-500 list exactly as
+        // before. See GET /chats/counts below for how already-shown
+        // messages get their like/reply counts refreshed WITHOUT
+        // re-downloading any image data at all.
+        const since = req.query.since ? new Date(req.query.since) : null;
+        const query = (since && !isNaN(since.getTime())) ? { ...filter, createdAt: { $gt: since } } : filter;
 
-        if (scope === 'global') {
-            const allChats = await Chat.find(scopeQuery).sort({ createdAt: -1 }).limit(500).lean();
-            return res.json(allChats);
-        }
-
-        if (location) {
-            // Was: fetch the 500 most recent LOCAL chats system-wide (every
-            // neighborhood, each one potentially carrying a full base64
-            // avatarImage snapshot plus up to a ~1.1MB base64 media image —
-            // see chatSchema), then filter down to this one location in JS
-            // afterward. That meant loading (or polling every 1.5s, per
-            // report.js's pollChatsOnce) a single neighborhood's feed always
-            // dragged along up to 500 other neighborhoods' worth of images
-            // first, and — worse — a location with real activity could still
-            // come back empty if 500 *other* locations were noisier in the
-            // same window.
-            //
-            // Same locationsFuzzyMatch() rule (exact match, or either string
-            // containing the other), just evaluated by Mongo per-document via
-            // $expr/$indexOfCP instead of in JS after the fetch, so only
-            // documents that actually match this location are ever read out
-            // of the collection or sent over the wire.
-            const normalizedLocation = normalizeLocation(location);
-            const locationQuery = {
-                ...scopeQuery,
-                $expr: {
-                    $or: [
-                        { $gte: [{ $indexOfCP: ['$locationKey', normalizedLocation] }, 0] },
-                        { $gte: [{ $indexOfCP: [normalizedLocation, '$locationKey'] }, 0] }
-                    ]
-                }
-            };
-            const filtered = await Chat.find(locationQuery).sort({ createdAt: -1 }).limit(500).lean();
-            return res.json(filtered);
-        }
-
-        const allChats = await Chat.find(scopeQuery).sort({ createdAt: -1 }).limit(500).lean();
-        return res.json(allChats);
+        const chats = await Chat.find(query).sort({ createdAt: -1 }).limit(500).lean();
+        return res.json(chats);
     } catch (err) {
         console.error("Get chats error:", err.message);
         return res.status(500).json({ error: "Server error fetching chats" });
+    }
+});
+
+// Lightweight companion to GET /chats, purpose-built for the 1.5s poll's
+// "keep every already-rendered bubble's like/reply count current" pass
+// (see report.js's syncLiveStatCounts). That pass needs _id/likeCount/
+// likedBy/replyTo.chatId for every message currently on screen, but has
+// never needed avatarImage or media — so this route explicitly excludes
+// both with .select(), which GET /chats can't do without breaking the
+// image rendering that route is actually for. Same scope/location
+// filter as GET /chats so the two stay in lockstep for a given view.
+app.get('/chats/counts', async (req, res) => {
+    const location = req.query.location;
+    const scope = (req.query.scope || 'local').toString().toLowerCase() === 'global' ? 'global' : 'local';
+
+    try {
+        const filter = buildChatsFilter(scope, location);
+        const counts = await Chat.find(filter)
+            .select('likeCount likedBy replyTo.chatId createdAt')
+            .sort({ createdAt: -1 })
+            .limit(500)
+            .lean();
+        return res.json(counts);
+    } catch (err) {
+        console.error("Get chats/counts error:", err.message);
+        return res.status(500).json({ error: "Server error fetching chat counts" });
     }
 });
 
