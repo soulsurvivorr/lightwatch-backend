@@ -574,25 +574,49 @@ async function generateUniqueChatHandle() {
     // regex (`new RegExp(..., 'i')`). There IS an index on chatHandle
     // (see userSchema.index above), but MongoDB can only use a standard
     // index for a regex when it's case-SENSITIVE — the 'i' flag forced a
-    // full collection scan of the entire User collection on every single
-    // attempt, and this loop can run up to 200 times per call. That's
-    // what was behind /signup and /signin occasionally taking many
-    // seconds (worse the bigger the User collection gets) — this
-    // function runs on every first sign-in for any account that doesn't
-    // have a chatHandle yet.
-    // The case-insensitivity was also never actually needed: every
-    // handle that can ever reach this collection — generated here, or
-    // user-submitted via sanitizeHandle() at the /account route — is
-    // already forced to lowercase by sanitizeHandle() before it's
-    // stored. So an exact match against the already-lowercase `handle`
-    // variable finds the same rows a case-insensitive scan would, using
-    // the index as a fast, indexed lookup instead of a table scan.
-    for (let tries = 0; tries < 200; tries += 1) {
-        const handle = sanitizeHandle(randomFrom(HANDLE_SHAPES)());
-        const existing = await User.findOne({ chatHandle: handle }).select('_id').lean();
-        if (!existing) return handle;
+    // full collection scan of the entire User collection. That was fixed
+    // by switching to an exact-match lookup against the already-lowercase
+    // handle. But this function runs on every first sign-in for any
+    // account without a chatHandle yet AND on every single new signup
+    // (see /verify's signup branch), and the exact-match fix alone still
+    // left it checking candidates ONE AT A TIME, sequentially awaiting a
+    // real network round-trip to MongoDB for each try, up to 200 times
+    // before giving up. Each round-trip has real latency (Railway →
+    // Atlas, or wherever the DB actually lives) — even a modest ~100ms
+    // per hop turns "had to try 30 handles before finding a free one"
+    // into a 3-second hang, and a worse run into the 20+ second hangs
+    // that were showing up as silent, request-specific freezes (every
+    // OTHER route kept responding fine the whole time — only the one
+    // request stuck inside this loop looked frozen).
+    //
+    // Fix: generate a batch of candidates up front and check all of them
+    // in ONE query via $in, instead of one query per candidate. One
+    // network round-trip finds a free handle unless every single
+    // candidate in the batch happens to collide, which the pool sizes
+    // here make astronomically unlikely.
+    const BATCH_SIZE = 40;
+    const MAX_BATCHES = 5;
+
+    for (let batch = 0; batch < MAX_BATCHES; batch += 1) {
+        const candidates = [];
+        const seenThisBatch = new Set();
+        while (candidates.length < BATCH_SIZE) {
+            const handle = sanitizeHandle(randomFrom(HANDLE_SHAPES)());
+            if (!handle || seenThisBatch.has(handle)) continue;
+            seenThisBatch.add(handle);
+            candidates.push(handle);
+        }
+
+        const taken = await User.find({ chatHandle: { $in: candidates } }).select('chatHandle').lean();
+        const takenSet = new Set(taken.map(u => u.chatHandle));
+        const free = candidates.find(h => !takenSet.has(h));
+        if (free) return free;
+        // Whole batch collided (essentially never happens at these pool
+        // sizes) — try another batch rather than give up.
     }
-    // Very unlikely fallback: add a short random suffix.
+
+    // Very unlikely fallback: a short random suffix makes collision
+    // essentially impossible, so this only ever needs one query.
     while (true) {
         const handle = sanitizeHandle(`${randomFrom(HANDLE_LEFT)}-${randomFrom(HANDLE_RIGHT)}-${Math.random().toString(36).slice(2, 6)}`);
         const existing = await User.findOne({ chatHandle: handle }).select('_id').lean();
@@ -2447,6 +2471,14 @@ app.get('/reports', async (req, res) => {
         if (!(includeCommunity && req.query.userId)) return [];
 
         const requestingUserId = req.query.userId;
+        // req.query.userId comes straight from the client — if it's not a
+        // real Mongo ObjectId (e.g. a stale/garbled session storing a
+        // chatHandle-shaped string instead of the real _id), the queries
+        // below throw an unhandled CastError instead of just finding no
+        // rows. Treat "not a valid id" the same as "no id" rather than
+        // 500ing the whole /reports response over it.
+        if (!mongoose.Types.ObjectId.isValid(requestingUserId)) return [];
+
         const normalizedLocation = req.query.location ? normalizeLocation(req.query.location) : null;
 
         const [candidateLocationChats, ownChats] = await Promise.all([
