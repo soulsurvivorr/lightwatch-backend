@@ -1,3 +1,5 @@
+require('dotenv').config();
+require('newrelic');
 const path = require('path');
 const dns = require('dns');
 const fs = require('fs');
@@ -225,11 +227,6 @@ const chatSchema = new mongoose.Schema({
     quotedBy: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], default: [] },
     location: { type: String, required: true },
     locationKey: { type: String, required: true },
-    // Who has seen this message (excluding the author). Used to show a
-    // "seen" indicator on the sender's own bubble — cleared from view
-    // client-side (not from this array) once a reply targets the
-    // message, so we keep the raw read history here regardless.
-    seenBy: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], default: [] },
     editedAt: { type: Date, default: null },
     createdAt: { type: Date, default: Date.now }
 });
@@ -241,8 +238,6 @@ const chatSchema = new mongoose.Schema({
 //     by createdAt.
 //   - GET /reports (admin items): Chat.find({ isAdmin: true }) sorted by
 //     createdAt.
-//   - POST /chats/seen: Chat.updateMany({ _id: { $in }, userId: { $ne } })
-//     — covered by the default _id index, no extra index needed there.
 //   - POST /chats (reply push), GET /reports (replyChats): lookups by
 //     replyTo.chatId.
 //   - GET /user/:id (reportCount... actually chatCount via userId).
@@ -467,12 +462,7 @@ const PERF_LOGGING_ENABLED = process.env.DISABLE_PERF_LOGGING !== 'true';
 const NOISY_GET_ROUTES = ['/lightstatus', '/user/', '/chats'];
 
 function isNoisyRequest(req) {
-    const isNoisyGet = req.method === 'GET' && NOISY_GET_ROUTES.some(route => req.url.startsWith(route));
-    // The typing heartbeat fires every ~2s per active typist in both
-    // directions (POST to ping, DELETE to clear) — noisy the same way
-    // the GET polls above are, just not a GET.
-    const isTypingRoute = req.url.startsWith('/chats/typing');
-    return isNoisyGet || isTypingRoute;
+    return req.method === 'GET' && NOISY_GET_ROUTES.some(route => req.url.startsWith(route));
 }
 
 if (PERF_LOGGING_ENABLED) {
@@ -785,36 +775,6 @@ async function resolveLocationCoords(locationKey, storedLat, storedLng, displayL
     if (geocoded) return { lat: geocoded.lat, lng: geocoded.lng, approximate: false };
 
     return approximateCoordsFor(locationKey);
-}
-
-// ---- TYPING INDICATOR (in-memory only — never touches Mongo) ----
-// Chat is polling-based (no sockets), so "typing" is just a fast
-// heartbeat: clients POST while they have text in the box, and GET
-// to see who else nearby is doing the same right now.
-// One Map per scope ('local' / 'global') -> Map<userId, { handle,
-// locationKey, lastTypedAt }>. Local-scope reads filter that map down
-// with locationsFuzzyMatch() — same rule GET /chats uses — rather than
-// keying rooms by exact location, since two accounts can have slightly
-// different (but "same neighborhood") location strings that already
-// see each other's messages via that fuzzy match.
-// Entries are pruned lazily on read/write against TYPING_TTL_MS, so
-// nothing needs a background timer to stay clean, and a crashed tab
-// (no explicit "stopped typing" call) self-clears within the TTL.
-// NOTE: this is process-local. Fine on a single Render instance; if
-// this ever scales to multiple instances, it needs Redis instead.
-const typingByScope = new Map(); // 'local' | 'global' -> Map<userId, entry>
-const TYPING_TTL_MS = 4000;
-
-function getTypingRoom(scope) {
-    if (!typingByScope.has(scope)) typingByScope.set(scope, new Map());
-    return typingByScope.get(scope);
-}
-
-function pruneTypingRoom(room) {
-    const cutoff = Date.now() - TYPING_TTL_MS;
-    for (const [userId, entry] of room) {
-        if (entry.lastTypedAt < cutoff) room.delete(userId);
-    }
 }
 
 // NOTE: this fetches the location's ENTIRE reporting history, unbounded,
@@ -1842,86 +1802,6 @@ app.post('/chats/:chatId/like', async (req, res) => {
         console.error('Like chat error:', err.message);
         return res.status(500).json({ error: 'Server error toggling like' });
     }
-});
-
-// ---- CHAT READ RECEIPTS ----
-// Marks a batch of messages as seen by the requesting user. Called by
-// the client whenever other people's messages scroll into view. Never
-// marks the caller's own messages (a $ne guard, not just client trust)
-// and is idempotent via $addToSet, so re-sending the same ids is safe.
-app.post('/chats/seen', async (req, res) => {
-    const { userId, chatIds } = req.body || {};
-    if (!userId || !Array.isArray(chatIds) || chatIds.length === 0) {
-        return res.status(400).json({ error: 'Missing userId or chatIds' });
-    }
-
-    const validIds = chatIds.filter(id => mongoose.Types.ObjectId.isValid(id));
-    if (!validIds.length) {
-        return res.json({ updated: 0 });
-    }
-
-    try {
-        const result = await Chat.updateMany(
-            { _id: { $in: validIds }, userId: { $ne: userId } },
-            { $addToSet: { seenBy: userId } }
-        );
-        return res.json({ updated: result.modifiedCount ?? 0 });
-    } catch (err) {
-        console.error('Mark chats seen error:', err.message);
-        return res.status(500).json({ error: 'Server error marking chats seen' });
-    }
-});
-
-// ---- CHAT TYPING INDICATOR ----
-// POST: "I'm typing" heartbeat, sent every ~2s while there's unsent
-// text in the box. DELETE: "I stopped" (send/blur/cleared input) so
-// the indicator can disappear immediately instead of waiting out the
-// TTL. GET: who's currently typing in this room, excluding yourself.
-app.post('/chats/typing', (req, res) => {
-    const { userId, handle, scope, location } = req.body || {};
-    const normalizedScope = (scope || 'local').toString().toLowerCase() === 'global' ? 'global' : 'local';
-    if (!userId || !handle || (normalizedScope === 'local' && !location)) {
-        return res.status(400).json({ error: "Missing user, handle, or location" });
-    }
-
-    const room = getTypingRoom(normalizedScope);
-    room.set(String(userId), {
-        handle: String(handle).slice(0, 40),
-        locationKey: normalizedScope === 'global' ? 'global' : normalizeLocation(location),
-        lastTypedAt: Date.now()
-    });
-
-    return res.status(204).end();
-});
-
-app.delete('/chats/typing', (req, res) => {
-    const { userId, scope } = req.body || {};
-    const normalizedScope = (scope || 'local').toString().toLowerCase() === 'global' ? 'global' : 'local';
-    getTypingRoom(normalizedScope).delete(String(userId || ''));
-    return res.status(204).end();
-});
-
-app.get('/chats/typing', (req, res) => {
-    const { userId, scope, location } = req.query;
-    const normalizedScope = (scope || 'local').toString().toLowerCase() === 'global' ? 'global' : 'local';
-    if (normalizedScope === 'local' && !location) {
-        return res.json([]);
-    }
-
-    const room = getTypingRoom(normalizedScope);
-    pruneTypingRoom(room);
-
-    const normalizedLocation = normalizedScope === 'global' ? 'global' : normalizeLocation(location);
-
-    const typers = [...room.entries()]
-        .filter(([id]) => id !== String(userId || ''))
-        .filter(([, entry]) =>
-            normalizedScope === 'global' || locationsFuzzyMatch(entry.locationKey, normalizedLocation)
-        )
-        .sort((a, b) => a[1].lastTypedAt - b[1].lastTypedAt)
-        .map(([id, entry]) => ({ userId: id, handle: entry.handle }));
-
-    return res.json(typers);
 });
 
 // ---- ANALYTICS: track a client-side event (public, best-effort) ----

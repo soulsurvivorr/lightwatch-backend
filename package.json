@@ -21,6 +21,7 @@
     "firebase-admin": "^13.10.0",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^8.9.5",
+    "newrelic": "^14.3.4",
     "nodemailer": "^9.0.3",
     "rss-parser": "^3.13.0",
     "web-push": "^3.6.7"
