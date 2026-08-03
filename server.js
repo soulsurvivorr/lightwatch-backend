@@ -415,12 +415,6 @@ const chatSchema = new mongoose.Schema({
         text: { type: String }
     },
     media: {
-        kind: { type: String, enum: ['image'] },
-        url: { type: String }
-    },
-
-    // → add video
-    media: {
         kind: { type: String, enum: ['image', 'video'] },
         url: { type: String }
     },
@@ -816,30 +810,31 @@ function sanitizeAvatarImageDataUrl(raw) {
     return value;
 }
 
-function sanitizeMediaImageDataUrl(raw) {
+function sanitizeMediaDataUrl(raw, kind = 'image') {
     const value = String(raw || '').trim();
     if (!value) return null;
-    if (!/^data:image\/(png|jpe?g|webp|heic|heif);base64,/i.test(value)) return null;
-    // Smaller cap for in-feed media snapshots.
-    if (value.length > 1_200_000) return null;
+    const isVideo = kind === 'video';
+    const matches = isVideo
+        ? /^data:video\/(mp4|quicktime|webm|ogg|avi|mov);base64,/i.test(value)
+        : /^data:image\/(png|jpe?g|webp|heic|heif);base64,/i.test(value);
+    if (!matches) return null;
+    // Smaller cap for in-feed media snapshots; video allows a larger
+    // payload because it is commonly much larger than a still image.
+    const maxLength = isVideo ? 20_000_000 : 1_200_000;
+    if (value.length > maxLength) return null;
     return value;
 }
 
-// Uploads an already-validated `data:image/...;base64,...` string to
-// Cloudinary and returns the hosted secure_url, or null if there was
-// nothing to upload. Replaces the old behavior of saving the base64
-// string itself into MongoDB (avatarImage / chat media.url) — the doc
-// now stores a short Cloudinary URL instead of a multi-hundred-KB
-// string, and images are served off Cloudinary's CDN instead of out
-// of Mongo on every feed/profile read.
+// Uploads an already-validated media data URL to Cloudinary and
+// returns the hosted secure_url, or null if there was nothing to upload.
 // One upload failure must never 500 the whole request (a post/profile
-// update shouldn't fail outright just because the image didn't make
-// it) — callers treat a thrown error as "no image this time".
-async function uploadImageToCloudinary(dataUrl, folder) {
+// update shouldn't fail outright just because the media didn't make
+// it) — callers treat a thrown error as "no media this time".
+async function uploadMediaToCloudinary(dataUrl, kind, folder) {
     if (!dataUrl) return null;
     const result = await cloudinary.uploader.upload(dataUrl, {
         folder,
-        resource_type: 'image'
+        resource_type: kind === 'video' ? 'video' : 'image'
     });
     return result.secure_url;
 }
@@ -1875,7 +1870,8 @@ app.post('/chats', async (req, res) => {
     const { userId, text, location, replyTo, repost, quote, media, scope } = req.body;
     const normalizedScope = (scope || 'local').toString().toLowerCase() === 'global' ? 'global' : 'local';
     const normalizedText = String(text || '').trim();
-    const normalizedMedia = sanitizeMediaImageDataUrl(media?.url);
+    const normalizedMediaKind = media?.kind === 'video' ? 'video' : 'image';
+    const normalizedMedia = sanitizeMediaDataUrl(media?.url, normalizedMediaKind);
     const hasQuote = Boolean(quote && (quote.chatId || quote.handle || quote.text));
     const hasRepost = Boolean(repost && (repost.chatId || repost.handle || repost.text));
     if (!userId || (!normalizedText && !normalizedMedia && !hasQuote && !hasRepost) || (normalizedScope === 'local' && !location)) {
@@ -1891,10 +1887,10 @@ app.post('/chats', async (req, res) => {
         let mediaUrl = null;
         if (normalizedMedia) {
             try {
-                mediaUrl = await uploadImageToCloudinary(normalizedMedia, 'lightwatch/chat-media');
+                mediaUrl = await uploadMediaToCloudinary(normalizedMedia, normalizedMediaKind, 'lightwatch/chat-media');
             } catch (uploadErr) {
                 console.error('Cloudinary chat media upload error:', uploadErr.message);
-                return res.status(502).json({ error: 'Could not upload image, please try again' });
+                return res.status(502).json({ error: 'Could not upload media, please try again' });
             }
         }
 
@@ -1931,7 +1927,7 @@ app.post('/chats', async (req, res) => {
                 handle: String(quote.handle || '').slice(0, 80),
                 text: String(quote.text || '').slice(0, 220)
             } : undefined,
-            media: mediaUrl ? { kind: 'image', url: mediaUrl } : undefined,
+            media: mediaUrl ? { kind: normalizedMediaKind, url: mediaUrl } : undefined,
             location: savedLocation,
             locationKey: normalizedLocation
         });
