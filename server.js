@@ -147,15 +147,173 @@ mongoose.connect(MONGO_URI, {
     console.error("MongoDB connection error:", err.message);
 });
 
+// ================================================================
+// ===== BEGIN DEBUG INSTRUMENTATION — safe to delete later =====
+// Everything between here and the matching END marker below is
+// diagnostic-only: it doesn't change app behavior, only what gets
+// logged. To remove it later, delete this whole block plus the
+// handful of `// DEBUG:`-marked lines further down in this file
+// (grep for "DEBUG:" to find every one of them).
+//
+// Toggles (all optional, all default to something safe for prod):
+//   DEBUG_MODE=true          → verbose request start/finish pairs,
+//                               and switches Mongoose debug logging
+//                               on regardless of NODE_ENV.
+//   MONGOOSE_DEBUG=true      → verbose per-query logging only
+//                               (same as before, kept for compat).
+//   DEBUG_SLOW_QUERY_MS=500  → queries slower than this get logged
+//                               with timing, always on by default
+//                               since it's cheap and only fires on
+//                               genuinely slow queries.
+//   DEBUG_PING_MS=60000      → how often to ping Mongo + log
+//                               readyState. Set to 0 to disable.
+// ================================================================
+const DEBUG_MODE = process.env.DEBUG_MODE === 'true';
+const DEBUG_SLOW_QUERY_MS = Number(process.env.DEBUG_SLOW_QUERY_MS || 500);
+const DEBUG_PING_MS = process.env.DEBUG_PING_MS === '0' ? 0 : Number(process.env.DEBUG_PING_MS || 60000);
+
+// ---- 1. Connection lifecycle events ----
+// 'error' was already handled before this block existed; extended
+// here with the other lifecycle states so a disconnect/reconnect
+// cycle shows up in the logs instead of just going silent.
+mongoose.connection.on('connected', () => {
+    console.log(`[MONGO] connected | readyState=${mongoose.connection.readyState}`);
+});
+mongoose.connection.on('disconnected', () => {
+    console.warn(`[MONGO] disconnected | readyState=${mongoose.connection.readyState}`);
+});
+mongoose.connection.on('reconnected', () => {
+    console.log(`[MONGO] reconnected | readyState=${mongoose.connection.readyState}`);
+});
+mongoose.connection.on('close', () => {
+    console.warn('[MONGO] connection closed');
+});
 mongoose.connection.on('error', (err) => {
-    console.error("MongoDB runtime error:", err.message);
+    console.error('[MONGO] runtime error:', err.message);
 });
 
-// Mongoose debug mode logs every single query — extremely useful while
-// developing, but real overhead (extra I/O + string formatting) on every
-// request in production. Only auto-enable it in development; set
-// MONGOOSE_DEBUG=true explicitly if you ever need it on Render too.
-mongoose.set('debug', process.env.MONGOOSE_DEBUG === 'true' || process.env.NODE_ENV === 'development');
+// ---- SDAM heartbeat monitoring ----
+// This is the deepest visibility the driver exposes: every ~10s
+// (heartbeatFrequencyMS) it pings each node in the replica set in the
+// background to check it's alive, independent of any app query. If
+// THESE start failing or getting slow before/during a stall, the
+// problem is the network path to Atlas itself, not anything in this
+// app's code — which is the single most useful signal for exactly
+// the "connection N to X.X.X.X:27017 timed out" pattern you've been
+// seeing, since it shows the node's health continuously instead of
+// only when a real request happens to hit it.
+mongoose.connection.once('connected', () => {
+    const client = mongoose.connection.getClient();
+    if (!client || typeof client.on !== 'function') return;
+    client.on('serverHeartbeatSucceeded', (event) => {
+        if (event.duration > 1000) {
+            console.warn(`[MONGO HEARTBEAT] slow but ok: ${event.connectionId} took ${event.duration}ms`);
+        }
+    });
+    client.on('serverHeartbeatFailed', (event) => {
+        console.error(`[MONGO HEARTBEAT] FAILED: ${event.connectionId} after ${event.duration}ms — ${event.failure?.message || event.failure}`);
+    });
+    client.on('serverDescriptionChanged', (event) => {
+        const prevType = event.previousDescription?.type;
+        const newType = event.newDescription?.type;
+        if (prevType !== newType) {
+            console.warn(`[MONGO TOPOLOGY] ${event.address} changed: ${prevType} -> ${newType}`);
+        }
+    });
+    // Connection-pool (CMAP) events — this is what directly answers "is the
+    // pool actually getting exhausted?" A burst of connectionCreated events
+    // followed by connectionClosed/poolCleared right as requests start
+    // stacking up means the pool is genuinely churning through connections
+    // faster than it can reuse them, rather than a handful of requests just
+    // being individually slow.
+    client.on('connectionPoolCleared', (event) => {
+        console.error(`[MONGO POOL] cleared for ${event.address} — every pooled connection to this server was just discarded`);
+    });
+    client.on('connectionCheckOutFailed', (event) => {
+        console.error(`[MONGO POOL] checkout FAILED for ${event.address}: ${event.reason}`);
+    });
+});
+
+// ---- 4 & 7. Periodic ping health check + readyState ----
+// Runs independently of any user traffic — if this starts showing
+// slow/failed pings at the same time users report freezes, that
+// confirms the DB link itself, not app code, ruling out routes.
+if (DEBUG_PING_MS > 0) {
+    setInterval(async () => {
+        const readyState = mongoose.connection.readyState; // 0=disconnected 1=connected 2=connecting 3=disconnecting
+        const start = process.hrtime.bigint();
+        try {
+            await mongoose.connection.db.admin().ping();
+            const ms = Number(process.hrtime.bigint() - start) / 1e6;
+            console.log(`[MONGO PING] ok ${ms.toFixed(1)}ms | readyState=${readyState}`);
+        } catch (err) {
+            const ms = Number(process.hrtime.bigint() - start) / 1e6;
+            console.error(`[MONGO PING] FAILED after ${ms.toFixed(1)}ms | readyState=${readyState} | ${err.message}`);
+        }
+    }, DEBUG_PING_MS);
+}
+
+// ---- 1 (cont'd). Verbose per-query debug logging ----
+// Kept the same MONGOOSE_DEBUG/NODE_ENV gate as before; DEBUG_MODE
+// now also switches it on so you only need to set one env var during
+// an active debugging session instead of two.
+mongoose.set('debug', (collectionName, method, query, doc, options) => {
+    console.log(`[MONGOOSE] ${collectionName}.${method}`, JSON.stringify(query), options && Object.keys(options).length ? JSON.stringify(options) : '');
+});
+if (!(DEBUG_MODE || process.env.MONGOOSE_DEBUG === 'true' || process.env.NODE_ENV === 'development')) {
+    mongoose.set('debug', false);
+}
+
+// ---- 2 & 9. Global slow-query timing plugin ----
+// Registered here, BEFORE any schema below is compiled into a model —
+// mongoose.plugin() applies to every schema defined anywhere in the
+// app from this point forward, including the News*/Chat/User/Report
+// models defined later in this file AND the ones defined in news.js
+// (required at the bottom of this file, well after this line runs).
+// That means this one registration covers every collection without
+// needing to touch each model individually. Only logs when a query
+// actually exceeds DEBUG_SLOW_QUERY_MS, so it's safe to leave on
+// permanently — it stays silent during normal operation and only
+// speaks up exactly when something is worth looking at.
+function slowQueryTimingPlugin(schema) {
+    const timedOps = ['find', 'findOne', 'findOneAndUpdate', 'findOneAndDelete',
+        'countDocuments', 'updateOne', 'updateMany', 'deleteOne', 'deleteMany', 'aggregate'];
+    timedOps.forEach((op) => {
+        schema.pre(op, function () { this.__debugStart = process.hrtime.bigint(); });
+        schema.post(op, function () {
+            if (!this.__debugStart) return;
+            const ms = Number(process.hrtime.bigint() - this.__debugStart) / 1e6;
+            if (ms >= DEBUG_SLOW_QUERY_MS) {
+                const modelName = this.model?.modelName || this._model?.modelName || '?';
+                const filter = typeof this.getQuery === 'function' ? this.getQuery() : (typeof this.getFilter === 'function' ? this.getFilter() : {});
+                console.warn(`[SLOW QUERY] ${modelName}.${op} took ${ms.toFixed(1)}ms`, JSON.stringify(filter));
+            }
+        });
+    });
+}
+mongoose.plugin(slowQueryTimingPlugin);
+
+// ---- 6. External API call timing ----
+// Thin wrapper used at each outbound-fetch call site below (search
+// this file for "DEBUG:" to find every wrapped call). Logs how long
+// the call took and whether it succeeded, so a hang in Brevo/Arkesel/
+// FCM/Nominatim/Google Maps shows up distinctly from a Mongo hang.
+async function timeExternalCall(label, fn) {
+    const start = process.hrtime.bigint();
+    try {
+        const result = await fn();
+        const ms = Number(process.hrtime.bigint() - start) / 1e6;
+        console.log(`[EXTERNAL] ${label} ok ${ms.toFixed(1)}ms`);
+        return result;
+    } catch (err) {
+        const ms = Number(process.hrtime.bigint() - start) / 1e6;
+        console.error(`[EXTERNAL] ${label} FAILED after ${ms.toFixed(1)}ms: ${err.message}`);
+        throw err;
+    }
+}
+// ================================================================
+// ===== END DEBUG INSTRUMENTATION =====
+// ================================================================
 
 // SCHEMAS / MODELS
 const userSchema = new mongoose.Schema({
@@ -484,9 +642,21 @@ function isNoisyRequest(req) {
 }
 
 if (PERF_LOGGING_ENABLED) {
+    let __debugReqCounter = 0;
     app.use((req, res, next) => {
-        const noisy = isNoisyRequest(req);
+        const noisy = isNoisyRequest(req) && !DEBUG_MODE; // DEBUG: DEBUG_MODE also surfaces normally-noisy routes
         const startedAt = process.hrtime.bigint();
+
+        // DEBUG: request-start line, only under DEBUG_MODE to avoid doubling
+        // log volume during normal operation. reqId lets you match this
+        // line to its corresponding finish line below when many requests
+        // are interleaved (e.g. during a stall, to see what was already
+        // in-flight when things started backing up).
+        let reqId;
+        if (DEBUG_MODE) {
+            reqId = ++__debugReqCounter;
+            console.log(`[REQ START ${reqId}] ${req.method} ${req.url}`);
+        }
 
         // 'finish' fires once the response has actually been sent, so this
         // measures true end-to-end handler time (including any awaited DB
@@ -494,7 +664,8 @@ if (PERF_LOGGING_ENABLED) {
         res.on('finish', () => {
             if (noisy) return;
             const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
-            console.log(`${req.method} ${req.url} ${res.statusCode} ${durationMs.toFixed(1)}ms`);
+            const prefix = DEBUG_MODE ? `[REQ END ${reqId}] ` : '';
+            console.log(`${prefix}${req.method} ${req.url} ${res.statusCode} ${durationMs.toFixed(1)}ms`);
         });
 
         next();
@@ -763,14 +934,14 @@ async function geocodeViaNominatim(name, region) {
     const query = region ? `${name}, ${region}, Ghana` : `${name}, Ghana`;
     const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=gh&q=${encodeURIComponent(query)}`;
     try {
-        const response = await fetch(url, {
+        const response = await timeExternalCall(`Nominatim geocode (${query})`, () => fetch(url, {
             headers: {
                 // Nominatim silently deprioritizes/blocks requests with a
                 // generic or missing User-Agent — this identifies the app
                 // per their usage policy.
                 'User-Agent': 'LightWatch-Kumasi/1.0 (community power-outage tracker for Kumasi, Ghana)'
             }
-        });
+        }));
         if (!response.ok) return null;
         const results = await response.json();
         const hit = Array.isArray(results) ? results[0] : null;
@@ -1057,7 +1228,7 @@ async function sendOtpEmail(email, code, name) {
     }, timeoutMs);
     let response;
     try {
-        response = await fetch('https://api.brevo.com/v3/smtp/email', {
+        response = await timeExternalCall(`Brevo OTP email (${email})`, () => fetch('https://api.brevo.com/v3/smtp/email', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -1075,7 +1246,7 @@ async function sendOtpEmail(email, code, name) {
                 // Plain-text fallback for clients that block/strip HTML.
                 textContent: `Your LightWatch verification code is ${code}. It expires in 10 minutes. If you didn't request this, you can ignore this email.`
             })
-        });
+        }));
     } catch (err) {
         if (err.name === 'AbortError') {
             throw new Error(`Email send timed out after ${timeoutMs}ms for ${email}`);
@@ -1107,7 +1278,7 @@ async function sendOtpSms(phoneNumber, code) {
     }, timeoutMs);
     let response;
     try {
-        response = await fetch('https://sms.arkesel.com/api/v2/sms/send', {
+        response = await timeExternalCall(`Arkesel OTP SMS (${phoneNumber})`, () => fetch('https://sms.arkesel.com/api/v2/sms/send', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -1119,7 +1290,7 @@ async function sendOtpSms(phoneNumber, code) {
                 message: `Your LightWatch verification code is ${code}. It expires in 10 minutes.`,
                 recipients: [phoneNumber]
             })
-        });
+        }));
     } catch (err) {
         if (err.name === 'AbortError') {
             throw new Error(`SMS send timed out after ${timeoutMs}ms for ${phoneNumber}`);
@@ -1168,7 +1339,7 @@ async function reverseGeocodeCity(lat, lng) {
     }
 
     const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${process.env.GOOGLE_MAPS_API_KEY}`;
-    const response = await fetch(url);
+    const response = await timeExternalCall('Google Maps reverse geocode', () => fetch(url));
     if (!response.ok) {
         throw new Error(`Geocode request failed: ${response.status}`);
     }
@@ -2675,10 +2846,10 @@ async function sendPushToOne(sub, notification) {
 
 async function sendWebPushToOne(sub, notification) {
     try {
-        await webpush.sendNotification(sub.subscription, JSON.stringify(notification), {
+        await timeExternalCall(`Web-push (${sub._id})`, () => webpush.sendNotification(sub.subscription, JSON.stringify(notification), {
             urgency: 'high',
             TTL: 60
-        });
+        }));
         return { ok: true };
     } catch (err) {
         if (err.statusCode === 410) {
@@ -2712,7 +2883,7 @@ async function sendFcmToOne(sub, notification) {
     const channelId = soundResource; // channel IDs in MainActivity.java match these 1:1
 
     try {
-        await admin.messaging().send({
+        await timeExternalCall(`FCM push (${sub._id})`, () => admin.messaging().send({
             token: sub.fcmToken,
             notification: {
                 title: notification.title,
@@ -2731,7 +2902,7 @@ async function sendFcmToOne(sub, notification) {
                     sound: soundResource
                 }
             }
-        });
+        }));
         return { ok: true };
     } catch (err) {
         // Token is no longer valid (app uninstalled, data cleared, etc.)
