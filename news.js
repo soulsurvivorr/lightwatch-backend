@@ -57,6 +57,13 @@
 const Parser = require('rss-parser');
 const cheerio = require('cheerio');
 
+// How long raw articles/events stick around before MongoDB auto-deletes
+// them (TTL indexes below). Users currently scroll back ~5 days into
+// history, so 14 days leaves real headroom past that instead of cutting
+// it close. Override with NEWS_RETENTION_DAYS on Render if needed.
+const NEWS_RETENTION_DAYS = Number(process.env.NEWS_RETENTION_DAYS) || 14;
+const NEWS_RETENTION_SECONDS = NEWS_RETENTION_DAYS * 24 * 60 * 60;
+
 const rssParser = new Parser({
     timeout: 15000,
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0; +https://lightwatch-backend-lightwatch-backend.up.railway.app)' },
@@ -716,7 +723,13 @@ module.exports = function initNewsSystem(app, deps) {
         // NEW — which NewsEvent this raw article was folded into.
         eventId: { type: mongoose.Schema.Types.ObjectId, ref: 'NewsEvent', default: null }
     });
-    newsArticleSchema.index({ publishedAt: -1 });
+    // TTL: MongoDB auto-deletes a raw article once its publishedAt is
+    // older than NEWS_RETENTION_DAYS — no cron job/route needed. The
+    // NewsEvent it was folded into is unaffected (see the separate TTL
+    // on newsEventSchema.lastUpdatedAt below) — an event that's still
+    // getting corroborating sources/updates keeps living long after its
+    // oldest founding article has aged out and been dropped.
+    newsArticleSchema.index({ publishedAt: -1 }, { expireAfterSeconds: NEWS_RETENTION_SECONDS });
     newsArticleSchema.index({ isOfficial: -1, publishedAt: -1 });
     newsArticleSchema.index({ dedupeKey: 1, publishedAt: -1 });
     newsArticleSchema.index({ mentionedLocations: 1, isOfficial: -1, publishedAt: -1 });
@@ -779,7 +792,12 @@ module.exports = function initNewsSystem(app, deps) {
             type: [{ at: Date, note: String }], default: []
         }
     });
-    newsEventSchema.index({ lastUpdatedAt: -1 });
+    // TTL: deletes an event once it's gone NEWS_RETENTION_DAYS with no
+    // update. Because lastUpdatedAt gets bumped forward every time a new
+    // corroborating source or a restoration update attaches (see
+    // attachArticleToEvent), an event that's still active effectively
+    // never expires — only ones that have genuinely gone quiet do.
+    newsEventSchema.index({ lastUpdatedAt: -1 }, { expireAfterSeconds: NEWS_RETENTION_SECONDS });
     newsEventSchema.index({ category: 1, lastUpdatedAt: -1 });
     newsEventSchema.index({ affectedLocations: 1, lastUpdatedAt: -1 });
     newsEventSchema.index({ dedupeKey: 1 });
