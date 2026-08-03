@@ -418,6 +418,12 @@ const chatSchema = new mongoose.Schema({
         kind: { type: String, enum: ['image'] },
         url: { type: String }
     },
+
+    // → add video
+    media: {
+        kind: { type: String, enum: ['image', 'video'] },
+        url: { type: String }
+    },
     // Persisted like state so counts are shared across every user/device
     // instead of living only in that one browser tab's DOM (see POST
     // /chats/:chatId/like below). likedBy gates one like per user.
