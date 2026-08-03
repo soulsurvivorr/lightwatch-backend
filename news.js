@@ -1852,7 +1852,7 @@ module.exports = function initNewsSystem(app, deps) {
                 id: result._id,
                 title: result.title,
                 summary: result.summary,
-                image: result.imageUrl || '/images/graphic.png',
+                image: result.imageUrl || '/graphic.png',
                 source: result.sourceName,
                 sourceIcon: result.sourceIcon,
                 isOfficial: result.isOfficial,

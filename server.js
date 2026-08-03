@@ -642,8 +642,13 @@ app.use(express.static(path.join(__dirname, '../frontend'), {
 // in emails). This is separate from the frontend static folder above —
 // the frontend deploys independently to Netlify, so files that only
 // live in frontend/ are NOT guaranteed to exist on Render at runtime.
-// Put files like dev-logo.png in backend/public/images/ so they're
-// always available wherever the backend is deployed.
+// Put files like dev-logo.png and fallback graphics in backend/public/
+// so they're always available wherever the backend is deployed.
+app.use(express.static(path.join(__dirname, 'public'), {
+    maxAge: process.env.NODE_ENV === 'production' ? '1d' : 0,
+    etag: true
+}));
+
 app.use('/images', express.static(path.join(__dirname, 'public/images'), {
     maxAge: process.env.NODE_ENV === 'production' ? '1d' : 0,
     etag: true
