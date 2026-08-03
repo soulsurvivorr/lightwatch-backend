@@ -3,6 +3,7 @@ require('newrelic');
 const path = require('path');
 const dns = require('dns');
 const fs = require('fs');
+const os = require('os');
 dns.setDefaultResultOrder('ipv4first');
 
 require('dotenv').config();
@@ -42,8 +43,20 @@ if (!process.env.ADMIN_PASSWORD) {
 // for it, ever. It does NOT grant admin-console access on its own; it's
 // just a normal user account. Override via env vars, or set
 // DEV_LOGIN_EMAIL to an empty string to disable the bypass entirely.
-const DEV_LOGIN_EMAIL = (process.env.DEV_LOGIN_EMAIL || "").toLowerCase().trim();
-const DEV_LOGIN_CODE  = (process.env.DEV_LOGIN_CODE || "").trim();
+let DEV_LOGIN_EMAIL = (process.env.DEV_LOGIN_EMAIL || "").toLowerCase().trim();
+let DEV_LOGIN_CODE  = (process.env.DEV_LOGIN_CODE || "").trim();
+const DEFAULT_DEV_LOGIN_EMAIL = 'sarkdev@yahoo.com';
+const DEFAULT_DEV_LOGIN_CODE = '123456';
+
+if (!DEV_LOGIN_EMAIL && process.env.NODE_ENV !== 'production') {
+    DEV_LOGIN_EMAIL = DEFAULT_DEV_LOGIN_EMAIL;
+    console.warn(`DEV_LOGIN_EMAIL not set; using local default ${DEV_LOGIN_EMAIL}`);
+}
+
+if (!DEV_LOGIN_CODE && process.env.NODE_ENV !== 'production') {
+    DEV_LOGIN_CODE = DEFAULT_DEV_LOGIN_CODE;
+    console.warn(`DEV_LOGIN_CODE not set; using local default ${DEV_LOGIN_CODE}`);
+}
 
 function isDevLoginContact(emailPhone) {
     return !!DEV_LOGIN_EMAIL && emailPhone === DEV_LOGIN_EMAIL;
@@ -578,6 +591,12 @@ const Chat             = mongoose.model('Chat', chatSchema);
 const LightStatus      = mongoose.model('LightStatus', lightStatusSchema);
 const LightStatusEvent = mongoose.model('LightStatusEvent', lightStatusEventSchema);
 const PushSubscription = mongoose.model('PushSubscription', pushSubscriptionSchema);
+const AdminLocation     = mongoose.model('AdminLocation', new mongoose.Schema({
+    locationKey: { type: String, required: true, unique: true },
+    label: { type: String, required: true },
+    hidden: { type: Boolean, default: false },
+    createdAt: { type: Date, default: Date.now }
+}));
 const AnalyticsEvent    = mongoose.model('AnalyticsEvent', analyticsEventSchema);
 const GeocodeCache      = mongoose.model('GeocodeCache', geocodeCacheSchema);
 
@@ -691,6 +710,28 @@ if (PERF_LOGGING_ENABLED) {
         next();
     });
 }
+
+const RECENT_REQUEST_LATENCY_BUFFER = 120;
+const RECENT_SERVER_LOG_BUFFER = 50;
+const recentRequestDurations = [];
+const recentServerLogs = [];
+
+function pushServerLog(entry) {
+    const row = { time: new Date().toISOString(), entry: String(entry || '') };
+    recentServerLogs.unshift(row);
+    if (recentServerLogs.length > RECENT_SERVER_LOG_BUFFER) recentServerLogs.length = RECENT_SERVER_LOG_BUFFER;
+}
+
+app.use((req, res, next) => {
+    const start = process.hrtime.bigint();
+    res.on('finish', () => {
+        const durationMs = Number(process.hrtime.bigint() - start) / 1e6;
+        recentRequestDurations.unshift(durationMs);
+        if (recentRequestDurations.length > RECENT_REQUEST_LATENCY_BUFFER) recentRequestDurations.length = RECENT_REQUEST_LATENCY_BUFFER;
+        pushServerLog(`${req.method} ${req.originalUrl} ${res.statusCode} ${durationMs.toFixed(1)}ms`);
+    });
+    next();
+});
 
 // Admin token verification middleware
 function verifyAdminToken(req, res, next) {
@@ -2237,11 +2278,79 @@ app.get('/admin/chats', verifyAdminToken, async (req, res) => {
 // ---- ADMIN: All users (protected) ----
 app.get('/admin/users', verifyAdminToken, async (req, res) => {
     try {
+        const activeSince = new Date(Date.now() - 10 * 60 * 1000); // last 10 minutes
+        const activeUsers = await AnalyticsEvent.aggregate([
+            { $match: { type: { $in: ['app_open', 'screen_view'] }, createdAt: { $gte: activeSince }, userId: { $ne: null } } },
+            { $group: { _id: '$userId', lastActiveAt: { $max: '$createdAt' } } }
+        ]);
+        const activeMap = new Map(activeUsers.map(a => [String(a._id), a.lastActiveAt]));
+
         const users = await User.find().sort({ createdAt: -1 }).select('name emailPhone region city chatHandle createdAt').lean();
-        return res.json(users);
+        const results = users.map(u => ({
+            ...u,
+            isActive: activeMap.has(String(u._id)),
+            lastActiveAt: activeMap.get(String(u._id)) || null
+        }));
+        return res.json(results);
     } catch (err) {
         console.error('Admin users error:', err.message);
         return res.status(500).json({ error: 'Server error fetching users' });
+    }
+});
+
+// ---- ADMIN: Edit a user's primary location (protected) ----
+app.patch('/admin/users/:id/location', verifyAdminToken, async (req, res) => {
+    const { id } = req.params;
+    const city = String(req.body?.city || '').trim();
+    const region = String(req.body?.region || '').trim();
+    const hasLat = Number.isFinite(Number(req.body?.lat));
+    const hasLng = Number.isFinite(Number(req.body?.lng));
+    const lat = hasLat ? Number(req.body.lat) : null;
+    const lng = hasLng ? Number(req.body.lng) : null;
+
+    if (!city) {
+        return res.status(400).json({ error: 'City is required' });
+    }
+    if (!region) {
+        return res.status(400).json({ error: 'Region is required' });
+    }
+    if (city.length < 2 || city.length > 60 || region.length < 2 || region.length > 60) {
+        return res.status(400).json({ error: 'City and region must each be between 2 and 60 characters' });
+    }
+
+    try {
+        const user = await User.findById(id);
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        user.city = city;
+        user.region = region;
+        user.cityChangeLocked = true;
+        user.cityChangedAt = new Date();
+        if (hasLat && hasLng) {
+            user.lat = lat;
+            user.lng = lng;
+        }
+        await user.save();
+
+        return res.json({
+            success: true,
+            user: {
+                id: user._id,
+                name: user.name,
+                emailPhone: user.emailPhone,
+                region: user.region,
+                city: user.city,
+                chatHandle: user.chatHandle,
+                createdAt: user.createdAt,
+                cityChangeLocked: user.cityChangeLocked,
+                cityChangedAt: user.cityChangedAt
+            }
+        });
+    } catch (err) {
+        console.error('Admin user location update error:', err.message);
+        return res.status(500).json({ error: 'Server error updating user location' });
     }
 });
 
@@ -2382,6 +2491,87 @@ app.get('/admin/summary', verifyAdminToken, async (req, res) => {
         console.error('Admin summary error:', err.message);
         return res.status(500).json({ error: 'Server error fetching summary' });
     }
+});
+
+function maskUri(uri) {
+    try {
+        const parsed = new URL(uri);
+        const host = parsed.host.replace(/:[0-9]+$/, '');
+        return `${parsed.protocol}//${host}${parsed.pathname}`;
+    } catch (err) {
+        return String(uri).replace(/:[^:@/]+@/, ':***@').replace(/(\?.*)$/, '');
+    }
+}
+
+app.get('/admin/health', verifyAdminToken, async (req, res) => {
+    const dbState = mongoose.connection.readyState;
+    const states = ['disconnected', 'connected', 'connecting', 'disconnecting'];
+    let dbStatus = states[dbState] || 'unknown';
+    let dbLatencyMs = null;
+    try {
+        const pingStart = process.hrtime.bigint();
+        await mongoose.connection.db.admin().ping();
+        dbLatencyMs = Number(process.hrtime.bigint() - pingStart) / 1e6;
+    } catch (err) {
+        dbStatus = 'error';
+    }
+
+    const cpuUsage = process.cpuUsage();
+    const cpus = os.cpus().length || 1;
+    const uptimeSec = process.uptime() || 1;
+    const cpuPercent = Math.round(100 * ((cpuUsage.user + cpuUsage.system) / 1e6) / uptimeSec / cpus);
+    const memory = process.memoryUsage();
+    const totalRamMb = Math.round(os.totalmem() / 1024 / 1024);
+    const usedRamMb = Math.round(memory.heapUsed / 1024 / 1024);
+    const ramPercent = totalRamMb ? Math.round((usedRamMb / totalRamMb) * 100) : null;
+
+    const avgApiLatencyMs = recentRequestDurations.length
+        ? Math.round(recentRequestDurations.reduce((sum, v) => sum + v, 0) / recentRequestDurations.length)
+        : null;
+
+    const buildSettings = {
+        maintenanceMode: process.env.MAINTENANCE_MODE === 'true',
+        adminAccounts: {
+            consoleLoginEnabled: !!ADMIN_PASSWORD,
+            devLoginEnabled: !!DEV_LOGIN_EMAIL && !!DEV_LOGIN_CODE,
+            devLoginEmail: DEV_LOGIN_EMAIL || null
+        },
+        notificationSettings: {
+            webPushEnabled: !!(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY),
+            fcmEnabled: !!fcmEnabled,
+            emailOtpEnabled: !!process.env.BREVO_API_KEY,
+            smsOtpEnabled: !!process.env.ARKESEL_API_KEY
+        },
+        newsFetchIntervalMs: Number(process.env.NEWS_FETCH_INTERVAL_MS) || 7 * 60 * 1000,
+        apiKeys: {
+            googleMaps: !!process.env.GOOGLE_MAPS_API_KEY,
+            vapid: !!(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY),
+            brevo: !!process.env.BREVO_API_KEY,
+            arkesel: !!process.env.ARKESEL_API_KEY,
+            firebase: !!process.env.FIREBASE_SERVICE_ACCOUNT_KEY
+        },
+        backupDatabase: {
+            enabled: !!(process.env.DB_BACKUP_URL || process.env.DATABASE_BACKUP_URL),
+            url: process.env.DB_BACKUP_URL ? maskUri(process.env.DB_BACKUP_URL) : process.env.DATABASE_BACKUP_URL ? maskUri(process.env.DATABASE_BACKUP_URL) : null
+        }
+    };
+
+    return res.json({
+        cpuPercent,
+        cpuCores: cpus,
+        loadAverage: os.loadavg()?.[0] ?? null,
+        ramUsedMb: usedRamMb,
+        ramTotalMb: totalRamMb,
+        ramPercent,
+        dbStatus,
+        dbLatencyMs: dbLatencyMs == null ? null : Math.round(dbLatencyMs),
+        avgApiLatencyMs,
+        avgApiLatencySampleCount: recentRequestDurations.length,
+        recentServerLogs: recentServerLogs.slice(0, 20),
+        buildSettings,
+        serverTime: new Date().toISOString(),
+        uptimeSeconds: Math.round(process.uptime())
+    });
 });
 
 // ---- ANALYTICS HELPERS ----
@@ -3155,13 +3345,17 @@ app.post('/admin/lightstatus', verifyAdminToken, async (req, res) => {
 // location that's never had a report yet, not just ones already seen.
 app.get('/admin/locations', verifyAdminToken, async (req, res) => {
     try {
-        const [statuses, userCities] = await Promise.all([
+        const [statuses, userCities, adminLocations] = await Promise.all([
             LightStatus.find().lean(),
-            User.distinct('city')
+            User.distinct('city'),
+            AdminLocation.find().lean()
         ]);
 
+        const hiddenKeys = new Set(adminLocations.filter(l => l.hidden).map(l => l.locationKey));
         const map = new Map();
+
         statuses.forEach(s => {
+            if (hiddenKeys.has(s.locationKey)) return;
             map.set(s.locationKey, {
                 locationKey: s.locationKey,
                 label: titleCaseLocation(s.locationKey),
@@ -3172,10 +3366,21 @@ app.get('/admin/locations', verifyAdminToken, async (req, res) => {
         });
         userCities.forEach(city => {
             const key = normalizeLocation(city).split(',')[0].trim();
-            if (key && !map.has(key)) {
+            if (key && !hiddenKeys.has(key) && !map.has(key)) {
                 map.set(key, {
                     locationKey: key,
                     label: titleCaseLocation(key),
+                    status: 'unknown',
+                    reportedBy: null,
+                    reportedAt: null
+                });
+            }
+        });
+        adminLocations.filter(l => !l.hidden).forEach(l => {
+            if (!map.has(l.locationKey)) {
+                map.set(l.locationKey, {
+                    locationKey: l.locationKey,
+                    label: l.label || titleCaseLocation(l.locationKey),
                     status: 'unknown',
                     reportedBy: null,
                     reportedAt: null
@@ -3188,6 +3393,53 @@ app.get('/admin/locations', verifyAdminToken, async (req, res) => {
     } catch (err) {
         console.error('Admin locations error:', err.message);
         return res.status(500).json({ error: 'Server error fetching locations' });
+    }
+});
+
+app.post('/admin/locations', verifyAdminToken, async (req, res) => {
+    const location = String(req.body?.location || '').trim();
+    if (!location) {
+        return res.status(400).json({ error: 'Location is required' });
+    }
+    const key = normalizeLocation(location).split(',')[0].trim();
+    if (!key) {
+        return res.status(400).json({ error: 'Invalid location' });
+    }
+    const label = String(req.body?.label || titleCaseLocation(key)).trim() || titleCaseLocation(key);
+
+    try {
+        const updated = await AdminLocation.findOneAndUpdate(
+            { locationKey: key },
+            { locationKey: key, label, hidden: false },
+            { upsert: true, new: true }
+        );
+        return res.json({ locationKey: updated.locationKey, label: updated.label, hidden: updated.hidden });
+    } catch (err) {
+        console.error('Admin add location error:', err.message);
+        return res.status(500).json({ error: 'Server error adding location' });
+    }
+});
+
+app.delete('/admin/locations', verifyAdminToken, async (req, res) => {
+    const locationKeys = Array.isArray(req.body?.locationKeys) ? req.body.locationKeys : [];
+    const normalizedKeys = locationKeys
+        .map(k => normalizeLocation(String(k || '')).split(',')[0].trim())
+        .filter(Boolean);
+
+    if (!normalizedKeys.length) {
+        return res.status(400).json({ error: 'No valid location keys provided' });
+    }
+
+    try {
+        await Promise.all(normalizedKeys.map(key => AdminLocation.findOneAndUpdate(
+            { locationKey: key },
+            { locationKey: key, label: titleCaseLocation(key), hidden: true },
+            { upsert: true, new: true }
+        )));
+        return res.json({ hiddenCount: normalizedKeys.length });
+    } catch (err) {
+        console.error('Admin hide locations error:', err.message);
+        return res.status(500).json({ error: 'Server error hiding locations' });
     }
 });
 
