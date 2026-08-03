@@ -1511,7 +1511,7 @@ module.exports = function initNewsSystem(app, deps) {
                     eventType: e.eventType,
                     headline: e.headline,
                     summary: e.summary,
-                    image: e.imageUrl || null,
+                    image: e.imageUrl || '/images/graphic.png',
                     affectedLocations: e.affectedLocations,
                     isNationwide: !!e.isNationwide,
                     startTime: e.startTimeText,
@@ -1591,7 +1591,7 @@ module.exports = function initNewsSystem(app, deps) {
                     // broke article images. Now carried through from
                     // whichever source article had one (see imageUrl on
                     // NewsEvent, set/merged in attachArticleToEvent).
-                    image: e.imageUrl || null,
+                    image: e.imageUrl || '/images/graphic.png',
                     source: mainSource.name || 'LightWatch',
                     // Real fetched logo for the main source (span.news-item__source-icon),
                     // not the old static emoji. iconEmoji kept alongside for
@@ -1852,7 +1852,7 @@ module.exports = function initNewsSystem(app, deps) {
                 id: result._id,
                 title: result.title,
                 summary: result.summary,
-                image: result.imageUrl,
+                image: result.imageUrl || '/images/graphic.png',
                 source: result.sourceName,
                 sourceIcon: result.sourceIcon,
                 isOfficial: result.isOfficial,
