@@ -3162,6 +3162,10 @@ async function sendFcmToOne(sub, notification) {
     else if (notification.tone === 'news') soundResource = 'lw_news';
     const channelId = soundResource; // channel IDs in MainActivity.java match these 1:1
 
+    const vibrateTimings = Array.isArray(notification.vibrate)
+        ? notification.vibrate.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n >= 0)
+        : null;
+
     try {
         await timeExternalCall(`FCM push (${sub._id})`, () => admin.messaging().send({
             token: sub.fcmToken,
@@ -3179,7 +3183,8 @@ async function sendFcmToOne(sub, notification) {
                 notification: {
                     tag: notification.tag || undefined,
                     channelId,
-                    sound: soundResource
+                    sound: soundResource,
+                    vibrateTimingsMillis: vibrateTimings || undefined
                 }
             }
         }));
