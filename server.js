@@ -13,6 +13,9 @@ const compression = require('compression');
 const jwt = require('jsonwebtoken');
 const webpush = require('web-push');
 const admin = require('firebase-admin');
+const cloudinary = require('./cloudinary');
+const multer = require('multer');
+const { upload: genericUpload, uploadBufferToCloudinary } = require('./upload');
 
 // MONGODB CONNECTION
 const MONGO_URI = process.env.MONGODB_URI;
@@ -134,10 +137,27 @@ mongoose.connect(MONGO_URI, {
     // timed out. Setting an explicit bound here means a stalled
     // operation fails in ~20s with a clear Mongo error instead of
     // silently hanging the whole app for minutes.
-    socketTimeoutMS: 20000,
-    connectTimeoutMS: 10000,
+    // UPDATED: the logs now show queries clocking in at ~20s/40s/60s/88s —
+    // almost exactly multiples of the 20s value this was originally set
+    // to. That's the driver retrying a failed operation against the same
+    // degrading replica-set node (confirmed separately by the
+    // [MONGO HEARTBEAT] logs showing rising latency to shard-00-02), each
+    // retry burning another ~20s while still holding one of only
+    // maxPoolSize connections. Tightened to 8s so a stuck operation fails
+    // and releases its slot back to the pool much sooner — worse-case a
+    // request now fails fast with a clear error instead of hanging for
+    // over a minute, and fresh requests (like OTP's User.findOne) get a
+    // real chance at an available connection instead of queuing behind
+    // several minutes' worth of retries.
+    socketTimeoutMS: 8000,
+    connectTimeoutMS: 8000,
     family: 4,
-    maxPoolSize: Number(process.env.MONGO_MAX_POOL_SIZE) || 10,
+    // UPDATED: Atlas confirmed only 17/500 connections in use (3%) — there
+    // was no risk in the small pool from Atlas's side, it was purely a
+    // self-imposed bottleneck. Raising it gives more requests room to get
+    // a working connection concurrently while some are stuck retrying
+    // against a degrading node.
+    maxPoolSize: Number(process.env.MONGO_MAX_POOL_SIZE) || 25,
     minPoolSize: Number(process.env.MONGO_MIN_POOL_SIZE) || 1
 })
 .then(() => {
@@ -756,6 +776,25 @@ function sanitizeMediaImageDataUrl(raw) {
     // Smaller cap for in-feed media snapshots.
     if (value.length > 1_200_000) return null;
     return value;
+}
+
+// Uploads an already-validated `data:image/...;base64,...` string to
+// Cloudinary and returns the hosted secure_url, or null if there was
+// nothing to upload. Replaces the old behavior of saving the base64
+// string itself into MongoDB (avatarImage / chat media.url) — the doc
+// now stores a short Cloudinary URL instead of a multi-hundred-KB
+// string, and images are served off Cloudinary's CDN instead of out
+// of Mongo on every feed/profile read.
+// One upload failure must never 500 the whole request (a post/profile
+// update shouldn't fail outright just because the image didn't make
+// it) — callers treat a thrown error as "no image this time".
+async function uploadImageToCloudinary(dataUrl, folder) {
+    if (!dataUrl) return null;
+    const result = await cloudinary.uploader.upload(dataUrl, {
+        folder,
+        resource_type: 'image'
+    });
+    return result.secure_url;
 }
 
 async function generateUniqueChatHandle() {
@@ -1751,6 +1790,40 @@ app.get('/chats/counts', async (req, res) => {
     }
 });
 
+// POST /upload — general-purpose file upload endpoint (multipart/form-data,
+// field name "file"). Uploads straight to Cloudinary and returns the
+// hosted URL; nothing is saved to Mongo here — callers (a future route
+// or the frontend) take the returned url/publicId and store it wherever
+// it belongs (e.g. a Report doc, a new model, etc.). Kept separate from
+// the base64-data-URL path used by avatars/chat media above.
+app.post('/upload', genericUpload.single('file'), async (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ error: 'No file received (expected multipart/form-data field "file")' });
+    }
+    try {
+        const result = await uploadBufferToCloudinary(req.file.buffer, 'lightwatch/general');
+        return res.status(201).json({
+            url: result.secure_url,
+            publicId: result.public_id,
+            format: result.format,
+            bytes: result.bytes
+        });
+    } catch (uploadErr) {
+        console.error('Cloudinary generic upload error:', uploadErr.message);
+        return res.status(502).json({ error: 'Could not upload file, please try again' });
+    }
+});
+
+// Multer errors (file too large, etc.) throw before reaching the route
+// handler above — this catches those so they come back as a normal
+// JSON error response instead of an unhandled 500/crash.
+app.use((err, req, res, next) => {
+    if (err instanceof multer.MulterError) {
+        return res.status(400).json({ error: `Upload error: ${err.message}` });
+    }
+    next(err);
+});
+
 app.post('/chats', async (req, res) => {
     const { userId, text, location, replyTo, repost, quote, media, scope } = req.body;
     const normalizedScope = (scope || 'local').toString().toLowerCase() === 'global' ? 'global' : 'local';
@@ -1766,6 +1839,16 @@ app.post('/chats', async (req, res) => {
         const user = await User.findById(userId);
         if (!user) {
             return res.status(400).json({ error: "Invalid user" });
+        }
+
+        let mediaUrl = null;
+        if (normalizedMedia) {
+            try {
+                mediaUrl = await uploadImageToCloudinary(normalizedMedia, 'lightwatch/chat-media');
+            } catch (uploadErr) {
+                console.error('Cloudinary chat media upload error:', uploadErr.message);
+                return res.status(502).json({ error: 'Could not upload image, please try again' });
+            }
         }
 
         if (!user.chatHandle) {
@@ -1801,7 +1884,7 @@ app.post('/chats', async (req, res) => {
                 handle: String(quote.handle || '').slice(0, 80),
                 text: String(quote.text || '').slice(0, 220)
             } : undefined,
-            media: normalizedMedia ? { kind: 'image', url: normalizedMedia } : undefined,
+            media: mediaUrl ? { kind: 'image', url: mediaUrl } : undefined,
             location: savedLocation,
             locationKey: normalizedLocation
         });
@@ -3357,7 +3440,17 @@ app.patch('/user/:id/profile', async (req, res) => {
             if (req.body.avatarImage && !normalizedAvatar) {
                 return res.status(400).json({ error: 'Avatar must be a PNG, JPG, or WEBP image and within size limits.' });
             }
-            user.avatarImage = normalizedAvatar;
+            if (normalizedAvatar) {
+                try {
+                    user.avatarImage = await uploadImageToCloudinary(normalizedAvatar, 'lightwatch/avatars');
+                } catch (uploadErr) {
+                    console.error('Cloudinary avatar upload error:', uploadErr.message);
+                    return res.status(502).json({ error: 'Could not upload avatar, please try again' });
+                }
+            } else {
+                // req.body.avatarImage was explicitly null/empty — clears the avatar.
+                user.avatarImage = null;
+            }
         }
 
         await user.save();
