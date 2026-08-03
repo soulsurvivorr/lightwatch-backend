@@ -810,8 +810,9 @@ function sanitizeAvatarImageDataUrl(raw) {
     const value = String(raw || '').trim();
     if (!value) return null;
     if (!/^data:image\/(png|jpe?g|webp);base64,/i.test(value)) return null;
-    // Rough cap: ~1.5MB payload as base64 string.
-    if (value.length > 2_000_000) return null;
+    // Allow commonly-sized profile photos while still rejecting very large
+    // payloads before they ever hit Cloudinary.
+    if (value.length > 4_000_000) return null;
     return value;
 }
 
@@ -835,6 +836,17 @@ function sanitizeMediaDataUrl(raw, kind = 'image') {
 // One upload failure must never 500 the whole request (a post/profile
 // update shouldn't fail outright just because the media didn't make
 // it) — callers treat a thrown error as "no media this time".
+async function uploadImageToCloudinary(dataUrl, folder = 'lightwatch/avatars') {
+    if (!dataUrl) return null;
+    const result = await cloudinary.uploader.upload(dataUrl, {
+        folder,
+        resource_type: 'image',
+        quality: 'auto',
+        fetch_format: 'auto'
+    });
+    return result.secure_url;
+}
+
 async function uploadMediaToCloudinary(dataUrl, kind, folder) {
     if (!dataUrl) return null;
     const result = await cloudinary.uploader.upload(dataUrl, {
