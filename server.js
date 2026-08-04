@@ -456,6 +456,23 @@ chatSchema.index({ isAdmin: 1, createdAt: -1 });
 chatSchema.index({ userId: 1 });
 chatSchema.index({ 'replyTo.chatId': 1 });
 
+const notificationSchema = new mongoose.Schema({
+    recipientUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    actorUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    actorHandle: { type: String, default: '' },
+    type: { type: String, enum: ['mention', 'reply', 'comment', 'like', 'repost', 'system'], required: true },
+    chatId: { type: String, default: null },
+    parentChatId: { type: String, default: null },
+    title: { type: String, required: true },
+    text: { type: String, default: '' },
+    url: { type: String, default: null },
+    chatScope: { type: String, default: null },
+    chatLocation: { type: String, default: null },
+    createdAt: { type: Date, default: Date.now },
+    readAt: { type: Date, default: null }
+});
+notificationSchema.index({ recipientUserId: 1, createdAt: -1 });
+
 const lightStatusSchema = new mongoose.Schema({
     locationKey: { type: String, required: true, unique: true },
     status: { type: String, enum: ['on', 'off', 'unknown'], default: 'unknown' },
@@ -588,6 +605,7 @@ const geocodeCacheSchema = new mongoose.Schema({
 
 const User             = mongoose.model('User', userSchema);
 const Chat             = mongoose.model('Chat', chatSchema);
+const Notification     = mongoose.model('Notification', notificationSchema);
 const LightStatus      = mongoose.model('LightStatus', lightStatusSchema);
 const LightStatusEvent = mongoose.model('LightStatusEvent', lightStatusEventSchema);
 const PushSubscription = mongoose.model('PushSubscription', pushSubscriptionSchema);
@@ -1883,8 +1901,52 @@ app.use((err, req, res, next) => {
     next(err);
 });
 
+async function createNotificationForUser({ recipientUserId, actorUserId, actorHandle, type, chatId, parentChatId, title, text, url, chatScope, chatLocation }) {
+    if (!recipientUserId || !mongoose.Types.ObjectId.isValid(recipientUserId)) return null;
+    if (actorUserId && String(actorUserId) === String(recipientUserId)) return null;
+
+    try {
+        const doc = await Notification.create({
+            recipientUserId,
+            actorUserId: actorUserId || null,
+            actorHandle: actorHandle || '',
+            type,
+            chatId: chatId || null,
+            parentChatId: parentChatId || null,
+            title,
+            text,
+            url: url || '/notifications',
+            chatScope: chatScope || null,
+            chatLocation: chatLocation || null
+        });
+
+        const subscribers = await PushSubscription.find({ userId: recipientUserId }).select('userId subscription fcmToken platform').lean();
+        if (subscribers.length) {
+            const payload = {
+                title: title || 'New activity',
+                body: text || title || 'You have a new notification',
+                url: doc.url || '/notifications',
+                tag: `notif-${type}`,
+                requireInteraction: true,
+                vibrate: [220, 100, 220],
+                tone: 'chat',
+                type,
+                chatId: chatId || undefined,
+                chatScope: chatScope || undefined,
+                chatLocation: chatLocation || undefined
+            };
+            sendPushToSubscribers(subscribers, payload);
+        }
+
+        return doc;
+    } catch (err) {
+        console.error('Notification create error:', err.message);
+        return null;
+    }
+}
+
 app.post('/chats', async (req, res) => {
-    const { userId, text, location, replyTo, repost, quote, media, scope } = req.body;
+    const { userId, text, location, replyTo, repost, quote, media, scope, mentions } = req.body;
     const normalizedScope = (scope || 'local').toString().toLowerCase() === 'global' ? 'global' : 'local';
     const normalizedText = String(text || '').trim();
     const normalizedMediaKind = media?.kind === 'video' ? 'video' : 'image';
@@ -2011,6 +2073,99 @@ app.post('/chats', async (req, res) => {
                 ? await User.find({ _id: { $in: recipientUserIds } }).select('chatHandle').lean()
                 : [];
             const handleByUserId = new Map(recipientUsers.map(u => [String(u._id), (u.chatHandle || '').toLowerCase()]));
+            const mentionHandles = [...new Set(
+                [
+                    ...(Array.isArray(mentions) ? mentions : []),
+                    ...((normalizedText.match(/@([a-zA-Z0-9-]+)/g) || []).map(match => match.substring(1)))
+                ]
+                    .map(handle => String(handle || '').replace(/^@/, '').trim())
+                    .filter(Boolean)
+            )];
+            const mentionRecipients = mentionHandles.length
+                ? recipientUsers.filter(recipient => mentionHandles.some(handle => String(recipient.chatHandle || '').toLowerCase() === handle.toLowerCase()))
+                : [];
+            const mentionRecipientIds = mentionRecipients.map(recipient => String(recipient._id));
+            const baseDeepLinkParams = new URLSearchParams({
+                chatId: String(saved._id),
+                chatScope: normalizedScope,
+                chatLocation: savedLocation
+            });
+            if (replyTo?.chatId) {
+                baseDeepLinkParams.set('replyToChatId', String(replyTo.chatId));
+            }
+            const notificationUrl = `/chat?${baseDeepLinkParams.toString()}`;
+            const notificationPromises = [];
+
+            mentionRecipientIds.forEach(recipientId => {
+                notificationPromises.push(createNotificationForUser({
+                    recipientUserId: recipientId,
+                    actorUserId: userId,
+                    actorHandle: user.chatHandle || 'Someone',
+                    type: 'mention',
+                    chatId: String(saved._id),
+                    parentChatId: replyTo?.chatId || null,
+                    title: `${user.chatHandle || 'Someone'} mentioned you in a post`,
+                    text: normalizedText.slice(0, 140),
+                    url: notificationUrl,
+                    chatScope: normalizedScope,
+                    chatLocation: savedLocation
+                }));
+            });
+
+            if (replyTo?.chatId && replyTargetChat?.userId && String(replyTargetChat.userId) !== String(userId)) {
+                notificationPromises.push(createNotificationForUser({
+                    recipientUserId: String(replyTargetChat.userId),
+                    actorUserId: userId,
+                    actorHandle: user.chatHandle || 'Someone',
+                    type: 'reply',
+                    chatId: String(saved._id),
+                    parentChatId: String(replyTo.chatId),
+                    title: `${user.chatHandle || 'Someone'} replied to your post`,
+                    text: normalizedText.slice(0, 140),
+                    url: notificationUrl,
+                    chatScope: normalizedScope,
+                    chatLocation: savedLocation
+                }));
+            }
+
+            if (hasQuote && quote?.chatId && mongoose.Types.ObjectId.isValid(quote.chatId)) {
+                const quotedOwnerId = String(quote.chatId);
+                const quotedOwnerDoc = await Chat.findById(quotedOwnerId).select('userId').lean();
+                if (quotedOwnerDoc?.userId && String(quotedOwnerDoc.userId) !== String(userId)) {
+                    notificationPromises.push(createNotificationForUser({
+                        recipientUserId: String(quotedOwnerDoc.userId),
+                        actorUserId: userId,
+                        actorHandle: user.chatHandle || 'Someone',
+                        type: 'comment',
+                        chatId: String(saved._id),
+                        parentChatId: String(quote.chatId),
+                        title: `${user.chatHandle || 'Someone'} commented on your post`,
+                        text: normalizedText.slice(0, 140),
+                        url: notificationUrl,
+                        chatScope: normalizedScope,
+                        chatLocation: savedLocation
+                    }));
+                }
+            }
+
+            if (hasRepost && repost?.chatId && mongoose.Types.ObjectId.isValid(repost.chatId)) {
+                const repostOwnerDoc = await Chat.findById(repost.chatId).select('userId').lean();
+                if (repostOwnerDoc?.userId && String(repostOwnerDoc.userId) !== String(userId)) {
+                    notificationPromises.push(createNotificationForUser({
+                        recipientUserId: String(repostOwnerDoc.userId),
+                        actorUserId: userId,
+                        actorHandle: user.chatHandle || 'Someone',
+                        type: 'repost',
+                        chatId: String(saved._id),
+                        parentChatId: String(repost.chatId),
+                        title: `${user.chatHandle || 'Someone'} reposted your post`,
+                        text: normalizedText.slice(0, 140),
+                        url: notificationUrl,
+                        chatScope: normalizedScope,
+                        chatLocation: savedLocation
+                    }));
+                }
+            }
 
             const pushPromises = subscribers.map(async sub => {
                 if (sub.userId && String(sub.userId) === String(userId)) {
@@ -2041,15 +2196,6 @@ app.post('/chats', async (req, res) => {
                     }
                 }
 
-                const deepLinkParams = new URLSearchParams({
-                    chatId: String(saved._id),
-                    chatScope: normalizedScope,
-                    chatLocation: savedLocation
-                });
-                if (replyTo?.chatId) {
-                    deepLinkParams.set('replyToChatId', String(replyTo.chatId));
-                }
-
                 const payload = {
                     title: isPriorityMention
                         ? `Reply in ${audienceTitle}`
@@ -2072,7 +2218,7 @@ app.post('/chats', async (req, res) => {
 
                 await sendPushToOne(sub, payload);
             });
-            await Promise.allSettled(pushPromises);
+            await Promise.allSettled([...pushPromises, ...notificationPromises]);
         })().catch(err => {
             console.error('Post-chat notification error:', err.message);
         });
@@ -2182,7 +2328,7 @@ app.post('/chats/:chatId/like', async (req, res) => {
     }
 
     try {
-        const chat = await Chat.findById(chatId).select('likedBy likeCount repost quote');
+        const chat = await Chat.findById(chatId).select('userId handle text likedBy likeCount repost quote');
         if (!chat) {
             return res.status(404).json({ error: 'Post not found' });
         }
@@ -2204,6 +2350,23 @@ app.post('/chats/:chatId/like', async (req, res) => {
                 { _id: parentId },
                 parentSync
             ).catch(err => console.error('Linked like count sync error:', err.message));
+        }
+
+        if (!alreadyLiked && chat?.userId && String(chat.userId) !== String(userId)) {
+            const actor = await User.findById(userId).select('chatHandle').lean();
+            createNotificationForUser({
+                recipientUserId: String(chat.userId),
+                actorUserId: userId,
+                actorHandle: actor?.chatHandle || 'Someone',
+                type: 'like',
+                chatId: String(chatId),
+                parentChatId: parentId || null,
+                title: `${actor?.chatHandle || 'Someone'} liked your post`,
+                text: String(chat.text || '').slice(0, 140),
+                url: `/chat?chatId=${encodeURIComponent(String(chatId))}`,
+                chatScope: null,
+                chatLocation: null
+            }).catch(() => {});
         }
 
         return res.json({ liked: !alreadyLiked, likeCount });
@@ -3049,7 +3212,7 @@ app.get('/reports', async (req, res) => {
         // admin broadcasts) are entirely independent of each other — fetch
         // them concurrently instead of one after another.
         const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-        const [events, communityItems, adminChats] = await Promise.all([
+        const [events, communityItems, adminChats, notificationDocs] = await Promise.all([
             LightStatusEvent.find(query).sort({ reportedAt: -1 }).limit(limit).lean(),
             loadCommunityItems(),
             // ── Admin broadcasts ────────────────────────────────────
@@ -3063,7 +3226,13 @@ app.get('/reports', async (req, res) => {
                 .select('handle text createdAt scope location')
                 .sort({ createdAt: -1 })
                 .limit(20)
-                .lean()
+                .lean(),
+            req.query.userId && mongoose.Types.ObjectId.isValid(req.query.userId)
+                ? Notification.find({ recipientUserId: req.query.userId })
+                    .sort({ createdAt: -1 })
+                    .limit(limit)
+                    .lean()
+                : []
         ]);
 
         const reports = events.map(event => {
@@ -3095,7 +3264,19 @@ app.get('/reports', async (req, res) => {
             chatLocation: chat.location
         }));
 
-        const merged = [...reports, ...communityItems, ...adminItems]
+        const notificationItems = (notificationDocs || []).map(item => ({
+            id: `notif-${item._id}`,
+            title: item.title,
+            text: item.text,
+            reportedAt: item.createdAt,
+            type: item.type,
+            chatId: item.chatId || null,
+            chatScope: item.chatScope || null,
+            chatLocation: item.chatLocation || null,
+            url: item.url || '/notifications'
+        }));
+
+        const merged = [...reports, ...communityItems, ...adminItems, ...notificationItems]
             .sort((a, b) => new Date(b.reportedAt) - new Date(a.reportedAt))
             .slice(0, limit);
 
