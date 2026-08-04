@@ -152,7 +152,7 @@ module.exports = function registerWeatherRoutes(app, deps) {
     async function fetchOpenMeteo(lat, lng) {
         const url = 'https://api.open-meteo.com/v1/forecast'
             + `?latitude=${lat}&longitude=${lng}`
-            + '&current=temperature_2m,weather_code,wind_speed_10m,precipitation,relative_humidity_2m'
+            + '&current=temperature_2m,weather_code,wind_speed_10m,precipitation,relative_humidity_2m,is_day'
             + '&hourly=weather_code,precipitation_probability,wind_speed_10m'
             + '&forecast_days=2&timezone=auto';
 
@@ -259,7 +259,13 @@ module.exports = function registerWeatherRoutes(app, deps) {
                     condition: meta.condition,
                     description: meta.desc,
                     weatherCode: code,
-                    rainChance
+                    rainChance,
+                    // 1 = daytime, 0 = nighttime (Open-Meteo's own sun-up/
+                    // sun-down flag for this location) — lets the client
+                    // show a moon/stars scene instead of a sun for a
+                    // genuinely clear night, rather than guessing from
+                    // local device time.
+                    isDay: typeof current.is_day === 'number' ? current.is_day : null
                 },
                 risk: {
                     level: risk.level,           // 'low' | 'medium' | 'high'
