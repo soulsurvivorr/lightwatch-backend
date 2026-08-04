@@ -3994,6 +3994,22 @@ require('./news')(app, {
     verifyAdminToken
 });
 
+// ── Weather system (weather.js) — Open-Meteo current conditions +
+//    storm/grid-risk scoring for the Home view's Weather card and the
+//    Grid Risk / Weather Impact cards. Wired in the same way as news.js
+//    just above: it just needs the geocoding helpers already defined
+//    earlier in this file (resolveLocationCoords, GHANA_TOWN_COORDS,
+//    etc.) — see weather.js's own header comment for the full picture,
+//    including the "unrecognized small town -> fall back to a known
+//    nearby town (Mampong by default)" behavior. ──
+require('./weather')(app, {
+    resolveLocationCoords,
+    normalizeLocation,
+    titleCaseLocation,
+    timeExternalCall,
+    GHANA_TOWN_COORDS
+});
+
 // ---- HEALTH CHECK ----
 app.get('/', (req, res) => {
     const dbState = mongoose.connection.readyState;
