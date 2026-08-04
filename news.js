@@ -1511,8 +1511,13 @@ module.exports = function initNewsSystem(app, deps) {
                     eventType: e.eventType,
                     headline: e.headline,
                     summary: e.summary,
-                    image: e.imageUrl || '/images/graphic.png',
-                    affectedLocations: e.affectedLocations,
+                    // Left null when there's no real image — the frontend
+                    // picks its own (varied, per-article) fallback graphic
+                    // for that case. Baking '/images/graphic.png' in here
+                    // used to make every image-less event load that exact
+                    // file successfully, which meant the frontend's onerror-
+                    // driven fallback logic never even ran for them.
+                    image: e.imageUrl || null,
                     isNationwide: !!e.isNationwide,
                     startTime: e.startTimeText,
                     endTime: e.endTimeText,
@@ -1587,11 +1592,12 @@ module.exports = function initNewsSystem(app, deps) {
                     id: e._id,
                     title: e.headline,
                     summary: e.summary,
-                    // Was hardcoded to null — that was the regression that
-                    // broke article images. Now carried through from
-                    // whichever source article had one (see imageUrl on
-                    // NewsEvent, set/merged in attachArticleToEvent).
-                    image: e.imageUrl || '/images/graphic.png',
+                    // Left null when there's no real image — see the same
+                    // note on GET /events above. The frontend now assigns
+                    // its own varied fallback graphic per article; baking
+                    // a real, always-loadable graphic.png URL in here
+                    // short-circuited that for every image-less event.
+                    image: e.imageUrl || null,
                     source: mainSource.name || 'LightWatch',
                     // Real fetched logo for the main source (span.news-item__source-icon),
                     // not the old static emoji. iconEmoji kept alongside for
@@ -1852,7 +1858,7 @@ module.exports = function initNewsSystem(app, deps) {
                 id: result._id,
                 title: result.title,
                 summary: result.summary,
-                image: result.imageUrl || '/graphic.png',
+                image: result.imageUrl || null,
                 source: result.sourceName,
                 sourceIcon: result.sourceIcon,
                 isOfficial: result.isOfficial,
