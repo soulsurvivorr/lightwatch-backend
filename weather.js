@@ -41,7 +41,11 @@ module.exports = function registerWeatherRoutes(app, deps) {
         normalizeLocation,
         titleCaseLocation,
         timeExternalCall,
-        GHANA_TOWN_COORDS
+        GHANA_TOWN_COORDS,
+        reverseGeocodeCity      // async (lat, lng) -> string|null — used when the client sends a raw GPS
+                                 // fix (no location name) so lwxWeatherCity can still show a real city
+                                 // instead of falling back to "Your area". Same helper server.js's own
+                                 // /geocode/reverse route already uses.
     } = deps;
 
     if (typeof resolveLocationCoords !== 'function') {
@@ -64,8 +68,38 @@ module.exports = function registerWeatherRoutes(app, deps) {
     const WEATHER_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
     const weatherCache = new Map();
 
+    // Separate, much longer-lived cache for reverse-geocoded city names.
+    // Unlike the weather itself, the city a coordinate sits in doesn't
+    // change — no reason to re-hit the Google Maps API every 10 minutes
+    // just because the weather cache expired.
+    const CITY_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+    const cityCache = new Map();
+
     function roundCoord(n) {
         return Math.round(n * 20) / 20; // ~0.05deg grid, roughly 5km
+    }
+
+    // GPS-only requests (no ?location= name) arrive with just lat/lng, so
+    // there's nothing to title-case into a display label — resolve one via
+    // reverse geocoding instead, the same way the signup page's "use my
+    // location" button already does via /geocode/reverse. Falls back to
+    // null (caller shows "Your area") if reverseGeocodeCity isn't wired up
+    // or the lookup fails/returns nothing, rather than blowing up the route.
+    async function getCityForCoords(lat, lng) {
+        if (typeof reverseGeocodeCity !== 'function') return null;
+        const key = `${roundCoord(lat)},${roundCoord(lng)}`;
+        const cached = cityCache.get(key);
+        if (cached && (Date.now() - cached.fetchedAt) < CITY_CACHE_TTL_MS) {
+            return cached.city;
+        }
+        try {
+            const city = await reverseGeocodeCity(lat, lng);
+            cityCache.set(key, { city, fetchedAt: Date.now() });
+            return city;
+        } catch (err) {
+            console.error('[weather] reverse geocode failed:', err.message);
+            return null;
+        }
     }
 
     // WMO weather codes (the scheme Open-Meteo uses) collapsed down to
@@ -197,6 +231,15 @@ module.exports = function registerWeatherRoutes(app, deps) {
             if (hasCoords) {
                 resolvedLat = latNum;
                 resolvedLng = lngNum;
+                // The client sent a raw GPS fix and no location name (this
+                // is the common path — weather-home.js prefers GPS whenever
+                // it's available), so cityLabel is still null at this point.
+                // Without this, the response always fell back to "Your area"
+                // regardless of where the user actually is. Reverse-geocode
+                // it the same way /geocode/reverse does, and only fall back
+                // to "Your area" (below) if that comes back empty too.
+                const resolvedCity = await getCityForCoords(resolvedLat, resolvedLng);
+                if (resolvedCity) cityLabel = resolvedCity;
             } else if (location && String(location).trim()) {
                 const locationKey = normalizeLocation(location).replace(/[^a-z0-9]/g, '');
                 let resolved = await resolveLocationCoords(locationKey, null, null, location, region);

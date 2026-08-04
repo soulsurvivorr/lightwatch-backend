@@ -4007,7 +4007,11 @@ require('./weather')(app, {
     normalizeLocation,
     titleCaseLocation,
     timeExternalCall,
-    GHANA_TOWN_COORDS
+    GHANA_TOWN_COORDS,
+    // Lets weather.js resolve a real city name for GPS-only requests
+    // (lat/lng with no location name) instead of always falling back to
+    // "Your area" — see weather.js's own comment on getCityForCoords().
+    reverseGeocodeCity
 });
 
 // ---- HEALTH CHECK ----
