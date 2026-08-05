@@ -2,10 +2,11 @@
 //  WEATHER.JS — live weather + storm/grid-risk data for the Home
 //  view's Weather card and the two Grid Risk / Weather Impact cards.
 //
-//  Backed by Open-Meteo (https://open-meteo.com) — free, no API key,
-//  no rate-limit hassle for this scale of traffic. Wired into
-//  server.js the same way news.js is: `require('./weather')(app, {...})`
-//  right after the geocoding helpers it needs already exist.
+//  Backed by WeatherAPI.com (https://www.weatherapi.com) — needs an
+//  API key, read from process.env.WEATHERAPI_KEY (set that in the
+//  backend's env, not in this file). Wired into server.js the same
+//  way news.js is: `require('./weather')(app, {...})` right after the
+//  geocoding helpers it needs already exist.
 //
 //  WHY A SEPARATE FILE: this is a self-contained slice (one outbound
 //  API, a couple of routes, no Mongo models) — keeping it out of
@@ -29,7 +30,7 @@
 //  resolution comes back "approximate" (= the scatter fallback), this
 //  swaps in a real nearby, well-known town's coordinates instead
 //  (FALLBACK_TOWN, defaults to Mampong — central, well covered by
-//  Open-Meteo's model grid) so the card always shows a genuine nearby
+//  WeatherAPI's model) so the card always shows a genuine nearby
 //  forecast rather than a random one. The response marks
 //  `approximate: true` in that case so the client can label it
 //  ("near you") instead of implying pinpoint accuracy.
@@ -58,6 +59,11 @@ module.exports = function registerWeatherRoutes(app, deps) {
     // GHANA_TOWN_COORDS, e.g. "kumasi", "accra") if the default doesn't
     // fit your users' area.
     const FALLBACK_TOWN = (process.env.WEATHER_FALLBACK_TOWN || 'mampong').toLowerCase();
+
+    // Required for every WeatherAPI.com call. Read lazily inside the
+    // fetch function (not at module load) so a missing key surfaces as
+    // a normal 502 from the /weather route instead of crashing boot.
+    const WEATHERAPI_KEY = process.env.WEATHERAPI_KEY;
 
     // In-memory cache, keyed by a coarse (~5km) coordinate bucket, so
     // several people near each other don't each trigger their own
@@ -102,41 +108,30 @@ module.exports = function registerWeatherRoutes(app, deps) {
         }
     }
 
-    // WMO weather codes (the scheme Open-Meteo uses) collapsed down to
-    // the handful of conditions the UI actually distinguishes.
-    const WMO_CODES = {
-        0: { desc: 'Clear sky', condition: 'clear' },
-        1: { desc: 'Mainly clear', condition: 'clear' },
-        2: { desc: 'Partly cloudy', condition: 'cloudy' },
-        3: { desc: 'Overcast', condition: 'cloudy' },
-        45: { desc: 'Fog', condition: 'fog' },
-        48: { desc: 'Depositing rime fog', condition: 'fog' },
-        51: { desc: 'Light drizzle', condition: 'rain' },
-        53: { desc: 'Drizzle', condition: 'rain' },
-        55: { desc: 'Dense drizzle', condition: 'rain' },
-        56: { desc: 'Light freezing drizzle', condition: 'rain' },
-        57: { desc: 'Freezing drizzle', condition: 'rain' },
-        61: { desc: 'Slight rain', condition: 'rain' },
-        63: { desc: 'Rain', condition: 'rain' },
-        65: { desc: 'Heavy rain', condition: 'rain' },
-        66: { desc: 'Light freezing rain', condition: 'rain' },
-        67: { desc: 'Freezing rain', condition: 'rain' },
-        71: { desc: 'Slight snow', condition: 'snow' },
-        73: { desc: 'Snow', condition: 'snow' },
-        75: { desc: 'Heavy snow', condition: 'snow' },
-        77: { desc: 'Snow grains', condition: 'snow' },
-        80: { desc: 'Slight rain showers', condition: 'rain' },
-        81: { desc: 'Rain showers', condition: 'rain' },
-        82: { desc: 'Violent rain showers', condition: 'rain' },
-        85: { desc: 'Slight snow showers', condition: 'snow' },
-        86: { desc: 'Heavy snow showers', condition: 'snow' },
-        95: { desc: 'Thunderstorm', condition: 'storm' },
-        96: { desc: 'Thunderstorm, slight hail', condition: 'storm' },
-        99: { desc: 'Thunderstorm, heavy hail', condition: 'storm' }
+    // WeatherAPI.com condition codes collapsed down to the handful of
+    // conditions the UI actually distinguishes (see home.css's
+    // data-weather="clear|clear-night|cloudy|rain|storm|fog" scenes).
+    // WeatherAPI's own condition.text is used directly for the
+    // human-readable description, so this table only needs to carry
+    // the bucket, not separate desc strings — full code list at
+    // https://www.weatherapi.com/docs/weather_conditions.json
+    const WEATHERAPI_CODE_BUCKETS = {
+        1000: 'clear',
+        1003: 'cloudy', 1006: 'cloudy', 1009: 'cloudy',
+        1030: 'fog', 1135: 'fog', 1147: 'fog',
+        1063: 'rain', 1150: 'rain', 1153: 'rain', 1168: 'rain', 1171: 'rain',
+        1180: 'rain', 1183: 'rain', 1186: 'rain', 1189: 'rain', 1192: 'rain',
+        1195: 'rain', 1198: 'rain', 1201: 'rain', 1240: 'rain', 1243: 'rain',
+        1246: 'rain', 1249: 'rain', 1252: 'rain',
+        1066: 'snow', 1069: 'snow', 1072: 'snow', 1114: 'snow', 1117: 'snow',
+        1204: 'snow', 1207: 'snow', 1210: 'snow', 1213: 'snow', 1216: 'snow',
+        1219: 'snow', 1222: 'snow', 1225: 'snow', 1237: 'snow', 1255: 'snow',
+        1258: 'snow', 1261: 'snow', 1264: 'snow',
+        1087: 'storm', 1273: 'storm', 1276: 'storm', 1279: 'storm', 1282: 'storm'
     };
 
-    function describeCode(code) {
-        return WMO_CODES[code] || { desc: 'Unknown', condition: 'cloudy' };
+    function bucketForCode(code) {
+        return WEATHERAPI_CODE_BUCKETS[code] || 'cloudy';
     }
 
     // Ranks conditions purely for "which of these two is worse" comparisons
@@ -151,29 +146,30 @@ module.exports = function registerWeatherRoutes(app, deps) {
     // Scans the next `hours` hourly entries (starting at startIndex) for
     // the worst weather ahead, and how far away it is — this is what
     // drives both the Grid Risk card's ETA and the weather card's
-    // "Thunderstorm Risk" line.
-    function assessRisk(hourlyTimes, hourlyCodes, startIndex, hours) {
-        if (!Array.isArray(hourlyTimes) || !Array.isArray(hourlyCodes)) {
-            return { level: 'low', label: 'Low Risk', etaHours: null, worstCode: 0 };
+    // "Thunderstorm Risk" line. `hours` here is WeatherAPI's own flat
+    // array of hour objects (each with a .condition.code), already
+    // combined across the requested forecast days — see flattenHours().
+    function assessRisk(hours, startIndex, lookaheadHours) {
+        if (!Array.isArray(hours) || !hours.length) {
+            return { level: 'low', label: 'Low Risk', etaHours: null, worstCondition: 'clear' };
         }
-        const horizon = Math.min(hourlyCodes.length, startIndex + hours);
-        let worst = { code: 0, hoursAway: null };
+        const horizon = Math.min(hours.length, startIndex + lookaheadHours);
+        let worst = { condition: 'clear', hoursAway: null, rank: -1 };
         for (let i = Math.max(startIndex, 0); i < horizon; i++) {
-            const code = hourlyCodes[i] ?? 0;
-            const rank = conditionRank(describeCode(code).condition);
-            const worstRank = conditionRank(describeCode(worst.code).condition);
-            if (rank > worstRank) {
-                worst = { code, hoursAway: i - startIndex };
+            const code = hours[i] && hours[i].condition ? hours[i].condition.code : null;
+            const condition = bucketForCode(code);
+            const rank = conditionRank(condition);
+            if (rank > worst.rank) {
+                worst = { condition, hoursAway: i - startIndex, rank };
             }
         }
-        const condition = describeCode(worst.code).condition;
-        if (condition === 'storm') {
-            return { level: 'high', label: 'High Risk', etaHours: worst.hoursAway, worstCode: worst.code };
+        if (worst.condition === 'storm') {
+            return { level: 'high', label: 'High Risk', etaHours: worst.hoursAway, worstCondition: worst.condition };
         }
-        if (condition === 'rain') {
-            return { level: 'medium', label: 'Medium Risk', etaHours: worst.hoursAway, worstCode: worst.code };
+        if (worst.condition === 'rain') {
+            return { level: 'medium', label: 'Medium Risk', etaHours: worst.hoursAway, worstCondition: worst.condition };
         }
-        return { level: 'low', label: 'Low Risk', etaHours: null, worstCode: worst.code };
+        return { level: 'low', label: 'Low Risk', etaHours: null, worstCondition: worst.condition };
     }
 
     function formatEta(hoursAway) {
@@ -183,16 +179,26 @@ module.exports = function registerWeatherRoutes(app, deps) {
         return `${hoursAway} hours`;
     }
 
-    async function fetchOpenMeteo(lat, lng) {
-        const url = 'https://api.open-meteo.com/v1/forecast'
-            + `?latitude=${lat}&longitude=${lng}`
-            + '&current=temperature_2m,weather_code,wind_speed_10m,precipitation,relative_humidity_2m,is_day'
-            + '&hourly=weather_code,precipitation_probability,wind_speed_10m'
-            + '&forecast_days=2&timezone=auto';
+    // Flattens WeatherAPI's forecast.forecastday[].hour[] (one array per
+    // day) into a single chronological array, same shape the rest of
+    // this file wants to scan across a day boundary (e.g. "risk in the
+    // next 12 hours" when it's currently 8pm).
+    function flattenHours(forecast) {
+        const days = (forecast.forecast && forecast.forecast.forecastday) || [];
+        return days.reduce((all, day) => all.concat(day.hour || []), []);
+    }
 
-        const response = await timeExternalCall(`Open-Meteo forecast (${lat},${lng})`, () => fetch(url));
+    async function fetchWeatherApi(lat, lng) {
+        if (!WEATHERAPI_KEY) {
+            throw new Error('WEATHERAPI_KEY environment variable is not set');
+        }
+        const url = 'https://api.weatherapi.com/v1/forecast.json'
+            + `?key=${encodeURIComponent(WEATHERAPI_KEY)}&q=${lat},${lng}`
+            + '&days=2&aqi=no&alerts=no';
+
+        const response = await timeExternalCall(`WeatherAPI forecast (${lat},${lng})`, () => fetch(url));
         if (!response.ok) {
-            throw new Error(`Open-Meteo responded ${response.status}`);
+            throw new Error(`WeatherAPI responded ${response.status}`);
         }
         return response.json();
     }
@@ -203,7 +209,7 @@ module.exports = function registerWeatherRoutes(app, deps) {
         if (cached && (Date.now() - cached.fetchedAt) < WEATHER_CACHE_TTL_MS) {
             return cached.data;
         }
-        const data = await fetchOpenMeteo(lat, lng);
+        const data = await fetchWeatherApi(lat, lng);
         weatherCache.set(key, { data, fetchedAt: Date.now() });
         return data;
     }
@@ -263,21 +269,37 @@ module.exports = function registerWeatherRoutes(app, deps) {
 
             const forecast = await getWeatherForCoords(resolvedLat, resolvedLng);
             const current = forecast.current || {};
-            const hourly = forecast.hourly || {};
+            const hours = flattenHours(forecast);
 
+            // WeatherAPI hour.time is a local "YYYY-MM-DD HH:00" string
+            // (already in the location's own timezone, same as
+            // location.localtime below) — a straight string compare
+            // finds the first hour at/after "now" without any parsing.
+            const nowLocal = (forecast.location && forecast.location.localtime) || '';
             let startIndex = 0;
-            if (Array.isArray(hourly.time) && current.time) {
-                const idx = hourly.time.findIndex((t) => t >= current.time);
+            if (hours.length && nowLocal) {
+                const nowHourPrefix = nowLocal.slice(0, 13); // "YYYY-MM-DD HH"
+                const idx = hours.findIndex((h) => h.time && h.time.slice(0, 13) >= nowHourPrefix);
                 startIndex = idx >= 0 ? idx : 0;
             }
 
-            const code = current.weather_code ?? 0;
-            const meta = describeCode(code);
-            const risk = assessRisk(hourly.time, hourly.weather_code, startIndex, 12);
+            const conditionCode = current.condition ? current.condition.code : null;
+            const condition = bucketForCode(conditionCode);
+            const description = (current.condition && current.condition.text) || 'Unknown';
+            const risk = assessRisk(hours, startIndex, 12);
 
-            const rainChance = Array.isArray(hourly.precipitation_probability)
-                ? hourly.precipitation_probability[startIndex] ?? null
+            const rainChance = hours[startIndex] && typeof hours[startIndex].chance_of_rain === 'number'
+                ? hours[startIndex].chance_of_rain
                 : null;
+
+            // Next few hours of temperature (+ rain chance) for the
+            // weather card's trend graph. Local time strings only —
+            // the client formats hour labels itself.
+            const hourlyTrend = hours.slice(startIndex, startIndex + 8).map((h) => ({
+                time: h.time,
+                temperatureC: typeof h.temp_c === 'number' ? h.temp_c : null,
+                rainChance: typeof h.chance_of_rain === 'number' ? h.chance_of_rain : null
+            }));
 
             const impactDescription = risk.level === 'high'
                 ? 'High chance of weather-related outages today.'
@@ -296,20 +318,23 @@ module.exports = function registerWeatherRoutes(app, deps) {
                 approximate,
                 coords: { lat: resolvedLat, lng: resolvedLng },
                 current: {
-                    temperatureC: current.temperature_2m ?? null,
-                    windKph: current.wind_speed_10m ?? null,
-                    humidity: current.relative_humidity_2m ?? null,
-                    condition: meta.condition,
-                    description: meta.desc,
-                    weatherCode: code,
+                    temperatureC: typeof current.temp_c === 'number' ? current.temp_c : null,
+                    windKph: typeof current.wind_kph === 'number' ? current.wind_kph : null,
+                    humidity: typeof current.humidity === 'number' ? current.humidity : null,
+                    condition,
+                    description,
+                    weatherCode: conditionCode,
                     rainChance,
-                    // 1 = daytime, 0 = nighttime (Open-Meteo's own sun-up/
+                    // 1 = daytime, 0 = nighttime (WeatherAPI's own sun-up/
                     // sun-down flag for this location) — lets the client
                     // show a moon/stars scene instead of a sun for a
                     // genuinely clear night, rather than guessing from
                     // local device time.
                     isDay: typeof current.is_day === 'number' ? current.is_day : null
                 },
+                // Short forward-looking trend for the weather card's
+                // graph — see hourlyTrend above.
+                hourly: hourlyTrend,
                 risk: {
                     level: risk.level,           // 'low' | 'medium' | 'high'
                     label: risk.label,           // 'Low Risk' | 'Medium Risk' | 'High Risk'
