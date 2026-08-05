@@ -1833,6 +1833,42 @@ app.get('/chats', async (req, res) => {
         const since = req.query.since ? new Date(req.query.since) : null;
         const query = (since && !isNaN(since.getTime())) ? { ...filter, createdAt: { $gt: since } } : filter;
 
+        // If client requests the single top trending post across the
+        // matching scope/location, return an aggregated result that
+        // sums likes/reposts/quotes + reply count and sorts newest on ties.
+        if (req.query.trending === '1') {
+            try {
+                // Build an aggregation pipeline that computes reply counts
+                // per post and a total engagement score, then returns the
+                // top-scoring post (newest on tie).
+                const aggMatch = filter;
+                const pipeline = [
+                    { $match: Object.assign({}, aggMatch, { isAdmin: { $ne: true } }) },
+                    { $addFields: { baseScore: { $add: [ { $ifNull: ['$likeCount', 0] }, { $ifNull: ['$repostCount', 0] }, { $ifNull: ['$quoteCount', 0] } ] } } },
+                    { $lookup: {
+                        from: 'chats',
+                        let: { idStr: { $toString: '$_id' } },
+                        pipeline: [
+                            { $match: { $expr: { $eq: ['$replyTo.chatId', '$$idStr'] } } },
+                            { $count: 'count' }
+                        ],
+                        as: 'repliesAgg'
+                    } },
+                    { $addFields: { replyCount: { $ifNull: [ { $arrayElemAt: ['$repliesAgg.count', 0] }, 0 ] } } },
+                    { $addFields: { totalEngagement: { $add: ['$baseScore', '$replyCount'] } } },
+                    { $sort: { totalEngagement: -1, createdAt: -1 } },
+                    { $limit: 1 },
+                    { $project: { repliesAgg: 0 } }
+                ];
+
+                const top = await Chat.aggregate(pipeline).exec();
+                return res.json(top);
+            } catch (err) {
+                console.error('Get chats (trending) error:', err.message);
+                return res.status(500).json({ error: 'Server error fetching trending chat' });
+            }
+        }
+
         const chats = await Chat.find(query).sort({ createdAt: -1 }).limit(500).lean();
         return res.json(chats);
     } catch (err) {
