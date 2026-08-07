@@ -153,14 +153,44 @@ function repairCrossedTags(xml) {
     return result;
 }
 
+// Matches one open/self-closing tag, attribute value either double- or
+// single-quoted, OR bare/unquoted (a plain HTML habit — width=150,
+// target=_blank — that's invalid XML and was the actual cause behind
+// Citi News's and 3News's "Invalid attribute name" parse failures:
+// the old version of this pattern only recognized quoted values, so
+// on an unquoted `width=150 height=100` it matched "width" as a
+// value-less attribute and left "=150" dangling, which the XML parser
+// then tried to read as if "150" were the start of a NEW attribute
+// name — illegal, since attribute names can't start with a digit.
+const TAG_PATTERN = /<([a-zA-Z][\w:-]*)((?:\s+[a-zA-Z_:][\w:.-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*)\s*(\/?)\s*>/g;
+
+// Normalizes one tag's attribute string: quoted values pass through
+// (re-quoted with " for consistency, internal " escaped), unquoted
+// bare values get wrapped in quotes, and a name with no value at all
+// gets ="" — the same "Attribute without value" fix as before, just
+// folded into one pass alongside the unquoted-value fix above.
+function normalizeAttrs(attrs) {
+    if (!attrs) return '';
+    const fixed = attrs.replace(
+        /([a-zA-Z_:][\w:.-]*)(\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g,
+        (full, name, hasEq, dq, sq, bare) => {
+            if (dq !== undefined) return `${name}="${dq}"`;
+            if (sq !== undefined) return `${name}="${sq.replace(/"/g, '&quot;')}"`;
+            if (bare !== undefined) return `${name}="${bare}"`;
+            return `${name}=""`;
+        }
+    );
+    return fixed.trim();
+}
+
+function repairTag(tagName, attrs, selfClose) {
+    const fixedAttrs = normalizeAttrs(attrs);
+    const needsSelfClose = selfClose || VOID_ELEMENTS.test(tagName);
+    return `<${tagName}${fixedAttrs ? ' ' + fixedAttrs : ''}${needsSelfClose ? ' /' : ''}>`;
+}
+
 function repairEmbeddedHtml(snippet) {
-    let out = snippet;
-    out = out.replace(/<([a-zA-Z][\w:-]*)((?:\s+[a-zA-Z_:][\w:.-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'))?)*)\s*(\/?)\s*>/g,
-        (match, tagName, attrs, selfClose) => {
-            const fixed = attrs ? attrs.replace(/(\s+)([a-zA-Z_:][\w:.-]*)(?!\s*=)(?=\s|$)/g, '$1$2=""') : '';
-            const needsSelfClose = selfClose || VOID_ELEMENTS.test(tagName);
-            return `<${tagName}${fixed}${needsSelfClose ? ' /' : ''}>`;
-        });
+    let out = snippet.replace(TAG_PATTERN, (match, tagName, attrs, selfClose) => repairTag(tagName, attrs, selfClose));
     return repairCrossedTags(out);
 }
 
@@ -174,28 +204,28 @@ function scopeToArticleFields(xml) {
     );
 }
 
-// Bare-attribute repair, but for the WHOLE document instead of just
-// inside <description>/<content:encoded> (see scopeToArticleFields
-// above). GhanaWeb's feed was failing with "Attribute without value"
-// at column ~428 — well before the first <item>, i.e. up in the
-// <channel> metadata block, which scopeToArticleFields never touches
-// since it only repairs inside article-body fields. CDATA sections
-// are still protected here the same way scopeToArticleFields protects
-// them (swapped out for placeholders before the regex runs, restored
-// after) so an article body's raw embedded HTML is never touched by
-// this document-wide pass.
-function repairBareAttributesDocumentWide(xml) {
+// Same tag/attribute + crossed-tag repair as repairEmbeddedHtml above,
+// but for the WHOLE document instead of just inside
+// <description>/<content:encoded> (see scopeToArticleFields). ECG's
+// blog feed and GhanaWeb were both failing with structural errors
+// ("Unexpected close tag", originally "Attribute without value") well
+// before the first <item> — i.e. up in the <channel> metadata block,
+// which scopeToArticleFields never reaches since it only repairs
+// inside article-body fields. CDATA sections are still protected here
+// the same way scopeToArticleFields protects them (swapped out for
+// placeholders before either repair runs, restored after) so an
+// article body's raw embedded HTML is never touched by this
+// document-wide pass — only fixed later, narrowly, by
+// scopeToArticleFields itself.
+function repairXmlDocumentWide(xml) {
     const cdataBlocks = [];
     let out = xml.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, (m) => {
         cdataBlocks.push(m);
         return `\u0000CDATA${cdataBlocks.length - 1}\u0000`;
     });
 
-    out = out.replace(/<([a-zA-Z][\w:-]*)((?:\s+[a-zA-Z_:][\w:.-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'))?)*)\s*(\/?)\s*>/g,
-        (match, tagName, attrs, selfClose) => {
-            const fixed = attrs ? attrs.replace(/(\s+)([a-zA-Z_:][\w:.-]*)(?!\s*=)(?=\s|$)/g, '$1$2=""') : '';
-            return `<${tagName}${fixed}${selfClose ? ' /' : ''}>`;
-        });
+    out = out.replace(TAG_PATTERN, (match, tagName, attrs, selfClose) => repairTag(tagName, attrs, selfClose));
+    out = repairCrossedTags(out);
 
     return out.replace(/\u0000CDATA(\d+)\u0000/g, (_, i) => cdataBlocks[Number(i)]);
 }
@@ -208,7 +238,7 @@ function sanitizeFeedXml(xml) {
         return HTML_ENTITY_MAP[lower] !== undefined ? HTML_ENTITY_MAP[lower] : m;
     });
     out = out.replace(/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;');
-    out = repairBareAttributesDocumentWide(out);
+    out = repairXmlDocumentWide(out);
     out = scopeToArticleFields(out);
     return out;
 }
