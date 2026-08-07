@@ -1876,8 +1876,39 @@ module.exports = function initNewsSystem(app, deps) {
         }
     });
 
+    // FIX (bug: news randomly disappearing / old articles reappearing):
+    // this used to treat an empty/missing `ids` array as "delete
+    // EVERYTHING" — `NewsEvent.deleteMany({})` + `NewsArticle.deleteMany({})`
+    // with no blocklist entries recorded for any of it (that only
+    // happens in the ids.length branch above). Any call that reaches
+    // this route without a populated `ids` array — a frontend bug that
+    // sends `{ ids: [] }` when nothing's actually checked, a race
+    // between reading the checkbox state and firing the request, a
+    // retried request after a timeout, even a stray/test call — wiped
+    // every event and every raw article with no confirmation and no
+    // undo. The fetch cycle then rebuilds from scratch on its next run,
+    // which is exactly "old articles are the ones showing" from the
+    // user's perspective: nothing was blocklisted during a mass wipe
+    // (only the targeted-ids path records the blocklist), so stories
+    // already sitting in a source's RSS feed — including ones from
+    // days ago that Google News/WordPress feeds keep serving — get
+    // re-ingested as if brand new, while the events that actually
+    // existed a minute ago are just gone.
+    //
+    // Full-collection clear is still supported (the admin panel likely
+    // has a legitimate "clear everything" action), but now only fires
+    // on an explicit, unambiguous `confirmAll: true` in the body — never
+    // as the default behavior for "no ids provided."
     app.delete('/admin/news', verifyAdminToken, async (req, res) => {
         const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter(Boolean) : [];
+        const confirmAll = req.body?.confirmAll === true;
+
+        if (!ids.length && !confirmAll) {
+            return res.status(400).json({
+                error: 'No article/event ids provided. To clear all news, resend with { "confirmAll": true }.'
+            });
+        }
+
         try {
             if (ids.length) {
                 // Record every article being deleted in the permanent
