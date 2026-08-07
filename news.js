@@ -278,11 +278,29 @@ const GOOGLE_NEWS_QUERIES = [
     'load shedding Ghana'
 ];
 
-const NEWS_SOURCES = [
+// ECG's own official channel — deliberately kept OUT of NEWS_SOURCES
+// (the third-party outlet list below) and fetched via its own isolated
+// step in runNewsFetchCycleInner (see ECG_SOURCES loop). ECG's site is
+// the one source in this file that's actively bot-gated (Incapsula
+// captcha redirect) and the one most likely to need a fundamentally
+// different fetch mechanism later (a headless-browser fetch, e.g.
+// Playwright, to get past the JS challenge — see the per-source status
+// notes this file was fixed against). Keeping it structurally separate
+// means that whatever ECG's fetch step becomes, it can never affect
+// whether the rest of NEWS_SOURCES gets fetched this cycle — today
+// that's already true in practice (each source here has its own
+// try/catch), but a headless-browser fetch is a much heavier, more
+// failure-prone piece of machinery than a plain HTTP GET, so this scopes
+// the blast radius of anything that goes wrong with it to ECG alone,
+// both today and once that lands.
+const ECG_SOURCES = [
     // ECG's own site sits behind bot-detection on its main domain
     // (confirmed: Render's requests get a captcha-redirect stub back).
     // Its WordPress blog carries the same press releases and isn't
-    // behind that gate.
+    // behind that gate — though it too has recently started returning
+    // "Feed not recognized as RSS 1 or 2" (a bot-challenge interstitial
+    // instead of a 403), so this may end up needing the same
+    // headless-browser treatment as the site scrape below.
     {
         name: 'ECG',
         icon: '⚡',
@@ -290,6 +308,16 @@ const NEWS_SOURCES = [
         type: 'rss',
         url: 'https://ecg.com.gh/blog/feed/'
     },
+    {
+        name: 'ECG (site scrape)',
+        icon: '⚡',
+        official: true,
+        type: 'scrape-ecg',
+        url: 'https://ecg.com.gh/index.php/en/media-centre/news-events'
+    }
+];
+
+const NEWS_SOURCES = [
     { name: 'Citi News',           icon: '📰', official: false, type: 'rss', url: 'https://citinewsroom.com/feed/' },
     { name: 'MyJoyOnline',         icon: '📰', official: false, type: 'rss', url: 'https://www.myjoyonline.com/feed/' },
     { name: 'Graphic Online',      icon: '📰', official: false, type: 'rss', url: 'https://www.graphic.com.gh/news.feed?type=rss' },
@@ -323,14 +351,7 @@ const NEWS_SOURCES = [
     // Google News search feeds — see googleNewsUrl() above.
     ...GOOGLE_NEWS_QUERIES.map(q => ({
         name: 'Google News', icon: '🔎', official: false, type: 'google-news', url: googleNewsUrl(q), query: q
-    })),
-    {
-        name: 'ECG (site scrape)',
-        icon: '⚡',
-        official: true,
-        type: 'scrape-ecg',
-        url: 'https://ecg.com.gh/index.php/en/media-centre/news-events'
-    }
+    }))
 ];
 
 // ---- Relevance keyword allowlist -----------------------------
@@ -1573,10 +1594,28 @@ module.exports = function initNewsSystem(app, deps) {
         activeCycleQueue = cycleQueue;
 
         try {
+            // ECG's own official channel is fetched first and in complete
+            // isolation from the third-party outlet loop below — wrapped in
+            // its own try/catch on top of fetchRssSource's/scrapeEcgSite's
+            // existing internal handling, so nothing about ECG's fetch
+            // (today's blog-feed/site-scrape attempts, or a future
+            // headless-browser fetch) can ever stop NEWS_SOURCES from
+            // being fetched this cycle.
+            for (const source of ECG_SOURCES) {
+                let result;
+                try {
+                    if (source.type === 'rss') result = await fetchRssSource(source, knownKeys);
+                    else if (source.type === 'scrape-ecg') result = await scrapeEcgSite(source, knownKeys);
+                } catch (err) {
+                    console.error(`[news] ECG source "${source.name}" failed unexpectedly: ${err.message}`);
+                    result = { fetched: 0, stored: 0 };
+                }
+                stats.sources[source.name] = result || { fetched: 0, stored: 0 };
+            }
+
             for (const source of NEWS_SOURCES) {
                 let result;
                 if (source.type === 'rss' || source.type === 'google-news') result = await fetchRssSource(source, knownKeys);
-                else if (source.type === 'scrape-ecg') result = await scrapeEcgSite(source, knownKeys);
                 const label = source.query ? `${source.name} (${source.query})` : source.name;
                 stats.sources[label] = result || { fetched: 0, stored: 0 };
             }
@@ -1795,7 +1834,7 @@ module.exports = function initNewsSystem(app, deps) {
         const totalEvents = await NewsEvent.countDocuments();
         return res.json({
             totalArticles, totalEvents, lastFetchStats,
-            sources: NEWS_SOURCES.map(s => ({ name: s.name, url: s.url, type: s.type, query: s.query }))
+            sources: [...ECG_SOURCES, ...NEWS_SOURCES].map(s => ({ name: s.name, url: s.url, type: s.type, query: s.query }))
         });
     });
 
