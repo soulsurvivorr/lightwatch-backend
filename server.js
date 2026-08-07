@@ -2244,7 +2244,7 @@ app.post('/chats', async (req, res) => {
                     body: isPriorityMention
                         ? 'New reply in the community'
                         : 'New community activity',
-                    url: `/chat?${deepLinkParams.toString()}`,
+                    url: notificationUrl,
                     tag: isPriorityMention ? 'chat-reply' : 'chat-message',
                     requireInteraction: true,
                     vibrate: isPriorityMention ? [280, 120, 280] : [240, 120, 240],

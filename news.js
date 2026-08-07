@@ -58,10 +58,13 @@ const Parser = require('rss-parser');
 const cheerio = require('cheerio');
 
 // How long raw articles/events stick around before MongoDB auto-deletes
-// them (TTL indexes below). Users currently scroll back ~5 days into
-// history, so 14 days leaves real headroom past that instead of cutting
-// it close. Override with NEWS_RETENTION_DAYS on Render if needed.
-const NEWS_RETENTION_DAYS = Number(process.env.NEWS_RETENTION_DAYS) || 14;
+// them (TTL indexes below). 12 days = a week and 5 days — once an
+// article/event ages past that it's gone from the DB entirely, and
+// since GET /news is read straight from the DB (no separate delete
+// step needed), it disappears from every client's feed too, on their
+// next fetch/cache expiry. Override with NEWS_RETENTION_DAYS on Render
+// if needed.
+const NEWS_RETENTION_DAYS = Number(process.env.NEWS_RETENTION_DAYS) || 12;
 const NEWS_RETENTION_SECONDS = NEWS_RETENTION_DAYS * 24 * 60 * 60;
 
 const rssParser = new Parser({
@@ -1584,7 +1587,7 @@ module.exports = function initNewsSystem(app, deps) {
             // nationwide (any "dumsor"-keyword story — see
             // shouldBroadcastToAll) would permanently outrank newer,
             // non-nationwide events for as long as it stayed alive (up to
-            // the 14-day TTL, refreshed further by every corroborating
+            // the retention TTL, refreshed further by every corroborating
             // source). Once 30+ such events piled up, brand-new local
             // articles could never crack the top `limit` results at all —
             // they'd get fetched, stored, clustered, and even trigger a
