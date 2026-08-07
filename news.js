@@ -189,47 +189,56 @@ function repairTag(tagName, attrs, selfClose) {
     return `<${tagName}${fixedAttrs ? ' ' + fixedAttrs : ''}${needsSelfClose ? ' /' : ''}>`;
 }
 
-function repairEmbeddedHtml(snippet) {
-    let out = snippet.replace(TAG_PATTERN, (match, tagName, attrs, selfClose) => repairTag(tagName, attrs, selfClose));
-    return repairCrossedTags(out);
-}
-
-function scopeToArticleFields(xml) {
-    return xml.replace(
-        /(<(?:description|content:encoded)\b[^>]*>)([\s\S]*?)(<\/(?:description|content:encoded)>)/g,
-        (fullMatch, openTag, inner, closeTag) => {
-            if (inner.trimStart().startsWith('<![CDATA[')) return fullMatch;
-            return openTag + repairEmbeddedHtml(inner) + closeTag;
-        }
-    );
-}
-
-// Same tag/attribute + crossed-tag repair as repairEmbeddedHtml above,
-// but for the WHOLE document instead of just inside
-// <description>/<content:encoded> (see scopeToArticleFields). ECG's
-// blog feed and GhanaWeb were both failing with structural errors
-// ("Unexpected close tag", originally "Attribute without value") well
-// before the first <item> — i.e. up in the <channel> metadata block,
-// which scopeToArticleFields never reaches since it only repairs
-// inside article-body fields. CDATA sections are still protected here
-// the same way scopeToArticleFields protects them (swapped out for
-// placeholders before either repair runs, restored after) so an
-// article body's raw embedded HTML is never touched by this
-// document-wide pass — only fixed later, narrowly, by
-// scopeToArticleFields itself.
-function repairXmlDocumentWide(xml) {
+// Swaps every CDATA block out for a placeholder before `fn` runs, then
+// restores them afterward — used by both document-wide repair passes
+// below so neither one ever rewrites text inside a CDATA-wrapped
+// article body.
+function withCdataProtected(xml, fn) {
     const cdataBlocks = [];
     let out = xml.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, (m) => {
         cdataBlocks.push(m);
         return `\u0000CDATA${cdataBlocks.length - 1}\u0000`;
     });
 
-    out = out.replace(TAG_PATTERN, (match, tagName, attrs, selfClose) => repairTag(tagName, attrs, selfClose));
-    out = repairCrossedTags(out);
+    out = fn(out);
 
     return out.replace(/\u0000CDATA(\d+)\u0000/g, (_, i) => cdataBlocks[Number(i)]);
 }
 
+// STAGE 2 repair — bare/unquoted-attribute normalization only, applied
+// document-wide (CDATA-protected). This is what recovers Citi News's/
+// 3News's old "Invalid attribute name" failures (unquoted
+// `width=150`), wherever in the document they occur — including up in
+// <channel> metadata, not just inside article-body fields. Pure
+// attribute rewriting only; does NOT touch tag nesting, so it can't
+// desync on a stray unescaped "<" in ordinary text the way the
+// crossed-tag balancer below can.
+function normalizeXmlAttributesDocumentWide(xml) {
+    return withCdataProtected(xml, (out) =>
+        out.replace(TAG_PATTERN, (match, tagName, attrs, selfClose) => repairTag(tagName, attrs, selfClose))
+    );
+}
+
+// STAGE 3 repair — crossed/unclosed-tag balancer, applied document-wide
+// (CDATA-protected). This is the risky pass: it treats ANY unescaped
+// "<" in ordinary text content (a headline like "GH₵ price < last
+// month", or any other stray less-than sign a source never escaped) as
+// the start of a tag, which desyncs its open/close stack for
+// everything downstream. That's fine for a feed that's genuinely
+// broken this way (recovers ECG's/GhanaWeb's old "Unexpected close
+// tag" failures), but it MUST NOT run against feeds that already parse
+// cleanly — see fetchRssSource()'s staged retry below, which only
+// reaches this function after both the raw XML and the attribute-only
+// fix above have already failed to parse.
+function balanceCrossedTagsDocumentWide(xml) {
+    return withCdataProtected(xml, (out) => repairCrossedTags(out));
+}
+
+// Pure/safe entity fixes only — HTML entities rss-parser's underlying
+// XML parser doesn't know (&nbsp; etc.) and bare "&" that isn't already
+// part of a valid XML/numeric entity. Always safe to run unconditionally
+// since it never touches tag structure, so it stays applied to every
+// feed regardless of which (if any) repair stage below ends up needed.
 function sanitizeFeedXml(xml) {
     let out = String(xml || '');
     out = out.replace(/&([a-zA-Z][a-zA-Z0-9]{1,10});/g, (m, name) => {
@@ -238,8 +247,6 @@ function sanitizeFeedXml(xml) {
         return HTML_ENTITY_MAP[lower] !== undefined ? HTML_ENTITY_MAP[lower] : m;
     });
     out = out.replace(/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;');
-    out = repairXmlDocumentWide(out);
-    out = scopeToArticleFields(out);
     return out;
 }
 
@@ -1373,18 +1380,55 @@ module.exports = function initNewsSystem(app, deps) {
                 throw new Error(`HTTP ${res.status} (server: ${serverHeader})${snippet ? ` — body: "${snippet}"` : ''}`);
             }
             const rawXml = await res.text();
-            const sanitized = sanitizeFeedXml(rawXml);
+            // Entity-escaping only — pure and safe, always applied.
+            const escaped = sanitizeFeedXml(rawXml);
+
+            // Staged repair: try the cheapest/safest thing first and only
+            // escalate to riskier repairs if parsing still fails. Any feed
+            // that parsed cleanly before now succeeds at stage 1 and never
+            // touches stage 2/3, so previously-working sources (MyJoyOnline,
+            // Modern Ghana, 3News, Ghanaian Times, Google News queries, etc.)
+            // go back to parsing byte-for-byte unmodified.
+            let feed = null;
+            let lastParseErr = null;
+
+            // Stage 1 — raw (entity-escaped) XML, no structural repair.
             try {
-                const feed = await rssParser.parseString(sanitized);
+                feed = await rssParser.parseString(escaped);
+            } catch (err) {
+                lastParseErr = err;
+            }
+
+            // Stage 2 — bare/unquoted-attribute normalization only.
+            if (!feed) {
+                try {
+                    feed = await rssParser.parseString(normalizeXmlAttributesDocumentWide(escaped));
+                } catch (err) {
+                    lastParseErr = err;
+                }
+            }
+
+            // Stage 3 — last resort: crossed/unclosed-tag balancer on top
+            // of the attribute fix. Only reached once stages 1–2 both fail.
+            if (!feed) {
+                try {
+                    const attrFixed = normalizeXmlAttributesDocumentWide(escaped);
+                    feed = await rssParser.parseString(balanceCrossedTagsDocumentWide(attrFixed));
+                } catch (err) {
+                    lastParseErr = err;
+                }
+            }
+
+            if (feed) {
                 items = feed.items || [];
-            } catch (parseErr) {
-                // Sanitized XML STILL didn't parse — try the dumb regex
-                // fallback rather than losing this source's items outright.
+            } else {
+                // Every parse stage failed — try the dumb regex fallback
+                // rather than losing this source's items outright.
                 items = extractItemsWithRegex(rawXml);
                 if (items.length) {
-                    console.warn(`[news] ${source.name}: rss-parser rejected the feed (${parseErr.message}) — recovered ${items.length} item(s) via regex fallback instead.`);
+                    console.warn(`[news] ${source.name}: rss-parser rejected the feed (${lastParseErr && lastParseErr.message}) — recovered ${items.length} item(s) via regex fallback instead.`);
                 } else {
-                    throw parseErr; // fallback found nothing either — report the real error below
+                    throw lastParseErr || new Error('Unable to parse feed'); // fallback found nothing either — report the real error below
                 }
             }
         } catch (err) {
