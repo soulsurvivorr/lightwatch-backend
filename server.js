@@ -1833,14 +1833,14 @@ app.get('/chats', async (req, res) => {
         const since = req.query.since ? new Date(req.query.since) : null;
         const query = (since && !isNaN(since.getTime())) ? { ...filter, createdAt: { $gt: since } } : filter;
 
-        // If client requests the single top trending post across the
-        // matching scope/location, return an aggregated result that
-        // sums likes/reposts/quotes + reply count and sorts newest on ties.
+        // If client requests trending posts across the matching
+        // scope/location, return a ranked set that sums
+        // likes/reposts/quotes + reply count and sorts newest on ties.
         if (req.query.trending === '1') {
             try {
                 // Build an aggregation pipeline that computes reply counts
                 // per post and a total engagement score, then returns the
-                // top-scoring post (newest on tie).
+                // top posts (newest on ties).
                 const aggMatch = filter;
                 const pipeline = [
                     { $match: Object.assign({}, aggMatch, { isAdmin: { $ne: true } }) },
@@ -1857,7 +1857,7 @@ app.get('/chats', async (req, res) => {
                     { $addFields: { replyCount: { $ifNull: [ { $arrayElemAt: ['$repliesAgg.count', 0] }, 0 ] } } },
                     { $addFields: { totalEngagement: { $add: ['$baseScore', '$replyCount'] } } },
                     { $sort: { totalEngagement: -1, createdAt: -1 } },
-                    { $limit: 1 },
+                    { $limit: 6 },
                     { $project: { repliesAgg: 0 } }
                 ];
 
@@ -3001,6 +3001,35 @@ app.get('/lightstatus', async (req, res) => {
         });
     } catch (err) {
         return res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// GET /lightstatus/history?location=Bantama&days=7&limit=20
+// Returns only LightStatusEvent records for the requested area. Home uses
+// the complete history; the Locations page supplies a seven-day limit for
+// its compact per-area history panels.
+app.get('/lightstatus/history', async (req, res) => {
+    const location = req.query.location;
+    if (!location) return res.status(400).json({ error: 'location required' });
+    try {
+        const key = normalizeLocation(location).split(',')[0].trim();
+        const days = Math.max(0, parseInt(req.query.days, 10) || 0);
+        const limit = Math.max(0, parseInt(req.query.limit, 10) || 0);
+        const query = { locationKey: key };
+        if (days > 0) query.reportedAt = { $gte: new Date(Date.now() - days * 24 * 60 * 60 * 1000) };
+
+        let request = LightStatusEvent.find(query).sort({ reportedAt: -1 }).lean();
+        if (limit > 0) request = request.limit(Math.min(limit, 100));
+        const events = await request;
+        return res.json(events.map(event => ({
+            id: event._id,
+            status: event.status,
+            reportedAt: event.reportedAt,
+            source: event.reportedBy === 'anonymous' ? 'A volunteer' : (event.reportedBy || 'A volunteer')
+        })));
+    } catch (err) {
+        console.error('Light-status history error:', err.message);
+        return res.status(500).json({ error: 'Server error fetching status history' });
     }
 });
 
