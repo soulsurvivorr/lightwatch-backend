@@ -1579,8 +1579,21 @@ module.exports = function initNewsSystem(app, deps) {
         const query = andClauses.length ? { $and: andClauses } : {};
 
         try {
+            // Sort strictly by recency. isNationwide used to sort ahead of
+            // lastUpdatedAt here, which meant any event ever flagged
+            // nationwide (any "dumsor"-keyword story — see
+            // shouldBroadcastToAll) would permanently outrank newer,
+            // non-nationwide events for as long as it stayed alive (up to
+            // the 14-day TTL, refreshed further by every corroborating
+            // source). Once 30+ such events piled up, brand-new local
+            // articles could never crack the top `limit` results at all —
+            // they'd get fetched, stored, clustered, and even trigger a
+            // push notification (that path doesn't touch this query), but
+            // never actually reach the frontend feed. isNationwide is still
+            // returned in the response body below for the UI to badge —
+            // it just no longer overrides recency in the ordering/limit.
             const events = await NewsEvent.find(query)
-                .sort({ isNationwide: -1, lastUpdatedAt: -1 })
+                .sort({ lastUpdatedAt: -1 })
                 .limit(limit)
                 .lean();
 
