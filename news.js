@@ -57,6 +57,24 @@
 const Parser = require('rss-parser');
 const cheerio = require('cheerio');
 
+// Outbound request identity, shared by fetchRssSource() and
+// scrapeEcgSite() below. Previously each fetch sent a plain
+// 'LightWatchNewsBot/1.0' User-Agent with no Accept/Accept-Language —
+// an honest bot signature that's exactly what a WAF/bot-detection rule
+// keys on. ECG's blog, Citi News, and Ghana Business News are all now
+// returning a flat HTTP 403 (confirmed via server logs) where they
+// weren't before. Presenting as a normal desktop browser is the
+// standard low-risk fix for this class of block; it won't help if a
+// site has escalated to a full JS-executing challenge (Cloudflare
+// "Under Attack" mode etc.) rather than simple UA/header sniffing —
+// if a source still 403s after this change, that's the likely reason,
+// and there's no header-only fix for it.
+const OUTBOUND_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept': 'application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, text/html;q=0.7, */*;q=0.5',
+    'Accept-Language': 'en-US,en;q=0.9'
+};
+
 // How long raw articles/events stick around before MongoDB auto-deletes
 // them (TTL indexes below). 12 days = a week and 5 days — once an
 // article/event ages past that it's gone from the DB entirely, and
@@ -69,7 +87,7 @@ const NEWS_RETENTION_SECONDS = NEWS_RETENTION_DAYS * 24 * 60 * 60;
 
 const rssParser = new Parser({
     timeout: 15000,
-    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0; +https://lightwatch-backend-lightwatch-backend.up.railway.app)' },
+    headers: OUTBOUND_HEADERS,
     // Without this, rss-parser silently drops <media:content> and
     // <media:thumbnail> — the tags WordPress/Yoast-based outlets (Adom
     // Online, and most of what Google News surfaces) use to carry their
@@ -156,6 +174,32 @@ function scopeToArticleFields(xml) {
     );
 }
 
+// Bare-attribute repair, but for the WHOLE document instead of just
+// inside <description>/<content:encoded> (see scopeToArticleFields
+// above). GhanaWeb's feed was failing with "Attribute without value"
+// at column ~428 — well before the first <item>, i.e. up in the
+// <channel> metadata block, which scopeToArticleFields never touches
+// since it only repairs inside article-body fields. CDATA sections
+// are still protected here the same way scopeToArticleFields protects
+// them (swapped out for placeholders before the regex runs, restored
+// after) so an article body's raw embedded HTML is never touched by
+// this document-wide pass.
+function repairBareAttributesDocumentWide(xml) {
+    const cdataBlocks = [];
+    let out = xml.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, (m) => {
+        cdataBlocks.push(m);
+        return `\u0000CDATA${cdataBlocks.length - 1}\u0000`;
+    });
+
+    out = out.replace(/<([a-zA-Z][\w:-]*)((?:\s+[a-zA-Z_:][\w:.-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'))?)*)\s*(\/?)\s*>/g,
+        (match, tagName, attrs, selfClose) => {
+            const fixed = attrs ? attrs.replace(/(\s+)([a-zA-Z_:][\w:.-]*)(?!\s*=)(?=\s|$)/g, '$1$2=""') : '';
+            return `<${tagName}${fixed}${selfClose ? ' /' : ''}>`;
+        });
+
+    return out.replace(/\u0000CDATA(\d+)\u0000/g, (_, i) => cdataBlocks[Number(i)]);
+}
+
 function sanitizeFeedXml(xml) {
     let out = String(xml || '');
     out = out.replace(/&([a-zA-Z][a-zA-Z0-9]{1,10});/g, (m, name) => {
@@ -164,6 +208,7 @@ function sanitizeFeedXml(xml) {
         return HTML_ENTITY_MAP[lower] !== undefined ? HTML_ENTITY_MAP[lower] : m;
     });
     out = out.replace(/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;');
+    out = repairBareAttributesDocumentWide(out);
     out = scopeToArticleFields(out);
     return out;
 }
@@ -572,7 +617,7 @@ async function scrapeOgImage(url, debugInfo) {
         const res = await fetch(url, {
             redirect: 'follow',
             signal: controller.signal,
-            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0)' }
+            headers: OUTBOUND_HEADERS
         });
         if (!res.ok) { setReason('http-error', res.status); return null; }
         // If the redirect never actually left Google (res.url is still
@@ -1286,12 +1331,17 @@ module.exports = function initNewsSystem(app, deps) {
             try {
                 res = await fetch(source.url, {
                     signal: controller.signal,
-                    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0)' }
+                    headers: OUTBOUND_HEADERS
                 });
             } finally {
                 clearTimeout(timeout);
             }
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            if (!res.ok) {
+                const serverHeader = res.headers.get('server') || 'unknown';
+                let snippet = '';
+                try { snippet = (await res.text()).slice(0, 200).replace(/\s+/g, ' ').trim(); } catch {}
+                throw new Error(`HTTP ${res.status} (server: ${serverHeader})${snippet ? ` — body: "${snippet}"` : ''}`);
+            }
             const rawXml = await res.text();
             const sanitized = sanitizeFeedXml(rawXml);
             try {
@@ -1357,12 +1407,17 @@ module.exports = function initNewsSystem(app, deps) {
             try {
                 res = await fetch(source.url, {
                     signal: controller.signal,
-                    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LightWatchNewsBot/1.0)' }
+                    headers: OUTBOUND_HEADERS
                 });
             } finally {
                 clearTimeout(timeout);
             }
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            if (!res.ok) {
+                const serverHeader = res.headers.get('server') || 'unknown';
+                let snippet = '';
+                try { snippet = (await res.text()).slice(0, 200).replace(/\s+/g, ' ').trim(); } catch {}
+                throw new Error(`HTTP ${res.status} (server: ${serverHeader})${snippet ? ` — body: "${snippet}"` : ''}`);
+            }
             html = await res.text();
         } catch (err) {
             console.error(`[news] ECG site fetch FAILED (${source.url}): ${err.message}`);
