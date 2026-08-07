@@ -3418,7 +3418,7 @@ async function sendFcmToOne(sub, notification) {
     else if (notification.tone === 'power-off') soundResource = 'lw_power_off';
     else if (notification.tone === 'chat') soundResource = 'lw_chat';
     else if (notification.tone === 'news') soundResource = 'lw_news';
-    const channelId = soundResource; // channel IDs in MainActivity.java match these 1:1
+    const channelId = `${soundResource}_v2`; // v2 recreates channels whose old sound may have been silent
 
     const vibrateTimings = Array.isArray(notification.vibrate)
         ? notification.vibrate.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n >= 0)
