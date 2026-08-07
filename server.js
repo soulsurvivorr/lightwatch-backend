@@ -367,6 +367,7 @@ const userSchema = new mongoose.Schema({
     chatHandle: { type: String },
     // Optional uploaded avatar image (data URL) used as profile photo.
     avatarImage: { type: String, default: null },
+    favoriteLocationKeys: { type: [String], default: [] },
     // Optional second monitored location (e.g. "Work") — separate from the
     // primary signup region/city above, which stays the account's home base.
     secondaryLocation: {
@@ -515,6 +516,7 @@ const pushSubscriptionSchema = new mongoose.Schema({
     // POST /lightstatus handler whenever a location's status flips.
     secondaryLocationKey:   { type: String, default: null },
     secondaryLocationLabel: { type: String, default: null },
+    favoriteLocationKeys: { type: [String], default: [] },
     // 'web'     — browser/PWA subscriber, delivered via web-push (VAPID).
     // 'android' — native app subscriber, delivered via FCM.
     // Kept in the SAME collection (rather than a separate one) so every
@@ -3531,7 +3533,9 @@ async function applyLightStatusUpdate(rawLocation, status, { userId = null, repo
                 tone: status === 'on' ? 'power-on' : 'power-off'
             };
 
-            const subscribers = await PushSubscription.find({ location: key }).lean();
+            const subscribers = await PushSubscription.find({
+                $or: [{ location: key }, { favoriteLocationKeys: key }]
+            }).lean();
             console.log(`Sending push to ${subscribers.length} subscriber(s) at ${key}`);
             sendPushToSubscribers(subscribers, payload);
 
@@ -3723,6 +3727,7 @@ app.post('/subscribe', async (req, res) => {
 
     try {
         const locationKey = normalizeLocation(location).split(',')[0].trim();
+        const user = await User.findById(userId).select('favoriteLocationKeys').lean();
 
         await PushSubscription.findOneAndUpdate(
             { 'subscription.endpoint': subscription.endpoint },
@@ -3731,6 +3736,7 @@ app.post('/subscribe', async (req, res) => {
                 location: locationKey,
                 platform: 'web',
                 subscription,
+                favoriteLocationKeys: user?.favoriteLocationKeys || [],
                 $setOnInsert: { muteGlobalChat: false }
             },
             { upsert: true, new: true }
@@ -3757,6 +3763,7 @@ app.post('/subscribe/fcm', async (req, res) => {
 
     try {
         const locationKey = normalizeLocation(location).split(',')[0].trim();
+        const user = await User.findById(userId).select('favoriteLocationKeys').lean();
 
         await PushSubscription.findOneAndUpdate(
             { fcmToken },
@@ -3765,6 +3772,7 @@ app.post('/subscribe/fcm', async (req, res) => {
                 location: locationKey,
                 platform: 'android',
                 fcmToken,
+                favoriteLocationKeys: user?.favoriteLocationKeys || [],
                 $setOnInsert: { muteGlobalChat: false }
             },
             { upsert: true, new: true }
@@ -4283,5 +4291,23 @@ app.post('/admin/broadcast', verifyAdminToken, async (req, res) => {
     } catch (err) {
         console.error('Admin broadcast route error:', err.message);
         return res.status(500).json({ error: 'Server error sending broadcast' });
+    }
+});
+
+app.patch('/subscribe/favorites', async (req, res) => {
+    const { userId, location, favorite } = req.body || {};
+    if (!userId || !location || typeof favorite !== 'boolean') {
+        return res.status(400).json({ error: 'userId, location, and favorite are required' });
+    }
+    try {
+        const key = normalizeLocation(location).split(',')[0].trim();
+        const userUpdate = favorite ? { $addToSet: { favoriteLocationKeys: key } } : { $pull: { favoriteLocationKeys: key } };
+        await User.findByIdAndUpdate(userId, userUpdate);
+        const subscriptionUpdate = favorite ? { $addToSet: { favoriteLocationKeys: key } } : { $pull: { favoriteLocationKeys: key } };
+        await PushSubscription.updateMany({ userId }, subscriptionUpdate);
+        return res.json({ success: true, locationKey: key, favorite });
+    } catch (err) {
+        console.error('Favorite location preference error:', err.message);
+        return res.status(500).json({ error: 'Could not save favorite location' });
     }
 });
