@@ -1607,15 +1607,28 @@ module.exports = function initNewsSystem(app, deps) {
     // endpoint's challenge appears to need more time to self-resolve, so
     // fetchRssViaHeadless (below) opts into the longer second wait;
     // this stays 0 (unchanged) for every other caller.
-    async function fetchRenderedHtml(url, { waitMs = 4000, timeoutMs = 20000, extraWaitOnChallengeMs = 0 } = {}) {
+    // acceptHeader: lets a caller ask for XML instead of the default
+    // browser Accept (text/html,...) that Playwright sends on real page
+    // navigation. Citi News' CDN was found to redirect /feed/ to the
+    // site's homepage specifically when it sees an HTML-navigation
+    // Accept header — same signal a real browser tab sends, different
+    // from what a feed reader sends (see OUTBOUND_HEADERS' Accept, used
+    // by the plain fetch() path). Passing that same value here through
+    // fetchRssViaHeadless below asks their edge for the feed, not a
+    // browser page, while still executing JS so the bot-challenge itself
+    // can resolve. Left undefined (unchanged) for every other caller —
+    // ECG's site scrape wants a real HTML page, not XML.
+    async function fetchRenderedHtml(url, { waitMs = 4000, timeoutMs = 20000, extraWaitOnChallengeMs = 0, acceptHeader = null } = {}) {
         const browser = await getSharedBrowser();
         if (!browser) return null;
 
         let context;
         try {
+            const extraHTTPHeaders = { 'Accept-Language': OUTBOUND_HEADERS['Accept-Language'] };
+            if (acceptHeader) extraHTTPHeaders['Accept'] = acceptHeader;
             context = await browser.newContext({
                 userAgent: OUTBOUND_HEADERS['User-Agent'],
-                extraHTTPHeaders: { 'Accept-Language': OUTBOUND_HEADERS['Accept-Language'] }
+                extraHTTPHeaders
             });
             const page = await context.newPage();
             console.log(`[news] [headless] Navigating to ${url} ...`);
@@ -1661,15 +1674,39 @@ module.exports = function initNewsSystem(app, deps) {
     async function fetchRssViaHeadless(source, knownKeys) {
         let items = [];
         try {
-            const rendered = await fetchRenderedHtml(source.url, { extraWaitOnChallengeMs: 8000 });
+            const rendered = await fetchRenderedHtml(source.url, {
+                extraWaitOnChallengeMs: 8000,
+                acceptHeader: OUTBOUND_HEADERS['Accept']
+            });
             if (!rendered) throw new Error('Headless browser unavailable or render failed — see [headless] logs above.');
             if (rendered.stillChallenged) throw new Error(`Still on a challenge/captcha page after render (landed on ${rendered.finalUrl}).`);
+
             // A rendered XML document usually lands inside the browser's
             // built-in XML viewer, which Chromium wraps in its own HTML
             // shell — pull the raw text back out rather than trying to
             // parse that shell as if it were the feed itself.
             const $ = cheerio.load(rendered.html);
             const rawXml = ($('pre').first().text() || rendered.html).trim();
+
+            // Some sites' edge/WAF (Citi News confirmed) redirects the
+            // feed URL to an unrelated page — the homepage, not a
+            // challenge — once it decides the request came from a real
+            // browser rather than a feed reader, regardless of Accept
+            // header. That's not a bot-challenge (stillChallenged above
+            // won't catch it) and it's not XML either, so feeding it into
+            // parseFeedXmlStaged just produces a confusing raw XML-parser
+            // stack trace ("Invalid character in tag name") instead of a
+            // clear explanation. Catch both signals of that case up front:
+            // landing somewhere other than the feed URL, or content that
+            // plainly starts with an HTML document rather than XML.
+            const finalPath = (() => { try { return new URL(rendered.finalUrl).pathname; } catch { return rendered.finalUrl; } })();
+            const requestedPath = (() => { try { return new URL(source.url).pathname; } catch { return source.url; } })();
+            const redirectedAway = finalPath !== requestedPath;
+            const looksLikeHtml = /^\s*<!doctype html/i.test(rawXml) || /^\s*<html[\s>]/i.test(rawXml);
+            if (redirectedAway || looksLikeHtml) {
+                throw new Error(`Redirected away from the feed to a non-feed page instead of a bot-challenge (landed on ${rendered.finalUrl}) — the site is serving its homepage/HTML instead of XML to this request.`);
+            }
+
             items = await parseFeedXmlStaged(rawXml, source.name);
         } catch (err) {
             console.error(`[news] RSS fetch FAILED for ${source.name} (${source.url}): ${err.message}`);

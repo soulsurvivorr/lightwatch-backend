@@ -625,6 +625,24 @@ console.log("MY SERVER FILE IS RUNNING");
 // APP / MIDDLEWARE
 const app = express();
 
+// Simple Server-Sent Events (SSE) clients for live location updates
+const sseClients = new Set();
+
+function sendSseEvent(res, event, data) {
+    try {
+        if (event) res.write(`event: ${event}\n`);
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+    } catch (err) {
+        // ignore write errors (client closed)
+    }
+}
+
+function broadcastSse(event, data) {
+    for (const res of sseClients) {
+        sendSseEvent(res, event, data);
+    }
+}
+
 // compression() gzips every JSON/text response before it goes over the
 // wire. This is the single biggest easy win for a JSON API — chat/report/
 // news list payloads compress especially well. Placed first so it wraps
@@ -3072,72 +3090,97 @@ app.get('/areas/known', async (req, res) => {
 // locations" set as /areas/known, but with the extra fields the map
 // needs (and unlike /areas/known, this always returns a plottable
 // position for every entry — see resolveLocationCoords()).
+async function getLocationsMapData() {
+    const [users, statuses] = await Promise.all([
+        User.find().select('city region lat lng secondaryLocation').lean(),
+        LightStatus.find().lean()
+    ]);
+
+    const statusByKey = new Map(statuses.map(s => [s.locationKey, s]));
+    const keys = new Set(statusByKey.keys());
+    const metaByKey = new Map();
+    const addKeyMeta = (rawCity, rawRegion, rawLat, rawLng) => {
+        const key = normalizeLocation(rawCity).split(',')[0].trim();
+        if (!key || key === 'global') return;
+        keys.add(key);
+        const existing = metaByKey.get(key);
+        if (!existing) {
+            metaByKey.set(key, { label: titleCaseLocation(rawCity), region: rawRegion || null, lat: rawLat ?? null, lng: rawLng ?? null });
+        } else if ((existing.lat == null || existing.lng == null) && rawLat != null && rawLng != null) {
+            existing.lat = rawLat;
+            existing.lng = rawLng;
+        }
+    };
+    users.forEach(u => {
+        addKeyMeta(u.city, u.region, u.lat, u.lng);
+        if (u.secondaryLocation?.city) addKeyMeta(u.secondaryLocation.city, u.secondaryLocation.region, null, null);
+    });
+
+    const locations = await Promise.all(Array.from(keys).map(async (key) => {
+        const record = statusByKey.get(key) || null;
+        const meta = metaByKey.get(key) || null;
+        const stats = await getLightStatusStats(key);
+        const storedLat = record?.lat ?? meta?.lat ?? null;
+        const storedLng = record?.lng ?? meta?.lng ?? null;
+        const coords = await resolveLocationCoords(key, storedLat, storedLng, meta?.label, meta?.region);
+        const reportedAt = record?.reportedAt || null;
+        const minutesAgo = reportedAt ? Math.max(0, Math.round((Date.now() - new Date(reportedAt).getTime()) / 60000)) : null;
+
+        return {
+            name: titleCaseLocation(key),
+            locationKey: key,
+            lat: coords.lat,
+            lng: coords.lng,
+            coordsApproximate: coords.approximate,
+            status: record?.status || 'unknown',
+            reportedAt,
+            minutesAgo,
+            confirmations: stats.uniqueContributors,
+            totalChecks: stats.totalChecks,
+            confidence: stats.sourceConfidence
+        };
+    }));
+
+    locations.sort((a, b) => a.name.localeCompare(b.name));
+    return { locations };
+}
+
 app.get('/locations/map', async (req, res) => {
     try {
-        const [users, statuses] = await Promise.all([
-            User.find().select('city region lat lng secondaryLocation').lean(),
-            LightStatus.find().lean()
-        ]);
-
-        const statusByKey = new Map(statuses.map(s => [s.locationKey, s]));
-        const keys = new Set(statusByKey.keys());
-        // key -> { label, region, lat, lng } — carries the real place name +
-        // region through to geocoding below (so Nominatim gets "Aputuogya,
-        // Ashanti, Ghana" instead of just the bare, possibly ambiguous town
-        // name), and a user-picker-confirmed lat/lng when one exists, so a
-        // real position always wins over guessing.
-        const metaByKey = new Map();
-        const addKeyMeta = (rawCity, rawRegion, rawLat, rawLng) => {
-            const key = normalizeLocation(rawCity).split(',')[0].trim();
-            if (!key || key === 'global') return;
-            keys.add(key);
-            const existing = metaByKey.get(key);
-            if (!existing) {
-                metaByKey.set(key, { label: titleCaseLocation(rawCity), region: rawRegion || null, lat: rawLat ?? null, lng: rawLng ?? null });
-            } else if ((existing.lat == null || existing.lng == null) && rawLat != null && rawLng != null) {
-                // First entry for this key had no confirmed position (e.g. it
-                // came in via secondaryLocation, which has none) — a later
-                // user with a real picked fix for the same key fills it in.
-                existing.lat = rawLat;
-                existing.lng = rawLng;
-            }
-        };
-        users.forEach(u => {
-            addKeyMeta(u.city, u.region, u.lat, u.lng);
-            if (u.secondaryLocation?.city) addKeyMeta(u.secondaryLocation.city, u.secondaryLocation.region, null, null);
-        });
-
-        const locations = await Promise.all(Array.from(keys).map(async (key) => {
-            const record = statusByKey.get(key) || null;
-            const meta = metaByKey.get(key) || null;
-            const stats = await getLightStatusStats(key);
-            const storedLat = record?.lat ?? meta?.lat ?? null;
-            const storedLng = record?.lng ?? meta?.lng ?? null;
-            const coords = await resolveLocationCoords(key, storedLat, storedLng, meta?.label, meta?.region);
-            const reportedAt = record?.reportedAt || null;
-            const minutesAgo = reportedAt ? Math.max(0, Math.round((Date.now() - new Date(reportedAt).getTime()) / 60000)) : null;
-
-            return {
-                name: titleCaseLocation(key),
-                locationKey: key,
-                lat: coords.lat,
-                lng: coords.lng,
-                coordsApproximate: coords.approximate,
-                status: record?.status || 'unknown',
-                reportedAt,
-                minutesAgo,
-                confirmations: stats.uniqueContributors,
-                totalChecks: stats.totalChecks,
-                confidence: stats.sourceConfidence
-            };
-        }));
-
-        locations.sort((a, b) => a.name.localeCompare(b.name));
-        return res.json({ locations });
+        const data = await getLocationsMapData();
+        return res.json(data);
     } catch (err) {
         console.error('Locations-map lookup error:', err.message);
         return res.status(500).json({ error: 'Server error' });
     }
+});
+
+// SSE endpoint for live location updates (single-location incremental updates)
+app.get('/locations/stream', async (req, res) => {
+    // Headers for SSE
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders && res.flushHeaders();
+
+    // Add to clients set
+    sseClients.add(res);
+
+    // Send a comment to keep the connection alive in some proxies
+    res.write(': connected\n\n');
+
+    // Send initial full snapshot
+    try {
+        const data = await getLocationsMapData();
+        sendSseEvent(res, 'locations', data.locations);
+    } catch (err) {
+        sendSseEvent(res, 'error', { message: 'Could not load initial locations' });
+    }
+
+    // Remove client on close
+    req.on('close', () => {
+        sseClients.delete(res);
+    });
 });
 
 app.get('/reports', async (req, res) => {
@@ -3564,8 +3607,28 @@ async function applyLightStatusUpdate(rawLocation, status, { userId = null, repo
                 const secondarySubscribers = await PushSubscription.find({ secondaryLocationKey: key }).lean();
                 console.log(`Sending secondary-location push to ${secondarySubscribers.length} subscriber(s) watching ${key}`);
 
-                sendPushToSubscribers(secondarySubscribers, secondaryPayload);
-            }
+                    sendPushToSubscribers(secondarySubscribers, secondaryPayload);
+                }
+
+                // Broadcast a lightweight SSE update for live map clients
+                try {
+                    const stats = await getLightStatusStats(key);
+                    const payload = {
+                        name: keyTitle,
+                        locationKey: key,
+                        lat: record?.lat ?? null,
+                        lng: record?.lng ?? null,
+                        coordsApproximate: !(record?.lat && record?.lng),
+                        status: record?.status || 'unknown',
+                        reportedAt: record?.reportedAt || null,
+                        confirmations: stats.uniqueContributors,
+                        totalChecks: stats.totalChecks,
+                        confidence: stats.sourceConfidence
+                    };
+                    broadcastSse('location:update', payload);
+                } catch (sseErr) {
+                    console.error('SSE broadcast error:', sseErr.message);
+                }
         } catch (err) {
             console.error('Light-status notification error:', err.message);
         }
@@ -3979,8 +4042,16 @@ app.patch('/user/:id/profile', async (req, res) => {
                 try {
                     user.avatarImage = await uploadImageToCloudinary(normalizedAvatar, 'lightwatch/avatars');
                 } catch (uploadErr) {
-                    console.error('Cloudinary avatar upload error:', uploadErr.message);
-                    return res.status(502).json({ error: 'Could not upload avatar, please try again' });
+                    // Fallback: if Cloudinary isn't configured or the upload
+                    // fails, persist the validated data URL directly into
+                    // MongoDB so avatars still stick during local/dev runs.
+                    console.warn('Cloudinary avatar upload failed, falling back to saving data URL in DB:', uploadErr.message);
+                    try {
+                        user.avatarImage = normalizedAvatar; // store base64 data URL as fallback
+                    } catch (dbErr) {
+                        console.error('Failed to save fallback avatar data URL:', dbErr.message);
+                        return res.status(502).json({ error: 'Could not save avatar, please try again' });
+                    }
                 }
             } else {
                 // req.body.avatarImage was explicitly null/empty — clears the avatar.
