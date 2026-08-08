@@ -829,7 +829,12 @@ function isValidHandle(handle) {
 function sanitizeAvatarImageDataUrl(raw) {
     const value = String(raw || '').trim();
     if (!value) return null;
-    if (!/^data:image\/(png|jpe?g|webp);base64,/i.test(value)) return null;
+    // Matches sanitizeMediaDataUrl below — heic/heif is the default format
+    // iPhone's camera/photo picker hands over, so avatars need to accept it
+    // too or every iOS upload gets silently rejected by the server while
+    // the client's own validation (file.type.startsWith('image/')) lets it
+    // through and optimistically previews it anyway.
+    if (!/^data:image\/(png|jpe?g|webp|heic|heif);base64,/i.test(value)) return null;
     // Allow commonly-sized profile photos while still rejecting very large
     // payloads before they ever hit Cloudinary.
     if (value.length > 4_000_000) return null;
