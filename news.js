@@ -335,10 +335,17 @@ const ECG_SOURCES = [
 ];
 
 const NEWS_SOURCES = [
-    { name: 'Citi News',           icon: '📰', official: false, type: 'rss', url: 'https://citinewsroom.com/feed/' },
+    // Both confirmed bot-gated (serving an HTML challenge page instead
+    // of real XML to a plain fetch() — see fetchRssSource's "Response
+    // was an HTML page, not an XML feed" error for these two specifically).
+    // The desktop-browser headers in OUTBOUND_HEADERS weren't enough on
+    // their own, so these route through the same headless-browser render
+    // ECG's blog feed already uses (fetchRssViaHeadless) instead of the
+    // plain fetch() path every other source below still uses.
+    { name: 'Citi News',           icon: '📰', official: false, type: 'rss-headless', url: 'https://citinewsroom.com/feed/' },
     { name: 'MyJoyOnline',         icon: '📰', official: false, type: 'rss', url: 'https://www.myjoyonline.com/feed/' },
     { name: 'Graphic Online',      icon: '📰', official: false, type: 'rss', url: 'https://www.graphic.com.gh/news.feed?type=rss' },
-    { name: 'GhanaWeb',            icon: '📰', official: false, type: 'rss', url: 'https://www.ghanaweb.com/GhanaHomePage/NewsArchive/rss.xml' },
+    { name: 'GhanaWeb',            icon: '📰', official: false, type: 'rss-headless', url: 'https://www.ghanaweb.com/GhanaHomePage/NewsArchive/rss.xml' },
     { name: 'Modern Ghana',        icon: '📰', official: false, type: 'rss', url: 'https://rss.modernghana.com/news.xml' },
     { name: 'AdomOnline',          icon: '📰', official: false, type: 'rss', url: 'https://www.adomonline.com/feed' },
     { name: 'Ghana Business News', icon: '📰', official: false, type: 'rss', url: 'https://www.ghanabusinessnews.com/feed/' },
@@ -1598,7 +1605,7 @@ module.exports = function initNewsSystem(app, deps) {
     // just `waitMs`, but its blog feed (/blog/feed/) has been observed
     // still sitting on the sgcaptcha redirect after the same wait — that
     // endpoint's challenge appears to need more time to self-resolve, so
-    // fetchEcgBlogFeedHeadless (below) opts into the longer second wait;
+    // fetchRssViaHeadless (below) opts into the longer second wait;
     // this stays 0 (unchanged) for every other caller.
     async function fetchRenderedHtml(url, { waitMs = 4000, timeoutMs = 20000, extraWaitOnChallengeMs = 0 } = {}) {
         const browser = await getSharedBrowser();
@@ -1639,12 +1646,19 @@ module.exports = function initNewsSystem(app, deps) {
         }
     }
 
-    // ECG's blog feed, fetched through the headless browser instead of
-    // plain fetch() so the bot-challenge it now serves gets a chance to
-    // resolve before the response is read. Reuses the exact same
-    // staged XML repair/parse pipeline as every other RSS source
-    // (parseFeedXmlStaged) once it has real feed text in hand.
-    async function fetchEcgBlogFeedHeadless(source, knownKeys) {
+    // Fetches an RSS feed through the headless browser instead of plain
+    // fetch() so a bot-challenge (Incapsula/Cloudflare-style JS
+    // interstitial) gets a chance to resolve before the response is
+    // read. Originally written for ECG's blog feed specifically, but
+    // nothing in here is ECG-specific — it just renders `source.url` and
+    // feeds whatever comes back into the same staged XML repair/parse
+    // pipeline every other RSS source uses (parseFeedXmlStaged). Reused
+    // below for any source whose plain fetch() is bot-gated (see
+    // 'rss-headless' type in NEWS_SOURCES) — currently Citi News and
+    // GhanaWeb, both of which serve an HTML challenge page instead of
+    // real XML to a plain fetch() (confirmed via the "Response was an
+    // HTML page, not an XML feed" error fetchRssSource logs for them).
+    async function fetchRssViaHeadless(source, knownKeys) {
         let items = [];
         try {
             const rendered = await fetchRenderedHtml(source.url, { extraWaitOnChallengeMs: 8000 });
@@ -1903,7 +1917,7 @@ module.exports = function initNewsSystem(app, deps) {
             for (const source of ECG_SOURCES) {
                 let result;
                 try {
-                    if (source.type === 'rss') result = await fetchEcgBlogFeedHeadless(source, knownKeys);
+                    if (source.type === 'rss') result = await fetchRssViaHeadless(source, knownKeys);
                     else if (source.type === 'scrape-ecg') result = await scrapeEcgSite(source, knownKeys);
                 } catch (err) {
                     console.error(`[news] ECG source "${source.name}" failed unexpectedly: ${err.message}`);
@@ -1915,6 +1929,7 @@ module.exports = function initNewsSystem(app, deps) {
             for (const source of NEWS_SOURCES) {
                 let result;
                 if (source.type === 'rss' || source.type === 'google-news') result = await fetchRssSource(source, knownKeys);
+                else if (source.type === 'rss-headless') result = await fetchRssViaHeadless(source, knownKeys);
                 const label = source.query ? `${source.name} (${source.query})` : source.name;
                 stats.sources[label] = result || { fetched: 0, stored: 0 };
             }
