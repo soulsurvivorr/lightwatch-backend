@@ -1371,6 +1371,57 @@ module.exports = function initNewsSystem(app, deps) {
     }
 
     // ---- Fetchers -----------------------------------------------
+    // Staged XML→items parsing, shared by fetchRssSource (plain fetch)
+    // and the headless-browser ECG blog fetch below — same three-stage
+    // repair escalation either way, just fed by a different transport.
+    // Throws if every stage (including the regex fallback) comes up
+    // empty; callers decide how to report that.
+    async function parseFeedXmlStaged(rawXml, sourceLabel) {
+        // Entity-escaping only — pure and safe, always applied.
+        const escaped = sanitizeFeedXml(rawXml);
+
+        let feed = null;
+        let lastParseErr = null;
+
+        // Stage 1 — raw (entity-escaped) XML, no structural repair.
+        try {
+            feed = await rssParser.parseString(escaped);
+        } catch (err) {
+            lastParseErr = err;
+        }
+
+        // Stage 2 — bare/unquoted-attribute normalization only.
+        if (!feed) {
+            try {
+                feed = await rssParser.parseString(normalizeXmlAttributesDocumentWide(escaped));
+            } catch (err) {
+                lastParseErr = err;
+            }
+        }
+
+        // Stage 3 — last resort: crossed/unclosed-tag balancer on top
+        // of the attribute fix. Only reached once stages 1–2 both fail.
+        if (!feed) {
+            try {
+                const attrFixed = normalizeXmlAttributesDocumentWide(escaped);
+                feed = await rssParser.parseString(balanceCrossedTagsDocumentWide(attrFixed));
+            } catch (err) {
+                lastParseErr = err;
+            }
+        }
+
+        if (feed) return feed.items || [];
+
+        // Every parse stage failed — try the dumb regex fallback rather
+        // than losing this source's items outright.
+        const items = extractItemsWithRegex(rawXml);
+        if (items.length) {
+            console.warn(`[news] ${sourceLabel}: rss-parser rejected the feed (${lastParseErr && lastParseErr.message}) — recovered ${items.length} item(s) via regex fallback instead.`);
+            return items;
+        }
+        throw lastParseErr || new Error('Unable to parse feed'); // fallback found nothing either — let the caller report the real error
+    }
+
     async function fetchRssSource(source, knownKeys) {
         let items = [];
         try {
@@ -1401,57 +1452,7 @@ module.exports = function initNewsSystem(app, deps) {
                 throw new Error(`HTTP ${res.status} (server: ${serverHeader})${snippet ? ` — body: "${snippet}"` : ''}`);
             }
             const rawXml = await res.text();
-            // Entity-escaping only — pure and safe, always applied.
-            const escaped = sanitizeFeedXml(rawXml);
-
-            // Staged repair: try the cheapest/safest thing first and only
-            // escalate to riskier repairs if parsing still fails. Any feed
-            // that parsed cleanly before now succeeds at stage 1 and never
-            // touches stage 2/3, so previously-working sources (MyJoyOnline,
-            // Modern Ghana, 3News, Ghanaian Times, Google News queries, etc.)
-            // go back to parsing byte-for-byte unmodified.
-            let feed = null;
-            let lastParseErr = null;
-
-            // Stage 1 — raw (entity-escaped) XML, no structural repair.
-            try {
-                feed = await rssParser.parseString(escaped);
-            } catch (err) {
-                lastParseErr = err;
-            }
-
-            // Stage 2 — bare/unquoted-attribute normalization only.
-            if (!feed) {
-                try {
-                    feed = await rssParser.parseString(normalizeXmlAttributesDocumentWide(escaped));
-                } catch (err) {
-                    lastParseErr = err;
-                }
-            }
-
-            // Stage 3 — last resort: crossed/unclosed-tag balancer on top
-            // of the attribute fix. Only reached once stages 1–2 both fail.
-            if (!feed) {
-                try {
-                    const attrFixed = normalizeXmlAttributesDocumentWide(escaped);
-                    feed = await rssParser.parseString(balanceCrossedTagsDocumentWide(attrFixed));
-                } catch (err) {
-                    lastParseErr = err;
-                }
-            }
-
-            if (feed) {
-                items = feed.items || [];
-            } else {
-                // Every parse stage failed — try the dumb regex fallback
-                // rather than losing this source's items outright.
-                items = extractItemsWithRegex(rawXml);
-                if (items.length) {
-                    console.warn(`[news] ${source.name}: rss-parser rejected the feed (${lastParseErr && lastParseErr.message}) — recovered ${items.length} item(s) via regex fallback instead.`);
-                } else {
-                    throw lastParseErr || new Error('Unable to parse feed'); // fallback found nothing either — report the real error below
-                }
-            }
+            items = await parseFeedXmlStaged(rawXml, source.name);
         } catch (err) {
             console.error(`[news] RSS fetch FAILED for ${source.name} (${source.url}): ${err.message}`);
             return { fetched: 0, stored: 0 };
@@ -1490,30 +1491,153 @@ module.exports = function initNewsSystem(app, deps) {
         return { fetched: items.length, stored };
     }
 
+    // ---------------------------------------------------------------
+    //  Headless browser (Playwright) — ECG only
+    // ---------------------------------------------------------------
+    //  ECG's site (Incapsula captcha redirect) and blog feed (same
+    //  class of bot-challenge, now serving "Feed not recognized as
+    //  RSS 1 or 2" instead of real XML) both need actual JS execution
+    //  to get past — a plain fetch() with browser-like headers can't
+    //  do that, which is the whole reason this exists. NOT used for
+    //  anything else in NEWS_SOURCES; every other source still uses
+    //  the plain fetch() path above.
+    //
+    //  REQUIRES a real install step this file can't do on its own:
+    //      npm install playwright
+    //      npx playwright install --with-deps chromium
+    //  On Render specifically, the second command needs to run as
+    //  part of the BUILD command (e.g. in render.yaml or the dashboard
+    //  build command), not just added to package.json — the Chromium
+    //  binary is downloaded separately from the npm package and isn't
+    //  there yet on a fresh deploy without it. Skipping this step is
+    //  the single most common reason this "silently doesn't work" —
+    //  see the require() guard and /admin/news/headless-status below,
+    //  both of which exist specifically to make that failure visible
+    //  instead of silent.
+    let chromiumLauncher = null;
+    try {
+        chromiumLauncher = require('playwright').chromium;
+    } catch (err) {
+        console.warn('[news] [headless] "playwright" is not installed (or its browsers aren\'t) — ECG headless fetch will be skipped every cycle until it is. Run: npm install playwright && npx playwright install --with-deps chromium');
+    }
+
+    // One browser process is kept alive across fetch cycles rather than
+    // launched fresh every 7 minutes — Chromium's startup cost (several
+    // hundred ms to a few seconds) isn't worth paying twice a cycle just
+    // to hit two ECG URLs. A fresh BrowserContext (and page) is still
+    // opened and closed per use below, so no cookies/state leak between
+    // cycles or between ECG's two sources.
+    let sharedBrowser = null;
+    async function getSharedBrowser() {
+        if (!chromiumLauncher) return null;
+        if (sharedBrowser && sharedBrowser.isConnected()) return sharedBrowser;
+        try {
+            console.log('[news] [headless] Launching Chromium...');
+            sharedBrowser = await chromiumLauncher.launch({
+                headless: true,
+                // Required in most container hosts (Render included) —
+                // Chromium's sandbox needs kernel privileges a container
+                // doesn't grant by default; without these flags launch()
+                // itself throws before a page is ever opened.
+                args: ['--no-sandbox', '--disable-setuid-sandbox']
+            });
+            console.log('[news] [headless] Chromium launched OK.');
+            sharedBrowser.on('disconnected', () => {
+                console.warn('[news] [headless] Chromium disconnected — will relaunch next time it\'s needed.');
+                sharedBrowser = null;
+            });
+        } catch (err) {
+            console.error(`[news] [headless] Chromium launch FAILED: ${err.message} — most likely the Chromium binary itself isn't installed (see the npx playwright install command in the comment above this function).`);
+            sharedBrowser = null;
+        }
+        return sharedBrowser;
+    }
+
+    // Renders `url` in a real browser and returns the final HTML plus
+    // the final URL actually landed on (so callers can tell whether
+    // they got redirected to a captcha/challenge page instead of the
+    // real content — Incapsula's redirect target, e.g., still contains
+    // "sgcaptcha" in the URL even after the JS challenge itself runs).
+    // Returns null (never throws) on any failure — a page failing to
+    // render is treated exactly like an HTTP error from fetch(): log
+    // it, return nothing, let the caller report fetched:0 this cycle.
+    async function fetchRenderedHtml(url, { waitMs = 4000, timeoutMs = 20000 } = {}) {
+        const browser = await getSharedBrowser();
+        if (!browser) return null;
+
+        let context;
+        try {
+            context = await browser.newContext({
+                userAgent: OUTBOUND_HEADERS['User-Agent'],
+                extraHTTPHeaders: { 'Accept-Language': OUTBOUND_HEADERS['Accept-Language'] }
+            });
+            const page = await context.newPage();
+            console.log(`[news] [headless] Navigating to ${url} ...`);
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+            // Incapsula/Cloudflare-style JS challenges resolve client-side
+            // and self-redirect once they pass — give that a moment to
+            // finish rather than reading the challenge stub as the page.
+            await page.waitForTimeout(waitMs);
+            const finalUrl = page.url();
+            const html = await page.content();
+            const stillChallenged = /sgcaptcha|cf-challenge|Just a moment/i.test(html) || /sgcaptcha/i.test(finalUrl);
+            console.log(`[news] [headless] Landed on ${finalUrl} (${html.length} bytes rendered)${stillChallenged ? ' — still looks like a challenge/captcha page' : ''}.`);
+            return { html, finalUrl, stillChallenged };
+        } catch (err) {
+            console.error(`[news] [headless] Render FAILED for ${url}: ${err.message}`);
+            return null;
+        } finally {
+            if (context) await context.close().catch(() => {});
+        }
+    }
+
+    // ECG's blog feed, fetched through the headless browser instead of
+    // plain fetch() so the bot-challenge it now serves gets a chance to
+    // resolve before the response is read. Reuses the exact same
+    // staged XML repair/parse pipeline as every other RSS source
+    // (parseFeedXmlStaged) once it has real feed text in hand.
+    async function fetchEcgBlogFeedHeadless(source, knownKeys) {
+        let items = [];
+        try {
+            const rendered = await fetchRenderedHtml(source.url);
+            if (!rendered) throw new Error('Headless browser unavailable or render failed — see [headless] logs above.');
+            if (rendered.stillChallenged) throw new Error(`Still on a challenge/captcha page after render (landed on ${rendered.finalUrl}).`);
+            // A rendered XML document usually lands inside the browser's
+            // built-in XML viewer, which Chromium wraps in its own HTML
+            // shell — pull the raw text back out rather than trying to
+            // parse that shell as if it were the feed itself.
+            const $ = cheerio.load(rendered.html);
+            const rawXml = ($('pre').first().text() || rendered.html).trim();
+            items = await parseFeedXmlStaged(rawXml, source.name);
+        } catch (err) {
+            console.error(`[news] RSS fetch FAILED for ${source.name} (${source.url}): ${err.message}`);
+            return { fetched: 0, stored: 0 };
+        }
+
+        let stored = 0;
+        for (const item of items.slice(0, 25)) {
+            const imageUrl = extractImageFromRssItem(item);
+            const doc = await storeArticle({
+                title: item.title,
+                summary: item.contentSnippet || item.content || item.summary || '',
+                url: item.link,
+                imageUrl,
+                publishedAt: item.isoDate ? new Date(item.isoDate) : new Date()
+            }, source, { knownKeys });
+            if (doc) stored++;
+        }
+
+        console.log(`[news] ${source.name}: fetched ${items.length} item(s), stored ${stored} new.`);
+        return { fetched: items.length, stored };
+    }
+
     async function scrapeEcgSite(source, knownKeys) {
         let html;
         try {
-            // Same 15s bound as fetchRssSource — see its comment for why an
-            // untimed fetch here is a real, shared-threadpool problem, not
-            // just a slow crawl.
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 15000);
-            let res;
-            try {
-                res = await fetch(source.url, {
-                    signal: controller.signal,
-                    headers: OUTBOUND_HEADERS
-                });
-            } finally {
-                clearTimeout(timeout);
-            }
-            if (!res.ok) {
-                const serverHeader = res.headers.get('server') || 'unknown';
-                let snippet = '';
-                try { snippet = (await res.text()).slice(0, 200).replace(/\s+/g, ' ').trim(); } catch {}
-                throw new Error(`HTTP ${res.status} (server: ${serverHeader})${snippet ? ` — body: "${snippet}"` : ''}`);
-            }
-            html = await res.text();
+            const rendered = await fetchRenderedHtml(source.url);
+            if (!rendered) throw new Error('Headless browser unavailable or render failed — see [headless] logs above.');
+            if (rendered.stillChallenged) throw new Error(`Still on a challenge/captcha page after render (landed on ${rendered.finalUrl}).`);
+            html = rendered.html;
         } catch (err) {
             console.error(`[news] ECG site fetch FAILED (${source.url}): ${err.message}`);
             return { fetched: 0, stored: 0 };
@@ -1539,7 +1663,7 @@ module.exports = function initNewsSystem(app, deps) {
 
         if (items.length === 0) {
             if (html.length < 2000) {
-                console.warn(`[news] ECG: page fetched but only ${html.length} bytes back — likely blocked/challenged. Body: ${html.slice(0, 500)}`);
+                console.warn(`[news] ECG: page fetched but only ${html.length} bytes back — likely still blocked/challenged even after headless render. Body: ${html.slice(0, 500)}`);
             } else {
                 console.warn(`[news] ECG: page fetched (${html.length} bytes) but 0 article blocks matched the selectors.`);
             }
@@ -1604,7 +1728,7 @@ module.exports = function initNewsSystem(app, deps) {
             for (const source of ECG_SOURCES) {
                 let result;
                 try {
-                    if (source.type === 'rss') result = await fetchRssSource(source, knownKeys);
+                    if (source.type === 'rss') result = await fetchEcgBlogFeedHeadless(source, knownKeys);
                     else if (source.type === 'scrape-ecg') result = await scrapeEcgSite(source, knownKeys);
                 } catch (err) {
                     console.error(`[news] ECG source "${source.name}" failed unexpectedly: ${err.message}`);
@@ -1836,6 +1960,46 @@ module.exports = function initNewsSystem(app, deps) {
             totalArticles, totalEvents, lastFetchStats,
             sources: [...ECG_SOURCES, ...NEWS_SOURCES].map(s => ({ name: s.name, url: s.url, type: s.type, query: s.query }))
         });
+    });
+
+    // GET /admin/news/headless-status — NEW. Answers "is the headless
+    // browser even working" directly, independent of the news fetch
+    // cycle and independent of whether ECG's own bot-challenge happens
+    // to let it through today. Three things are checked and reported
+    // separately, since they fail for different reasons and each needs
+    // a different fix:
+    //   1. playwrightInstalled — false means `npm install playwright`
+    //      never ran (or failed) at build time.
+    //   2. chromiumLaunched — false (with playwrightInstalled true)
+    //      means the package is there but the Chromium BINARY isn't —
+    //      `npx playwright install --with-deps chromium` never ran, or
+    //      ran somewhere other than this deploy's build step.
+    //   3. testNavigation — actually renders a known-good, non-ECG page
+    //      (example.com) to confirm the browser can load and return
+    //      real content, not just launch. If this passes but ECG itself
+    //      still fails in the fetch cycle logs, the browser is fine and
+    //      the problem is specifically ECG's challenge, not this setup.
+    app.get('/admin/news/headless-status', verifyAdminToken, async (req, res) => {
+        const result = {
+            playwrightInstalled: !!chromiumLauncher,
+            chromiumLaunched: false,
+            testNavigation: null
+        };
+
+        if (!chromiumLauncher) {
+            return res.json(result);
+        }
+
+        const browser = await getSharedBrowser();
+        result.chromiumLaunched = !!browser;
+        if (!browser) return res.json(result);
+
+        const rendered = await fetchRenderedHtml('https://example.com', { waitMs: 500, timeoutMs: 10000 });
+        result.testNavigation = rendered
+            ? { ok: true, finalUrl: rendered.finalUrl, bytes: rendered.html.length }
+            : { ok: false };
+
+        return res.json(result);
     });
 
     // POST /admin/news/backfill-images — ONE-OFF. Repairs events that
