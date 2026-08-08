@@ -1631,6 +1631,128 @@ module.exports = function initNewsSystem(app, deps) {
         return { fetched: items.length, stored };
     }
 
+    // ---------------------------------------------------------------
+    //  ECG "News & Events" page parsing (structure-first, not class-first)
+    // ---------------------------------------------------------------
+    //  The old selector list below (`.blog .item, .items-leading,
+    //  .item-page, .blog-item, article`) matched a Joomla template
+    //  class layout ECG's site used to render with. The page still
+    //  renders fine today (83KB, confirmed in the [headless] logs) —
+    //  the classes just aren't there anymore, so `candidates` came back
+    //  empty every cycle ("0 article blocks matched the selectors").
+    //
+    //  Rather than swap in a new hard-coded class list (which breaks
+    //  again the next time ECG's Joomla template changes), this reads
+    //  the page by STRUCTURE instead:
+    //    1. Every <h1>-<h4> that wraps a link, outside the header/nav/
+    //       footer/sidebar, is a candidate article title.
+    //    2. A candidate only counts as a real article if a
+    //       "DD Month YYYY" date (ECG's byline format on this page,
+    //       e.g. "22 July 2026") turns up within a couple of DOM levels
+    //       of it. That's present under every real article and absent
+    //       under the sidebar's bare category links ("Eastern Region
+    //       News" etc.) and the "Must Read" list, so it doubles as the
+    //       filter that keeps those out — without needing to know their
+    //       class names either.
+    //    3. Once that wrapping element is found, the image and excerpt
+    //       paragraph are pulled from inside it, same structure-first
+    //       way.
+    //  This survives markup/class churn as long as ECG keeps pairing
+    //  each article with a heading + nearby date, which is a much safer
+    //  bet than any specific class surviving the next template tweak.
+    const ECG_MONTHS = {
+        january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
+        july: 6, august: 7, september: 8, october: 9, november: 10, december: 11
+    };
+    const ECG_DATE_REGEX = /\b(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})\b/i;
+
+    function parseEcgDate(text) {
+        const m = text && text.match(ECG_DATE_REGEX);
+        if (!m) return null;
+        const day = Number(m[1]);
+        const month = ECG_MONTHS[m[2].toLowerCase()];
+        const year = Number(m[3]);
+        // Noon UTC rather than midnight local — sidesteps a date rolling
+        // back a day if this process's TZ sits east of UTC.
+        const d = new Date(Date.UTC(year, month, day, 12));
+        return isNaN(d) ? null : d;
+    }
+
+    // How many ancestor levels to walk up from a heading looking for a
+    // nearby date before giving up on it. Kept deliberately small: too
+    // generous and a heading with NO date of its own (a sidebar category
+    // link, say) could pick up some unrelated article's date from a
+    // large shared ancestor instead of correctly being rejected.
+    const ECG_META_HOP_LIMIT = 3;
+    const ECG_NON_ARTICLE_ANCESTOR_SELECTOR = 'header, nav, footer, [class*="sidebar" i], [id*="sidebar" i], [class*="menu" i]';
+
+    function extractEcgItemsByStructure($, baseUrl) {
+        const items = [];
+        const seenUrls = new Set();
+
+        $('h1 a[href], h2 a[href], h3 a[href], h4 a[href]').each((_, el) => {
+            const $link = $(el);
+            const title = $link.text().trim();
+            const href = $link.attr('href');
+            if (!title || !href) return;
+
+            const $heading = $link.closest('h1, h2, h3, h4');
+            if ($heading.closest(ECG_NON_ARTICLE_ANCESTOR_SELECTOR).length) return;
+
+            const articleUrl = resolveUrl(href, baseUrl);
+            if (!articleUrl || seenUrls.has(articleUrl)) return;
+
+            // Walk up looking for a nearby publish date — this is what
+            // separates a real article teaser from a bare nav/sidebar/
+            // category link that happens to use the same heading tag.
+            let $scope = $heading.parent();
+            let publishedAt = null;
+            for (let hop = 0; hop < ECG_META_HOP_LIMIT && $scope.length; hop++) {
+                publishedAt = parseEcgDate($scope.text());
+                if (publishedAt) break;
+                $scope = $scope.parent();
+            }
+            if (!publishedAt) return;
+
+            seenUrls.add(articleUrl);
+
+            const imgSrc = $scope.find('img').first().attr('src');
+            const imageUrl = imgSrc ? resolveUrl(imgSrc, baseUrl) : null;
+
+            let summary = '';
+            $scope.find('p').each((_, p) => {
+                const t = $(p).text().trim();
+                if (t.length > 20) { summary = t; return false; }
+            });
+
+            items.push({ title, summary, url: articleUrl, imageUrl, publishedAt });
+        });
+
+        return items;
+    }
+
+    // Legacy class-based pass, kept as a fallback only — cheap safety
+    // net in case ECG's template ever reintroduces one of these class
+    // names, so that case still resolves on the first try instead of
+    // relying solely on the structural heuristic above.
+    function extractEcgItemsLegacy($, baseUrl) {
+        const items = [];
+        $('.blog .item, .items-leading, .item-page, .blog-item, article').each((_, el) => {
+            const $el = $(el);
+            const headingEl = $el.find('h2 a, h3 a, h2, h3').first();
+            const title = headingEl.text().trim();
+            let href = headingEl.is('a') ? headingEl.attr('href') : $el.find('a').first().attr('href');
+            if (!title || !href) return;
+            const articleUrl = resolveUrl(href, baseUrl);
+            if (!articleUrl) return;
+            const summary = $el.find('p').first().text().trim();
+            const imgSrc = $el.find('img').first().attr('src');
+            const imageUrl = imgSrc ? resolveUrl(imgSrc, baseUrl) : null;
+            items.push({ title, summary, url: articleUrl, imageUrl, publishedAt: new Date() });
+        });
+        return items;
+    }
+
     async function scrapeEcgSite(source, knownKeys) {
         let html;
         try {
@@ -1643,29 +1765,28 @@ module.exports = function initNewsSystem(app, deps) {
             return { fetched: 0, stored: 0 };
         }
 
-        const $ = cheerio.load(html);
-        const candidates = $('.blog .item, .items-leading, .item-page, .blog-item, article');
-        const items = [];
-
-        candidates.each((_, el) => {
-            const $el = $(el);
-            const headingEl = $el.find('h2 a, h3 a, h2, h3').first();
-            const title = headingEl.text().trim();
-            let href = headingEl.is('a') ? headingEl.attr('href') : $el.find('a').first().attr('href');
-            if (!title || !href) return;
-            href = resolveUrl(href, source.url);
-            if (!href) return;
-            const summary = $el.find('p').first().text().trim();
-            const imgSrc = $el.find('img').first().attr('src');
-            const imageUrl = imgSrc ? resolveUrl(imgSrc, source.url) : null;
-            items.push({ title, summary, url: href, imageUrl, publishedAt: new Date() });
-        });
+        let items = [];
+        let usedLegacySelectors = false;
+        try {
+            const $ = cheerio.load(html);
+            items = extractEcgItemsByStructure($, source.url);
+            if (items.length === 0) {
+                items = extractEcgItemsLegacy($, source.url);
+                usedLegacySelectors = items.length > 0;
+            }
+        } catch (err) {
+            // A parsing bug here (e.g. ECG's markup trips up cheerio in
+            // some new way) should degrade to "0 articles this cycle",
+            // never take down the rest of the news-fetch cycle.
+            console.error(`[news] ECG: error while parsing page markup: ${err.message}`);
+            items = [];
+        }
 
         if (items.length === 0) {
             if (html.length < 2000) {
                 console.warn(`[news] ECG: page fetched but only ${html.length} bytes back — likely still blocked/challenged even after headless render. Body: ${html.slice(0, 500)}`);
             } else {
-                console.warn(`[news] ECG: page fetched (${html.length} bytes) but 0 article blocks matched the selectors.`);
+                console.warn(`[news] ECG: page fetched (${html.length} bytes) but 0 article blocks matched the selectors (structural + legacy pass both came back empty).`);
             }
             return { fetched: 0, stored: 0 };
         }
@@ -1675,11 +1796,17 @@ module.exports = function initNewsSystem(app, deps) {
         for (const item of items) {
             if (seen.has(item.url)) continue;
             seen.add(item.url);
-            const doc = await storeArticle(item, source, { knownKeys });
+            const doc = await storeArticle({
+                title: item.title,
+                summary: item.summary || '',
+                url: item.url,
+                imageUrl: item.imageUrl || null,
+                publishedAt: item.publishedAt || new Date()
+            }, source, { knownKeys });
             if (doc) stored++;
         }
 
-        console.log(`[news] ECG: found ${items.length} candidate item(s), stored ${stored} new.`);
+        console.log(`[news] ECG: found ${items.length} candidate item(s)${usedLegacySelectors ? ' [via legacy class selectors]' : ''}, stored ${stored} new.`);
         return { fetched: items.length, stored };
     }
 
