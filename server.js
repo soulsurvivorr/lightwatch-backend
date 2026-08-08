@@ -698,9 +698,14 @@ app.use('/images', express.static(path.join(__dirname, 'public/images'), {
 // separately (Netlify). This keeps the rest of the backend's files
 // private while exposing only that one image path.
 const backendLogoPath = path.join(__dirname, 'dev-logo.png');
+const backendPublicLogoPath = path.join(__dirname, 'public', 'logo.png');
 if (fs.existsSync(backendLogoPath)) {
     app.get('/images/dev-logo.png', (req, res) => {
         res.sendFile(backendLogoPath);
+    });
+} else if (fs.existsSync(backendPublicLogoPath)) {
+    app.get('/images/dev-logo.png', (req, res) => {
+        res.sendFile(backendPublicLogoPath);
     });
 }
 
