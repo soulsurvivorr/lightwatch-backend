@@ -239,6 +239,22 @@ function balanceCrossedTagsDocumentWide(xml) {
 // part of a valid XML/numeric entity. Always safe to run unconditionally
 // since it never touches tag structure, so it stays applied to every
 // feed regardless of which (if any) repair stage below ends up needed.
+//
+// Also escapes a bare "<" that isn't the start of anything tag-shaped
+// (next char isn't a letter/`/`/`!`/`?`) — e.g. a stray less-than sign
+// or an emoticon like "<3" left unescaped in a headline. This is the
+// actual cause behind Citi News's "Invalid character in tag name"
+// failure: TAG_PATTERN and repairCrossedTags's own pattern both require
+// a letter right after "<" to recognize something as a tag at all, so
+// a "<" followed by anything else (digit, space, punctuation) sails
+// straight through both of those repair stages untouched and only
+// then trips the underlying XML parser. CDATA-protected like the other
+// stages, and safe to always run since it can never touch a "<" that
+// was already a real tag/comment/CDATA/processing-instruction opener.
+function escapeStrayLessThan(xml) {
+    return withCdataProtected(xml, (out) => out.replace(/<(?![a-zA-Z/!?])/g, '&lt;'));
+}
+
 function sanitizeFeedXml(xml) {
     let out = String(xml || '');
     out = out.replace(/&([a-zA-Z][a-zA-Z0-9]{1,10});/g, (m, name) => {
@@ -247,6 +263,7 @@ function sanitizeFeedXml(xml) {
         return HTML_ENTITY_MAP[lower] !== undefined ? HTML_ENTITY_MAP[lower] : m;
     });
     out = out.replace(/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;');
+    out = escapeStrayLessThan(out);
     return out;
 }
 
@@ -1452,6 +1469,18 @@ module.exports = function initNewsSystem(app, deps) {
                 throw new Error(`HTTP ${res.status} (server: ${serverHeader})${snippet ? ` — body: "${snippet}"` : ''}`);
             }
             const rawXml = await res.text();
+            // A 200 with an HTML body instead of XML (GhanaWeb's current
+            // failure mode: "Feed not recognized as RSS 1 or 2") is almost
+            // always a bot-challenge/redirect page, not a malformed feed —
+            // no amount of the XML repair below fixes that, so surface it
+            // as what it actually is instead of a confusing parse error.
+            // NOT an attempt to get past whatever's serving it; this repo's
+            // only bypass mechanism (the headless browser) stays scoped to
+            // ECG, same as before.
+            if (/^\s*<!doctype html/i.test(rawXml) || /^\s*<html[\s>]/i.test(rawXml)) {
+                const snippet = rawXml.slice(0, 200).replace(/\s+/g, ' ').trim();
+                throw new Error(`Response was an HTML page, not an XML feed — likely bot-gated (would need the same kind of headless-browser fetch as ECG, not addressed here). First 200 chars: "${snippet}"`);
+            }
             items = await parseFeedXmlStaged(rawXml, source.name);
         } catch (err) {
             console.error(`[news] RSS fetch FAILED for ${source.name} (${source.url}): ${err.message}`);
@@ -1561,7 +1590,17 @@ module.exports = function initNewsSystem(app, deps) {
     // Returns null (never throws) on any failure — a page failing to
     // render is treated exactly like an HTTP error from fetch(): log
     // it, return nothing, let the caller report fetched:0 this cycle.
-    async function fetchRenderedHtml(url, { waitMs = 4000, timeoutMs = 20000 } = {}) {
+    //
+    // extraWaitOnChallengeMs: if still on a challenge page after `waitMs`,
+    // wait this much longer once before giving up, rather than reading
+    // the challenge stub as the page. 0 (default) preserves the original
+    // single-wait behavior. ECG's news-events scrape resolves fine with
+    // just `waitMs`, but its blog feed (/blog/feed/) has been observed
+    // still sitting on the sgcaptcha redirect after the same wait — that
+    // endpoint's challenge appears to need more time to self-resolve, so
+    // fetchEcgBlogFeedHeadless (below) opts into the longer second wait;
+    // this stays 0 (unchanged) for every other caller.
+    async function fetchRenderedHtml(url, { waitMs = 4000, timeoutMs = 20000, extraWaitOnChallengeMs = 0 } = {}) {
         const browser = await getSharedBrowser();
         if (!browser) return null;
 
@@ -1578,9 +1617,18 @@ module.exports = function initNewsSystem(app, deps) {
             // and self-redirect once they pass — give that a moment to
             // finish rather than reading the challenge stub as the page.
             await page.waitForTimeout(waitMs);
-            const finalUrl = page.url();
-            const html = await page.content();
-            const stillChallenged = /sgcaptcha|cf-challenge|Just a moment/i.test(html) || /sgcaptcha/i.test(finalUrl);
+            let finalUrl = page.url();
+            let html = await page.content();
+            let stillChallenged = /sgcaptcha|cf-challenge|Just a moment/i.test(html) || /sgcaptcha/i.test(finalUrl);
+
+            if (stillChallenged && extraWaitOnChallengeMs > 0) {
+                console.log(`[news] [headless] Still on a challenge page after ${waitMs}ms — waiting ${extraWaitOnChallengeMs}ms more before giving up...`);
+                await page.waitForTimeout(extraWaitOnChallengeMs);
+                finalUrl = page.url();
+                html = await page.content();
+                stillChallenged = /sgcaptcha|cf-challenge|Just a moment/i.test(html) || /sgcaptcha/i.test(finalUrl);
+            }
+
             console.log(`[news] [headless] Landed on ${finalUrl} (${html.length} bytes rendered)${stillChallenged ? ' — still looks like a challenge/captcha page' : ''}.`);
             return { html, finalUrl, stillChallenged };
         } catch (err) {
@@ -1599,7 +1647,7 @@ module.exports = function initNewsSystem(app, deps) {
     async function fetchEcgBlogFeedHeadless(source, knownKeys) {
         let items = [];
         try {
-            const rendered = await fetchRenderedHtml(source.url);
+            const rendered = await fetchRenderedHtml(source.url, { extraWaitOnChallengeMs: 8000 });
             if (!rendered) throw new Error('Headless browser unavailable or render failed — see [headless] logs above.');
             if (rendered.stillChallenged) throw new Error(`Still on a challenge/captcha page after render (landed on ${rendered.finalUrl}).`);
             // A rendered XML document usually lands inside the browser's
@@ -1891,8 +1939,34 @@ module.exports = function initNewsSystem(app, deps) {
     const NEWS_FETCH_INTERVAL_MS = Number(process.env.NEWS_FETCH_INTERVAL_MS) || 7 * 60 * 1000;
     const EVENT_MATCH_WINDOW_MS = Number(process.env.NEWS_EVENT_MATCH_WINDOW_MS) || 5 * 24 * 60 * 60 * 1000;
 
-    setTimeout(() => { runNewsFetchCycle().catch(err => console.error('[news] Initial fetch failed:', err.message)); }, 10000);
-    setInterval(() => { runNewsFetchCycle().catch(err => console.error('[news] Scheduled fetch failed:', err.message)); }, NEWS_FETCH_INTERVAL_MS);
+    const initialFetchTimer = setTimeout(() => { runNewsFetchCycle().catch(err => console.error('[news] Initial fetch failed:', err.message)); }, 10000);
+    const scheduledFetchTimer = setInterval(() => { runNewsFetchCycle().catch(err => console.error('[news] Scheduled fetch failed:', err.message)); }, NEWS_FETCH_INTERVAL_MS);
+
+    // Render (and most PaaS hosts) send SIGTERM to the OLD container
+    // during a deploy, then give it a grace period before a hard kill —
+    // Node keeps running through that grace period unless something
+    // stops it. That's what produced the back-to-back "[news] Fetch
+    // cycle starting..." pair seen in production: the dying old
+    // container's own scheduler (its 7-min setInterval, or its 10s
+    // startup setTimeout on a fast redeploy) fired during that window
+    // at the same moment the brand-new container's own startup timer
+    // fired — two SEPARATE processes hitting the same outlets at once.
+    // The in-process cycleInFlight guard above can't help here since it
+    // only stops a second cycle from starting inside the SAME process.
+    // Once SIGTERM/SIGINT arrives, stop scheduling any further cycles
+    // and let the shared Chromium instance close cleanly instead of
+    // leaving it running into the kill.
+    let newsShuttingDown = false;
+    function stopNewsScheduling(signal) {
+        if (newsShuttingDown) return;
+        newsShuttingDown = true;
+        console.log(`[news] ${signal} received — stopping the news scheduler (no further fetch cycles will start this process).`);
+        clearTimeout(initialFetchTimer);
+        clearInterval(scheduledFetchTimer);
+        if (sharedBrowser) sharedBrowser.close().catch(() => {});
+    }
+    process.on('SIGTERM', () => stopNewsScheduling('SIGTERM'));
+    process.on('SIGINT', () => stopNewsScheduling('SIGINT'));
 
     // ---- In-memory response cache ------------------------------------
     const NEWS_CACHE_TTL_MS = Number(process.env.NEWS_CACHE_TTL_MS) || 60 * 1000;
