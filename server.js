@@ -671,9 +671,27 @@ app.use(express.json({ limit: '6mb' }));
 // unchanged static assets (logo, css, js, service-worker) on every load.
 // Purely a response-header change — same files, same routes, same
 // content — so it doesn't affect API functionality at all.
+//
+// FIX: that blanket 1-day cache used to also apply to /service-worker.js
+// and /index.html. That's exactly backwards for those two files —
+// service-worker.js's whole job is to be re-fetched and byte-compared
+// on every registration.update() call (see push.js) so the browser can
+// detect a new deploy; if the browser's own HTTP cache is allowed to
+// serve THAT check a day-old copy, a new app version can go completely
+// undetected for up to 24h regardless of how many times someone
+// relaunches. index.html has the same problem for anyone on a browser
+// too old to run the service worker at all, or on the very first visit
+// before it's controlling anything yet. Both are cheap to serve fresh
+// every time (tiny files, no DB hit), so they're excluded from the
+// long-lived cache and forced to always revalidate.
 app.use(express.static(path.join(__dirname, '../frontend'), {
     maxAge: process.env.NODE_ENV === 'production' ? '1d' : 0,
-    etag: true
+    etag: true,
+    setHeaders: (res, filePath) => {
+        if (filePath.endsWith('service-worker.js') || filePath.endsWith('index.html')) {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        }
+    }
 }));
 
 // Serves assets that live inside the backend itself (e.g. the logo used
