@@ -526,8 +526,19 @@ function isNationwideArticle(text, category) {
 // hits Kasoa" and still be worth an all-user heads-up even though
 // it's phrased as one town).
 const DUMSOR_REGEX = /\bdumsor\b/i;
-function shouldBroadcastToAll(text, isNationwide) {
-    return isNationwide || DUMSOR_REGEX.test(text);
+// Was: only nationwide-phrased or "dumsor" articles ever reached every
+// subscriber — a plain single-town outage story only ever reached
+// people at that location. Per product decision, ANY article that
+// resolved to the 'outage' category (see categorizeArticle() /
+// detectCategory() above) is now broadcast-worthy on its own, in
+// addition to the existing nationwide/dumsor triggers — someone in
+// Kumasi may still want the heads-up that Accra just lost power, even
+// with no location match. `category` is optional so the couple of
+// other callers of this helper (if any get added later) that don't
+// have a resolved category yet still fall back to the original
+// nationwide/dumsor-only behavior.
+function shouldBroadcastToAll(text, isNationwide, category) {
+    return isNationwide || DUMSOR_REGEX.test(text) || category === 'outage';
 }
 
 // ---- Best-effort start/end time extraction ---------------------
@@ -993,7 +1004,11 @@ module.exports = function initNewsSystem(app, deps) {
 
     async function notifyAllUsers(event, reason) {
         try {
-            const subscribers = await PushSubscription.find({}).lean();
+            // Respects the "Outage news alerts" toggle on the account
+            // page (PushSubscription.outageNewsAlertsEnabled, default
+            // true) — same opt-out pattern chatMentionsEnabled/
+            // muteGlobalChat already use for chat pushes.
+            const subscribers = await PushSubscription.find({ outageNewsAlertsEnabled: { $ne: false } }).lean();
             if (!subscribers.length) return;
             const payload = {
                 title: 'LightWatch News — Ghana',
@@ -1013,7 +1028,7 @@ module.exports = function initNewsSystem(app, deps) {
 
     async function notifyAllUsersDigest(events) {
         try {
-            const subscribers = await PushSubscription.find({}).lean();
+            const subscribers = await PushSubscription.find({ outageNewsAlertsEnabled: { $ne: false } }).lean();
             if (!subscribers.length) return;
             const headlines = events.slice(0, 3).map(e => e.headline);
             const more = events.length > 3 ? ` +${events.length - 3} more` : '';
@@ -1078,8 +1093,8 @@ module.exports = function initNewsSystem(app, deps) {
     async function notifyForEvent(event, combinedText) {
         if (event.notifiedStates.includes(event.category)) return;
 
-        const broadcast = shouldBroadcastToAll(combinedText, event.isNationwide);
-        const reason = event.isNationwide ? 'nationwide' : 'dumsor-keyword';
+        const broadcast = shouldBroadcastToAll(combinedText, event.isNationwide, event.category);
+        const reason = event.isNationwide ? 'nationwide' : (DUMSOR_REGEX.test(combinedText) ? 'dumsor-keyword' : 'outage-category');
 
         if (activeCycleQueue) {
             if (broadcast) {

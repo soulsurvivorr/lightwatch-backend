@@ -551,7 +551,19 @@ const pushSubscriptionSchema = new mongoose.Schema({
     // first one's `fcmToken: null`. Leaving the field unset for 'web'
     // rows lets `sparse: true` do what it was actually meant to do.
     fcmToken:     { type: String },
-    createdAt:    { type: Date, default: Date.now }
+    createdAt:    { type: Date, default: Date.now },
+    // Two new user-controllable preferences, added alongside the
+    // account page's redesigned Notifications card:
+    //  - checkInAlertsEnabled: gates the random daily "still got light?"
+    //    nudge (see sendLightCheckInPush() below) so people who find
+    //    it noisy can turn it off without losing outage/restored alerts.
+    //  - outageNewsAlertsEnabled: for news.js's outage-keyword push —
+    //    filter subscribers on this field (`{ outageNewsAlertsEnabled:
+    //    { $ne: false } }`) wherever it fans out pushes for a news item
+    //    matched by the outage filter, the same way chat pushes above
+    //    already respect chatMentionsEnabled/muteGlobalChat.
+    checkInAlertsEnabled: { type: Boolean, default: true },
+    outageNewsAlertsEnabled: { type: Boolean, default: true }
 });
 // sparse: true on both — a row only ever populates ONE of these two
 // identifiers depending on `platform`, and without sparse:true, Mongo
@@ -2195,6 +2207,17 @@ app.post('/chats', async (req, res) => {
             const notificationUrl = `/chat?${baseDeepLinkParams.toString()}`;
             const notificationPromises = [];
 
+            // Real content for the push tray instead of a generic "New
+            // community activity" line — actorDisplayHandle/postSnippet are
+            // shared by every subscriber's payload below since they don't
+            // depend on who's receiving it.
+            const actorDisplayHandle = user.chatHandle ? `@${user.chatHandle}` : 'Someone';
+            const postSnippet = (() => {
+                const clean = (normalizedText || '').replace(/\s+/g, ' ').trim();
+                if (!clean) return hasQuote ? 'shared a quote post' : (hasRepost ? 'reposted a report' : 'posted an update');
+                return clean.length > 90 ? `${clean.slice(0, 90).trim()}…` : clean;
+            })();
+
             mentionRecipientIds.forEach(recipientId => {
                 notificationPromises.push(createNotificationForUser({
                     recipientUserId: recipientId,
@@ -2298,13 +2321,16 @@ app.post('/chats', async (req, res) => {
                 const payload = {
                     title: isPriorityMention
                         ? `Reply in ${audienceTitle}`
-                        : `LightWatch chat — ${audienceTitle}`,
-                    // Keep push notifications as a signal only. The message
-                    // body belongs in the thread, not in the browser/app
-                    // notification surface.
+                        : `${actorDisplayHandle} posted in ${audienceTitle}`,
+                    // Was a static "New reply in the community" /
+                    // "New community activity" line — gave subscribers
+                    // nothing to react to before opening the app. Now
+                    // surfaces who posted and a real snippet of what they
+                    // said (trimmed to keep the OS notification tray tidy),
+                    // same as a normal social-app push.
                     body: isPriorityMention
-                        ? 'New reply in the community'
-                        : 'New community activity',
+                        ? `${actorDisplayHandle} replied: ${postSnippet}`
+                        : postSnippet,
                     url: notificationUrl,
                     tag: isPriorityMention ? 'chat-reply' : 'chat-message',
                     requireInteraction: true,
@@ -3540,6 +3566,70 @@ async function sendPushToSubscribers(subscribers, notification) {
     return results;
 }
 
+// ── Random daily "still got light?" check-in ─────────────────────────
+// A once-a-day nudge to every subscriber, independent of any actual
+// status change, so people remember to reconfirm their location (their
+// last report can otherwise go stale for days with nothing prompting a
+// re-check). Fires once per calendar day at a random hour inside the
+// window below — picked fresh each day so it doesn't train users to
+// expect it at a fixed time. Checked on an interval shorter than an
+// hour (rather than scheduled to the exact minute) so a server restart
+// partway through the day still catches the window before it closes.
+const CHECKIN_WINDOW_START_HOUR = 8;  // don't ping before 8am
+const CHECKIN_WINDOW_END_HOUR = 20;   // or after 8pm
+const CHECKIN_MESSAGES = [
+    'Do you still have light? Tap to confirm your status.',
+    'Quick check — is the light still on where you are?',
+    'Still got power? Let your area know in one tap.',
+    'Checking in — has your light status changed today?'
+];
+let lastCheckInDateKey = null;
+let todaysCheckInHour = null;
+
+function pickTodaysCheckInHour() {
+    const span = CHECKIN_WINDOW_END_HOUR - CHECKIN_WINDOW_START_HOUR;
+    return CHECKIN_WINDOW_START_HOUR + Math.floor(Math.random() * span);
+}
+
+async function sendLightCheckInPush() {
+    try {
+        const subscribers = await PushSubscription.find({ checkInAlertsEnabled: { $ne: false } }).lean();
+        if (!subscribers.length) return;
+        const message = CHECKIN_MESSAGES[Math.floor(Math.random() * CHECKIN_MESSAGES.length)];
+        const payload = {
+            title: 'LightWatch',
+            body: message,
+            url: '/pages/home.html',
+            tag: 'light-checkin',
+            requireInteraction: false,
+            vibrate: [180, 90, 180],
+            tone: 'checkin'
+        };
+        console.log(`Sending light check-in push to ${subscribers.length} subscriber(s)`);
+        await sendPushToSubscribers(subscribers, payload);
+    } catch (err) {
+        console.error('Light check-in push error:', err.message);
+    }
+}
+
+if (process.env.NODE_ENV !== 'test') {
+    setInterval(() => {
+        const now = new Date();
+        const dateKey = now.toISOString().slice(0, 10);
+        if (dateKey !== lastCheckInDateKey) {
+            // New calendar day — roll a fresh random hour to send at.
+            lastCheckInDateKey = dateKey;
+            todaysCheckInHour = pickTodaysCheckInHour();
+        }
+        if (todaysCheckInHour !== null && now.getHours() === todaysCheckInHour) {
+            // Clear the target so we don't fire again this same day if
+            // this interval ticks more than once during that hour.
+            todaysCheckInHour = null;
+            sendLightCheckInPush();
+        }
+    }, 30 * 60 * 1000); // check twice an hour — plenty of margin to land within the target hour
+}
+
 async function sendPushToOne(sub, notification) {
     if (sub.platform === 'android') {
         return sendFcmToOne(sub, notification);
@@ -3978,7 +4068,7 @@ app.get('/subscribe/preferences', async (req, res) => {
         const sub = await PushSubscription.findOne({
             userId,
             'subscription.endpoint': endpoint
-        }).select('muteGlobalChat chatMentionsEnabled secondaryLocationKey secondaryLocationLabel').lean();
+        }).select('muteGlobalChat chatMentionsEnabled secondaryLocationKey secondaryLocationLabel checkInAlertsEnabled outageNewsAlertsEnabled').lean();
 
         if (!sub) {
             return res.status(404).json({ error: 'Subscription not found for this user/device' });
@@ -3988,7 +4078,9 @@ app.get('/subscribe/preferences', async (req, res) => {
             muteGlobalChat: sub.muteGlobalChat === true,
             chatMentionsEnabled: sub.chatMentionsEnabled !== false,
             secondaryLocationKey: sub.secondaryLocationKey || null,
-            secondaryLocationLabel: sub.secondaryLocationLabel || null
+            secondaryLocationLabel: sub.secondaryLocationLabel || null,
+            checkInAlertsEnabled: sub.checkInAlertsEnabled !== false,
+            outageNewsAlertsEnabled: sub.outageNewsAlertsEnabled !== false
         });
     } catch (err) {
         console.error('Get subscribe preferences error:', err.message);
@@ -3997,20 +4089,24 @@ app.get('/subscribe/preferences', async (req, res) => {
 });
 
 app.patch('/subscribe/preferences', async (req, res) => {
-    const { userId, endpoint, muteGlobalChat, chatMentionsEnabled, secondaryLocation } = req.body;
+    const { userId, endpoint, muteGlobalChat, chatMentionsEnabled, secondaryLocation, checkInAlertsEnabled, outageNewsAlertsEnabled } = req.body;
     const hasMuteUpdate = typeof muteGlobalChat === 'boolean';
     const hasMentionsUpdate = typeof chatMentionsEnabled === 'boolean';
+    const hasCheckInUpdate = typeof checkInAlertsEnabled === 'boolean';
+    const hasOutageNewsUpdate = typeof outageNewsAlertsEnabled === 'boolean';
     // secondaryLocation is a tri-state: a non-empty string sets the watch,
     // null explicitly clears it, undefined means "not part of this update".
     const hasSecondaryUpdate = secondaryLocation !== undefined;
 
-    if (!userId || !endpoint || (!hasMuteUpdate && !hasMentionsUpdate && !hasSecondaryUpdate)) {
-        return res.status(400).json({ error: 'userId, endpoint, and at least one of muteGlobalChat/chatMentionsEnabled/secondaryLocation are required' });
+    if (!userId || !endpoint || (!hasMuteUpdate && !hasMentionsUpdate && !hasSecondaryUpdate && !hasCheckInUpdate && !hasOutageNewsUpdate)) {
+        return res.status(400).json({ error: 'userId, endpoint, and at least one of muteGlobalChat/chatMentionsEnabled/secondaryLocation/checkInAlertsEnabled/outageNewsAlertsEnabled are required' });
     }
 
     const update = {};
     if (hasMuteUpdate) update.muteGlobalChat = muteGlobalChat;
     if (hasMentionsUpdate) update.chatMentionsEnabled = chatMentionsEnabled;
+    if (hasCheckInUpdate) update.checkInAlertsEnabled = checkInAlertsEnabled;
+    if (hasOutageNewsUpdate) update.outageNewsAlertsEnabled = outageNewsAlertsEnabled;
     if (hasSecondaryUpdate) {
         if (secondaryLocation) {
             update.secondaryLocationKey = normalizeLocation(secondaryLocation).split(',')[0].trim();
@@ -4039,7 +4135,9 @@ app.patch('/subscribe/preferences', async (req, res) => {
             success: true,
             muteGlobalChat: updated.muteGlobalChat,
             chatMentionsEnabled: updated.chatMentionsEnabled,
-            secondaryLocationKey: updated.secondaryLocationKey || null
+            secondaryLocationKey: updated.secondaryLocationKey || null,
+            checkInAlertsEnabled: updated.checkInAlertsEnabled,
+            outageNewsAlertsEnabled: updated.outageNewsAlertsEnabled
         });
     } catch (err) {
         console.error('Subscribe preferences error:', err.message);
@@ -4402,6 +4500,21 @@ app.post('/admin/push-test', verifyAdminToken, async (req, res) => {
     } catch (err) {
         console.error('Admin push-test route error:', err.message);
         return res.status(500).json({ error: 'Server error sending test push' });
+    }
+});
+
+// ---- ADMIN: manually fire the "still got light?" check-in push ----
+// Same sendLightCheckInPush() the daily random-hour scheduler calls —
+// exposed here so an admin can trigger it on demand (testing, or a
+// one-off manual nudge) without waiting for the random window to land.
+app.post('/admin/push-checkin', verifyAdminToken, async (req, res) => {
+    try {
+        const subscribers = await PushSubscription.find({ checkInAlertsEnabled: { $ne: false } }).lean();
+        await sendLightCheckInPush();
+        return res.json({ sent: true, subscribers: subscribers.length });
+    } catch (err) {
+        console.error('Admin push-checkin route error:', err.message);
+        return res.status(500).json({ error: 'Server error sending check-in push' });
     }
 });
 
