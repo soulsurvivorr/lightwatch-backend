@@ -2635,17 +2635,20 @@ app.get('/admin/users', verifyAdminToken, async (req, res) => {
     try {
         const activeSince = new Date(Date.now() - 10 * 60 * 1000); // last 10 minutes
         const activeUsers = await AnalyticsEvent.aggregate([
-            { $match: { type: { $in: ['app_open', 'screen_view'] }, createdAt: { $gte: activeSince }, userId: { $ne: null } } },
+            { $match: { userId: { $ne: null } } },
             { $group: { _id: '$userId', lastActiveAt: { $max: '$createdAt' } } }
         ]);
         const activeMap = new Map(activeUsers.map(a => [String(a._id), a.lastActiveAt]));
 
         const users = await User.find().sort({ createdAt: -1 }).select('name emailPhone region city chatHandle createdAt').lean();
-        const results = users.map(u => ({
-            ...u,
-            isActive: activeMap.has(String(u._id)),
-            lastActiveAt: activeMap.get(String(u._id)) || null
-        }));
+        const results = users.map(u => {
+            const lastActiveAt = activeMap.get(String(u._id)) || null;
+            return {
+                ...u,
+                isActive: lastActiveAt ? new Date(lastActiveAt) >= activeSince : false,
+                lastActiveAt
+            };
+        });
         return res.json(results);
     } catch (err) {
         console.error('Admin users error:', err.message);
