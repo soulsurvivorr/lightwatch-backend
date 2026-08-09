@@ -860,7 +860,14 @@ function sanitizeAvatarImageDataUrl(raw) {
     if (!/^data:image\/(png|jpe?g|webp|heic|heif);base64,/i.test(value)) return null;
     // Allow commonly-sized profile photos while still rejecting very large
     // payloads before they ever hit Cloudinary.
-    if (value.length > 4_000_000) return null;
+    // NOTE: this is the length of the base64-encoded data URL, not the raw
+    // file size — base64 inflates bytes by ~4/3, plus the "data:image/...;
+    // base64," prefix. The client's own picker caps the RAW file at 3MB
+    // (see profileAvatarInput 'change' handler in account.js) specifically
+    // so its resulting data URL always lands under this limit; keep the two
+    // in sync if either one changes, or a photo that passes client-side
+    // validation will still get silently 400'd here.
+    if (value.length > 4_500_000) return null;
     return value;
 }
 
