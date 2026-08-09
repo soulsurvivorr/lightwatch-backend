@@ -435,6 +435,14 @@ const chatSchema = new mongoose.Schema({
     // can surface how many quote posts have pointed back at it.
     quoteCount: { type: Number, default: 0 },
     quotedBy: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], default: [] },
+    // Share/view counters — same persisted-server-side pattern as likes,
+    // so every viewer sees the same numbers instead of a count that
+    // resets on refresh. shareCount has no dedup set (sharing the same
+    // post twice is normal); viewCount is gated per-user via viewedBy so
+    // scrolling past a card repeatedly (or re-polling) doesn't inflate it.
+    shareCount: { type: Number, default: 0 },
+    viewCount: { type: Number, default: 0 },
+    viewedBy: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], default: [] },
     location: { type: String, required: true },
     locationKey: { type: String, required: true },
     editedAt: { type: Date, default: null },
@@ -1947,7 +1955,7 @@ app.get('/chats/counts', async (req, res) => {
     try {
         const filter = buildChatsFilter(scope, location);
         const counts = await Chat.find(filter)
-            .select('likeCount likedBy replyTo.chatId createdAt')
+            .select('likeCount likedBy shareCount viewCount replyTo.chatId createdAt')
             .sort({ createdAt: -1 })
             .limit(500)
             .lean();
@@ -2464,6 +2472,80 @@ app.post('/chats/:chatId/like', async (req, res) => {
     } catch (err) {
         console.error('Like chat error:', err.message);
         return res.status(500).json({ error: 'Server error toggling like' });
+    }
+});
+
+// POST /chats/:chatId/share { userId }
+// No per-user dedup — sharing the same post more than once is normal
+// (different chats, resharing later, etc.) — just increments and
+// returns the up-to-date total so every viewer sees the same count.
+app.post('/chats/:chatId/share', async (req, res) => {
+    const { chatId } = req.params;
+    const { userId } = req.body || {};
+
+    if (!mongoose.Types.ObjectId.isValid(chatId)) {
+        return res.status(400).json({ error: 'Invalid chat id' });
+    }
+    if (userId && !mongoose.Types.ObjectId.isValid(userId)) {
+        return res.status(400).json({ error: 'Invalid userId' });
+    }
+
+    try {
+        const updated = await Chat.findByIdAndUpdate(
+            chatId,
+            { $inc: { shareCount: 1 } },
+            { new: true }
+        ).select('shareCount');
+        if (!updated) {
+            return res.status(404).json({ error: 'Post not found' });
+        }
+        return res.json({ shareCount: Math.max(0, updated.shareCount || 0) });
+    } catch (err) {
+        console.error('Share chat error:', err.message);
+        return res.status(500).json({ error: 'Server error recording share' });
+    }
+});
+
+// POST /chats/:chatId/view { userId }
+// Gated by viewedBy (like likes) so repeated polls/renders for the same
+// viewer don't inflate the count — one view credited per user per post.
+// Anonymous callers without a valid userId still get a 200 with the
+// current count, just without persisting anything (nothing to dedup
+// against), so the client never has to special-case a signed-out viewer.
+app.post('/chats/:chatId/view', async (req, res) => {
+    const { chatId } = req.params;
+    const { userId } = req.body || {};
+
+    if (!mongoose.Types.ObjectId.isValid(chatId)) {
+        return res.status(400).json({ error: 'Invalid chat id' });
+    }
+
+    try {
+        if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
+            const existing = await Chat.findById(chatId).select('viewCount');
+            if (!existing) return res.status(404).json({ error: 'Post not found' });
+            return res.json({ viewCount: Math.max(0, existing.viewCount || 0) });
+        }
+
+        const chat = await Chat.findById(chatId).select('viewedBy viewCount');
+        if (!chat) {
+            return res.status(404).json({ error: 'Post not found' });
+        }
+
+        const alreadyViewed = chat.viewedBy.some(id => String(id) === String(userId));
+        if (alreadyViewed) {
+            return res.json({ viewCount: Math.max(0, chat.viewCount || 0) });
+        }
+
+        const updated = await Chat.findByIdAndUpdate(
+            chatId,
+            { $addToSet: { viewedBy: userId }, $inc: { viewCount: 1 } },
+            { new: true }
+        ).select('viewCount');
+        return res.json({ viewCount: Math.max(0, updated?.viewCount || 0) });
+    } catch (err) {
+        console.error('View chat error:', err.message);
+        return res.status(500).json({ error: 'Server error recording view' });
     }
 });
 
