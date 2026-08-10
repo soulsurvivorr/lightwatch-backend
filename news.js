@@ -1004,11 +1004,11 @@ module.exports = function initNewsSystem(app, deps) {
 
     async function notifyAllUsers(event, reason) {
         try {
-            // Respects the "Outage news alerts" toggle on the account
-            // page (PushSubscription.outageNewsAlertsEnabled, default
-            // true) — same opt-out pattern chatMentionsEnabled/
-            // muteGlobalChat already use for chat pushes.
-            const subscribers = await PushSubscription.find({ outageNewsAlertsEnabled: { $ne: false } }).lean();
+            // Send every news event to all subscribed push clients.
+            // This intentionally ignores the outage-specific opt-out
+            // toggle, because every fetched news item should arrive as a
+            // notification to users when this feature is enabled.
+            const subscribers = await PushSubscription.find({}).lean();
             if (!subscribers.length) return;
             const payload = {
                 title: 'LightWatch News — Ghana',
@@ -1093,26 +1093,13 @@ module.exports = function initNewsSystem(app, deps) {
     async function notifyForEvent(event, combinedText) {
         if (event.notifiedStates.includes(event.category)) return;
 
-        const broadcast = shouldBroadcastToAll(combinedText, event.isNationwide, event.category);
-        const reason = event.isNationwide ? 'nationwide' : (DUMSOR_REGEX.test(combinedText) ? 'dumsor-keyword' : 'outage-category');
+        const reason = 'all-news';
 
         if (activeCycleQueue) {
-            if (broadcast) {
-                activeCycleQueue.broadcasts.push({ event, reason });
-            } else if (event.affectedLocations.length) {
-                for (const loc of event.affectedLocations) {
-                    if (!activeCycleQueue.byLocation.has(loc)) activeCycleQueue.byLocation.set(loc, []);
-                    activeCycleQueue.byLocation.get(loc).push(event);
-                }
-            }
-        } else if (broadcast) {
+            activeCycleQueue.broadcasts.push({ event, reason });
+        } else {
             await notifyAllUsers(event, reason);
-        } else if (event.affectedLocations.length) {
-            await notifyLocationMentions(event, event.affectedLocations);
         }
-        // else: no specific location and not broadcast-worthy — nothing
-        // to target notifications at (e.g. a vague general-category
-        // story); it still shows up in the feed either way.
 
         event.notifiedStates.push(event.category);
         await event.save();
