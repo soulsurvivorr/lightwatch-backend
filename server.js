@@ -3849,6 +3849,14 @@ app.post('/lightstatus', async (req, res) => {
     if (!['on', 'off'].includes(status)) return res.status(400).json({ error: 'status must be on or off' });
 
     try {
+        const locationKey = normalizeLocation(location).split(',')[0].trim();
+        if (status === 'off' && userId) {
+            const user = await User.findById(userId).select('favoriteLocationKeys').lean();
+            if (user?.favoriteLocationKeys?.includes(locationKey)) {
+                return res.status(403).json({ error: 'Cannot report light off for a favorite location' });
+            }
+        }
+
         // lat/lng are optional — sent by clients that had a GPS fix handy
         // when they reported (e.g. the map view's report action). They
         // refine that location's pin on GET /locations/map going forward;
