@@ -494,7 +494,18 @@ const lightStatusSchema = new mongoose.Schema({
     // fix lands here it takes priority over the approximation, so pin
     // accuracy improves organically as real reports accumulate.
     lat: { type: Number, default: null },
-    lng: { type: Number, default: null }
+    lng: { type: Number, default: null },
+    // Admin-set daily ON/OFF timer for this location, set from the admin
+    // dashboard's Locations tab (POST /admin/locations/schedule). Times
+    // are "HH:mm" 24h strings, or null when that half of the timer isn't
+    // set. runLocationScheduleTick() below checks these every minute and
+    // pushes a real status update through applyLightStatusUpdate() when
+    // the current time matches, so a fired timer looks identical to an
+    // admin manually flipping the switch.
+    schedule: {
+        onTime:  { type: String, default: null },
+        offTime: { type: String, default: null }
+    }
 });
 
 const lightStatusEventSchema = new mongoose.Schema({
@@ -3163,6 +3174,9 @@ app.get('/lightstatus', async (req, res) => {
             status: record?.status || 'unknown',
             reportedBy: record?.reportedBy || null,
             reportedAt: record?.reportedAt || null,
+            schedule: (record?.schedule && (record.schedule.onTime || record.schedule.offTime))
+                ? { onTime: record.schedule.onTime || null, offTime: record.schedule.offTime || null }
+                : null,
             stats
         });
     } catch (err) {
@@ -3630,6 +3644,55 @@ if (process.env.NODE_ENV !== 'test') {
     }, 30 * 60 * 1000); // check twice an hour — plenty of margin to land within the target hour
 }
 
+// ── Per-location ON/OFF timer ─────────────────────────────────────────
+// Admin can set a daily onTime/offTime (HH:mm, 24h) per location from
+// the Locations tab (POST /admin/locations/schedule below). Checked once
+// a minute — fine-grained enough for minute-level times, and frequent
+// enough that a server restart mid-minute still catches that minute's
+// target before it passes.
+//
+// Timezone note: this compares against the server's own clock
+// (now.getHours()/getMinutes()), same as the check-in scheduler above.
+// Ghana is UTC+0 year-round (no DST), so this is only correct if the
+// server's system clock is set to UTC — worth confirming on Render.
+const scheduleFiredToday = new Map(); // `${locationKey}:${onOrOff}` -> dateKey already fired, guards against re-firing on a later tick within the same minute/day
+
+async function runLocationScheduleTick() {
+    try {
+        const scheduled = await LightStatus.find({
+            $or: [{ 'schedule.onTime': { $ne: null } }, { 'schedule.offTime': { $ne: null } }]
+        }).lean();
+        if (!scheduled.length) return;
+
+        const now = new Date();
+        const nowHM = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+        const dateKey = now.toISOString().slice(0, 10);
+
+        for (const loc of scheduled) {
+            const sched = loc.schedule || {};
+            for (const [field, targetStatus] of [['onTime', 'on'], ['offTime', 'off']]) {
+                if (!sched[field] || sched[field] !== nowHM) continue;
+                const fireKey = `${loc.locationKey}:${field}`;
+                if (scheduleFiredToday.get(fireKey) === dateKey) continue; // already fired this minute/day
+                scheduleFiredToday.set(fireKey, dateKey);
+                if (loc.status === targetStatus) continue; // already in that state — nothing to push
+                try {
+                    await applyLightStatusUpdate(loc.locationKey, targetStatus, { reportedByOverride: 'LightWatch Timer' });
+                    console.log(`Timer fired: ${loc.locationKey} -> ${targetStatus}`);
+                } catch (err) {
+                    console.error(`Timer error for ${loc.locationKey}:`, err.message);
+                }
+            }
+        }
+    } catch (err) {
+        console.error('Location schedule tick error:', err.message);
+    }
+}
+
+if (process.env.NODE_ENV !== 'test') {
+    setInterval(runLocationScheduleTick, 60 * 1000);
+}
+
 async function sendPushToOne(sub, notification) {
     if (sub.platform === 'android') {
         return sendFcmToOne(sub, notification);
@@ -3916,7 +3979,10 @@ app.get('/admin/locations', verifyAdminToken, async (req, res) => {
                 label: titleCaseLocation(s.locationKey),
                 status: s.status,
                 reportedBy: s.reportedBy || null,
-                reportedAt: s.reportedAt || null
+                reportedAt: s.reportedAt || null,
+                schedule: (s.schedule && (s.schedule.onTime || s.schedule.offTime))
+                    ? { onTime: s.schedule.onTime || null, offTime: s.schedule.offTime || null }
+                    : null
             });
         });
         userCities.forEach(city => {
@@ -3995,6 +4061,54 @@ app.delete('/admin/locations', verifyAdminToken, async (req, res) => {
     } catch (err) {
         console.error('Admin hide locations error:', err.message);
         return res.status(500).json({ error: 'Server error hiding locations' });
+    }
+});
+
+// ---- ADMIN: set/clear a location's daily ON/OFF timer (protected) ----
+// Times are "HH:mm" 24h strings (or null/omitted to leave that half of
+// the timer unset). Sending both as null/empty clears the timer
+// entirely. runLocationScheduleTick() (above, near the check-in
+// scheduler) is what actually fires these once a minute.
+const HHMM_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+app.post('/admin/locations/schedule', verifyAdminToken, async (req, res) => {
+    const location = String(req.body?.location || '').trim();
+    if (!location) return res.status(400).json({ error: 'Location is required' });
+
+    const normalizeTime = (value) => {
+        if (value === undefined || value === null || value === '') return null;
+        return String(value).trim();
+    };
+    const onTime = normalizeTime(req.body?.onTime);
+    const offTime = normalizeTime(req.body?.offTime);
+    if (onTime !== null && !HHMM_RE.test(onTime)) {
+        return res.status(400).json({ error: 'onTime must be in HH:mm 24-hour format' });
+    }
+    if (offTime !== null && !HHMM_RE.test(offTime)) {
+        return res.status(400).json({ error: 'offTime must be in HH:mm 24-hour format' });
+    }
+
+    const key = normalizeLocation(location).split(',')[0].trim();
+    if (!key) return res.status(400).json({ error: 'Invalid location' });
+
+    try {
+        const updated = await LightStatus.findOneAndUpdate(
+            { locationKey: key },
+            { locationKey: key, schedule: { onTime, offTime } },
+            { upsert: true, new: true }
+        );
+        // Clear any stale "already fired today" guards for this location so
+        // a newly-saved time can fire today instead of waiting for a
+        // stale entry (from a previous, different time) to block it.
+        scheduleFiredToday.delete(`${key}:onTime`);
+        scheduleFiredToday.delete(`${key}:offTime`);
+        return res.json({
+            locationKey: updated.locationKey,
+            schedule: (onTime || offTime) ? { onTime, offTime } : null
+        });
+    } catch (err) {
+        console.error('Admin set schedule error:', err.message);
+        return res.status(500).json({ error: 'Server error saving timer' });
     }
 });
 
