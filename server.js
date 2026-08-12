@@ -645,6 +645,18 @@ const PushSubscription = mongoose.model('PushSubscription', pushSubscriptionSche
 const AdminLocation     = mongoose.model('AdminLocation', new mongoose.Schema({
     locationKey: { type: String, required: true, unique: true },
     label: { type: String, required: true },
+    // Set when the admin picks a region/uses the location picker while
+    // adding this location (see POST /admin/locations below) — passed
+    // through to resolveLocationCoords()/geocodeWithCache() the same way
+    // a signed-up user's own region already disambiguates same-named
+    // towns for them.
+    region: { type: String, default: null },
+    // Only set when the admin actually dropped a pin (via the shared
+    // LWLocationPicker widget) rather than just typing a name — lets
+    // this location skip geocoding entirely and plot at the exact spot
+    // the admin picked (see getLocationsMapData() in server.js).
+    lat: { type: Number, default: null },
+    lng: { type: Number, default: null },
     hidden: { type: Boolean, default: false },
     createdAt: { type: Date, default: Date.now }
 }));
@@ -3246,9 +3258,10 @@ app.get('/areas/known', async (req, res) => {
 // needs (and unlike /areas/known, this always returns a plottable
 // position for every entry — see resolveLocationCoords()).
 async function getLocationsMapData() {
-    const [users, statuses] = await Promise.all([
+    const [users, statuses, adminLocations] = await Promise.all([
         User.find().select('city region lat lng secondaryLocation').lean(),
-        LightStatus.find().lean()
+        LightStatus.find().lean(),
+        AdminLocation.find().lean()
     ]);
 
     const statusByKey = new Map(statuses.map(s => [s.locationKey, s]));
@@ -3269,6 +3282,18 @@ async function getLocationsMapData() {
     users.forEach(u => {
         addKeyMeta(u.city, u.region, u.lat, u.lng);
         if (u.secondaryLocation?.city) addKeyMeta(u.secondaryLocation.city, u.secondaryLocation.region, null, null);
+    });
+    // Locations an admin added via the Locations panel (POST
+    // /admin/locations) previously never made it into `keys` here unless
+    // a status report or a signed-up user happened to already exist for
+    // that same town — so a freshly admin-added location silently didn't
+    // show up on the public map at all. Folding non-hidden AdminLocation
+    // rows into the same addKeyMeta() pass fixes that: it always gets
+    // plotted, using the admin's picked lat/lng directly when they
+    // dropped a pin, or the admin's region to disambiguate the geocode
+    // otherwise (see resolveLocationCoords() below).
+    adminLocations.filter(l => !l.hidden).forEach(l => {
+        addKeyMeta(l.label || l.locationKey, l.region, l.lat, l.lng);
     });
 
     const locations = await Promise.all(Array.from(keys).map(async (key) => {
@@ -4002,6 +4027,9 @@ app.get('/admin/locations', verifyAdminToken, async (req, res) => {
                 map.set(l.locationKey, {
                     locationKey: l.locationKey,
                     label: l.label || titleCaseLocation(l.locationKey),
+                    region: l.region || null,
+                    lat: l.lat ?? null,
+                    lng: l.lng ?? null,
                     status: 'unknown',
                     reportedBy: null,
                     reportedAt: null
@@ -4028,13 +4056,29 @@ app.post('/admin/locations', verifyAdminToken, async (req, res) => {
     }
     const label = String(req.body?.label || titleCaseLocation(key)).trim() || titleCaseLocation(key);
 
+    // region/lat/lng are all optional — an admin can still just type a
+    // bare name with no region and no picked pin, same as before; when
+    // present (region select + LWLocationPicker in admin.html's Add
+    // Location row) they make the resulting map pin exact/disambiguated
+    // instead of relying on a bare-name geocode guess.
+    const region = req.body?.region != null ? String(req.body.region).trim() || null : null;
+    const lat = Number.isFinite(Number(req.body?.lat)) ? Number(req.body.lat) : null;
+    const lng = Number.isFinite(Number(req.body?.lng)) ? Number(req.body.lng) : null;
+
     try {
         const updated = await AdminLocation.findOneAndUpdate(
             { locationKey: key },
-            { locationKey: key, label, hidden: false },
+            { locationKey: key, label, region, lat, lng, hidden: false },
             { upsert: true, new: true }
         );
-        return res.json({ locationKey: updated.locationKey, label: updated.label, hidden: updated.hidden });
+        return res.json({
+            locationKey: updated.locationKey,
+            label: updated.label,
+            region: updated.region,
+            lat: updated.lat,
+            lng: updated.lng,
+            hidden: updated.hidden
+        });
     } catch (err) {
         console.error('Admin add location error:', err.message);
         return res.status(500).json({ error: 'Server error adding location' });
