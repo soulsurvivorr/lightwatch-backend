@@ -11,18 +11,25 @@
 //  with an authoritative ECG-published one — the public frontend can
 //  label/sort them differently by checking `source: 'ecg_official'`.
 //
+//  Every publish/update/resolve below ALSO mirrors a matching entry
+//  into news.js's own NewsEvent collection (source-flagged official),
+//  so it flows straight into the existing public GET /news feed that
+//  index.html already renders — no separate "official news" widget
+//  needed on the public site; it just shows up there, badged official.
+//
 //  MUST be wired in AFTER ecg-auth.js, since it reuses that file's
 //  models/middleware/helpers off app.locals.ecg instead of redefining
-//  them:
+//  them, and works best after news.js so NewsEvent is already
+//  registered (degrades gracefully to ECG-only records if not):
 //      require('./ecg-auth')(app, { mongoose, jwt, JWT_SECRET, verifyAdminToken });
 //      require('./ecg-news')(app, { mongoose });
 //
 //  Routes:
 //    GET    /ecg/events            — PUBLIC. Official updates feed.
 //    GET    /ecg/events/:id        — PUBLIC. Single event detail.
-//    POST   /ecg/events            — PROTECTED. Publish a new event.
-//    PATCH  /ecg/events/:id        — PROTECTED. Update / resolve.
-//    DELETE /ecg/events/:id        — PROTECTED. Retract.
+//    POST   /ecg/events            — PROTECTED (publish_updates). Publish a new event.
+//    PATCH  /ecg/events/:id        — PROTECTED (manage_events). Update / resolve.
+//    DELETE /ecg/events/:id        — PROTECTED (manage_events). Retract.
 // ============================================================
 
 module.exports = function setupEcgNews(app, { mongoose }) {
@@ -31,7 +38,7 @@ module.exports = function setupEcgNews(app, { mongoose }) {
         throw new Error('[ecg-news] app.locals.ecg is missing — require("./ecg-auth")(app, ...) must run before require("./ecg-news")(app, ...)');
     }
     const { OrgUnit, EcgStaff } = ecg.models;
-    const { verifyEcgToken } = ecg.middleware;
+    const { verifyEcgToken, requirePermission } = ecg.middleware;
     const { canManageUnit, logAudit, publicOrgUnit } = ecg.helpers;
 
     const ecgEventSchema = new mongoose.Schema({
@@ -52,6 +59,7 @@ module.exports = function setupEcgNews(app, { mongoose }) {
 
         source: { type: String, default: 'ecg_official', immutable: true },
         confirmedCommunityReportRefs: { type: [String], default: [] },
+        mirroredNewsEventId: { type: mongoose.Schema.Types.ObjectId, ref: 'NewsEvent', default: null },
 
         history: [{
             action: String,
@@ -68,6 +76,48 @@ module.exports = function setupEcgNews(app, { mongoose }) {
     ecgEventSchema.index({ orgUnitId: 1 });
 
     const EcgOfficialEvent = mongoose.models.EcgOfficialEvent || mongoose.model('EcgOfficialEvent', ecgEventSchema);
+
+    const EVENT_CATEGORY = { outage: 'outage', restoration: 'restoration', maintenance: 'maintenance', advisory: 'general' };
+    const EVENT_TYPE_LABEL = { outage: 'Unplanned Outage', restoration: 'Power Restored', maintenance: 'Planned Maintenance', advisory: 'Advisory' };
+
+    // Mirrors an official ECG event into news.js's public NewsEvent
+    // collection so it appears in GET /news (index.html's feed),
+    // badged official via sources[].official = true. No-op if news.js
+    // hasn't registered its model for some reason.
+    async function mirrorToPublicNews(event, { isUpdate = false } = {}) {
+        const NewsEvent = mongoose.models.NewsEvent;
+        if (!NewsEvent) return;
+        try {
+            const doc = {
+                category: EVENT_CATEGORY[event.eventType] || 'general',
+                eventType: EVENT_TYPE_LABEL[event.eventType] || event.eventType,
+                headline: event.headline,
+                summary: event.summary || '',
+                affectedLocations: event.affectedAreas,
+                isNationwide: false,
+                startTime: event.startTime,
+                endTime: event.endTime,
+                firstPublishedAt: event.createdAt || new Date(),
+                lastUpdatedAt: new Date(),
+                dedupeKey: `ecg-event-${event._id}`,
+                sources: [{
+                    name: event.orgUnitName || 'ECG Official', icon: '⚡', official: true,
+                    url: null, resolvedUrl: null, headline: event.headline, publishedAt: new Date()
+                }],
+                confidenceScore: 100,
+                status: event.status
+            };
+            if (event.mirroredNewsEventId && isUpdate) {
+                await NewsEvent.findByIdAndUpdate(event.mirroredNewsEventId, doc);
+                return event.mirroredNewsEventId;
+            }
+            const created = await NewsEvent.create(doc);
+            return created._id;
+        } catch (err) {
+            console.error('[ecg-news] mirror to public news failed:', err.message);
+            return null;
+        }
+    }
 
     function publicEvent(ev) {
         return {
@@ -125,7 +175,7 @@ module.exports = function setupEcgNews(app, { mongoose }) {
     });
 
     // ---- PROTECTED: publish a new official event ----
-    app.post('/ecg/events', verifyEcgToken, async (req, res) => {
+    app.post('/ecg/events', verifyEcgToken, requirePermission('publish_updates'), async (req, res) => {
         try {
             const { eventType, headline, summary, affectedAreas, orgUnitId, startTime } = req.body || {};
             if (!eventType || !headline || !Array.isArray(affectedAreas) || affectedAreas.length === 0) {
@@ -135,7 +185,8 @@ module.exports = function setupEcgNews(app, { mongoose }) {
             const targetUnitId = orgUnitId || req.ecgStaff.orgUnitId;
             const targetUnit = await OrgUnit.findById(targetUnitId);
             if (!targetUnit) return res.status(404).json({ error: 'Organization unit not found' });
-            if (!(await canManageUnit(req.ecgStaff, targetUnit)) && String(targetUnit._id) !== String(req.ecgStaff.orgUnitId)) {
+            const withinScope = String(targetUnit._id) === String(req.ecgStaff.orgUnitId) || (await canManageUnit(req.ecgStaff, targetUnit));
+            if (!withinScope) {
                 return res.status(403).json({ error: 'You cannot publish events for that organization unit' });
             }
             if (targetUnit.type !== 'district') {
@@ -162,7 +213,10 @@ module.exports = function setupEcgNews(app, { mongoose }) {
                 history: [{ action: 'published', byStaffName: req.ecgStaff.name }]
             });
 
-            await logAudit({ staff: req.ecgStaff, orgUnit: req.ecgOrgUnit, action: 'event_published', details: { eventId: event._id, headline: event.headline, areas: cleanAreas }, req });
+            const mirroredId = await mirrorToPublicNews(event);
+            if (mirroredId) { event.mirroredNewsEventId = mirroredId; await event.save(); }
+
+            await logAudit({ staff: req.ecgStaff, orgUnit: req.ecgOrgUnit, action: 'event_published', target: event.headline, details: { eventId: event._id, headline: event.headline, areas: cleanAreas }, req });
 
             return res.status(201).json(publicEvent(event));
         } catch (err) {
@@ -172,7 +226,7 @@ module.exports = function setupEcgNews(app, { mongoose }) {
     });
 
     // ---- PROTECTED: update / resolve an event ----
-    app.patch('/ecg/events/:id', verifyEcgToken, async (req, res) => {
+    app.patch('/ecg/events/:id', verifyEcgToken, requirePermission('manage_events'), async (req, res) => {
         try {
             const event = await EcgOfficialEvent.findById(req.params.id);
             if (!event) return res.status(404).json({ error: 'Not found' });
@@ -197,7 +251,9 @@ module.exports = function setupEcgNews(app, { mongoose }) {
             event.updatedAt = new Date();
             await event.save();
 
-            await logAudit({ staff: req.ecgStaff, orgUnit: req.ecgOrgUnit, action: 'event_updated', details: { eventId: event._id, changes: req.body }, req });
+            await mirrorToPublicNews(event, { isUpdate: true });
+
+            await logAudit({ staff: req.ecgStaff, orgUnit: req.ecgOrgUnit, action: 'event_updated', target: event.headline, details: { eventId: event._id, changes: req.body }, req });
             return res.json(publicEvent(event));
         } catch (err) {
             console.error('[ecg-news] update event error:', err.message);
@@ -206,7 +262,7 @@ module.exports = function setupEcgNews(app, { mongoose }) {
     });
 
     // ---- PROTECTED: retract an event ----
-    app.delete('/ecg/events/:id', verifyEcgToken, async (req, res) => {
+    app.delete('/ecg/events/:id', verifyEcgToken, requirePermission('manage_events'), async (req, res) => {
         try {
             const event = await EcgOfficialEvent.findById(req.params.id);
             if (!event) return res.status(404).json({ error: 'Not found' });
@@ -215,8 +271,12 @@ module.exports = function setupEcgNews(app, { mongoose }) {
             if (!isOwnUnit && !(await canManageUnit(req.ecgStaff, unit))) {
                 return res.status(403).json({ error: 'Forbidden' });
             }
+            const NewsEvent = mongoose.models.NewsEvent;
+            if (NewsEvent && event.mirroredNewsEventId) {
+                await NewsEvent.findByIdAndDelete(event.mirroredNewsEventId).catch(() => {});
+            }
             await event.deleteOne();
-            await logAudit({ staff: req.ecgStaff, orgUnit: req.ecgOrgUnit, action: 'event_retracted', details: { eventId: req.params.id, headline: event.headline }, req });
+            await logAudit({ staff: req.ecgStaff, orgUnit: req.ecgOrgUnit, action: 'event_retracted', target: event.headline, details: { eventId: req.params.id, headline: event.headline }, req });
             return res.json({ success: true });
         } catch (err) {
             console.error('[ecg-news] delete event error:', err.message);

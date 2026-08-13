@@ -4749,6 +4749,14 @@ require('./ecg-auth')(app, { mongoose, jwt, JWT_SECRET, verifyAdminToken });
 //    why they're kept as distinct collections/routes. ──
 require('./ecg-news')(app, { mongoose });
 
+// ── ECG grid-status toggles (ecg-power.js) — nationwide (HQ Super
+//    Admin only), regional (Regional Manager/Staff), and district
+//    (Station Manager/Operator) power on/off status, permission-gated
+//    and mirrored into the public GET /news feed (index.html). Wired
+//    in AFTER ecg-news.js/ecg-auth.js and after news.js so the
+//    NewsEvent model it mirrors into already exists. ──
+require('./ecg-power')(app, { mongoose });
+
 // ---- HEALTH CHECK ----
 app.get('/', (req, res) => {
     const dbState = mongoose.connection.readyState;
