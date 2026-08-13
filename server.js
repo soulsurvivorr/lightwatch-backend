@@ -636,12 +636,23 @@ const geocodeCacheSchema = new mongoose.Schema({
     geocodedAt: { type: Date, default: Date.now }
 });
 
+// Storm notification tracking — prevents spamming users with duplicate
+// alerts for the same location within a 6-hour window
+const stormNotificationSchema = new mongoose.Schema({
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    locationKey: { type: String, required: true }, // primary or secondary location
+    notifiedAt: { type: Date, default: Date.now },
+    etaHours: { type: Number, default: null } // how many hours until storm arrives
+});
+stormNotificationSchema.index({ userId: 1, locationKey: 1, notifiedAt: -1 });
+
 const User             = mongoose.model('User', userSchema);
 const Chat             = mongoose.model('Chat', chatSchema);
 const Notification     = mongoose.model('Notification', notificationSchema);
 const LightStatus      = mongoose.model('LightStatus', lightStatusSchema);
 const LightStatusEvent = mongoose.model('LightStatusEvent', lightStatusEventSchema);
 const PushSubscription = mongoose.model('PushSubscription', pushSubscriptionSchema);
+const StormNotification = mongoose.model('StormNotification', stormNotificationSchema);
 const AdminLocation     = mongoose.model('AdminLocation', new mongoose.Schema({
     locationKey: { type: String, required: true, unique: true },
     label: { type: String, required: true },
@@ -3718,6 +3729,187 @@ if (process.env.NODE_ENV !== 'test') {
     setInterval(runLocationScheduleTick, 60 * 1000);
 }
 
+// ── Storm warning checker ──────────────────────────────────────────
+// Checks weather at users' locations and sends push notifications
+// when heavy thunderstorms are detected (high risk within 12 hours).
+// Runs every 20 minutes to balance freshness with API rate limits.
+// Deduplicates notifications — won't re-notify same user/location
+// within 6 hours of the last alert.
+
+const STORM_CHECK_INTERVAL_MS = 20 * 60 * 1000;  // 20 minutes
+const STORM_NOTIFICATION_COOLDOWN_MS = 6 * 60 * 60 * 1000;  // 6 hours
+const WEATHER_API_BASE = 'https://api.open-meteo.com/v1/forecast';
+
+async function fetchWeatherForCoords(lat, lng) {
+    try {
+        const url = `${WEATHER_API_BASE}?latitude=${lat}&longitude=${lng}&current=weather_code&hourly=weather_code&forecast_days=2&timezone=auto`;
+        const response = await timeExternalCall(`Storm check weather (${lat},${lng})`, () => fetch(url));
+        if (!response.ok) throw new Error(`Weather API responded ${response.status}`);
+        return await response.json();
+    } catch (err) {
+        console.error('Storm weather fetch error:', err.message);
+        return null;
+    }
+}
+
+// Assesses if a storm is approaching in the next 12 hours.
+// Returns { hasStorm: boolean, etaHours: number|null, description: string }
+function assessStormRisk(forecast) {
+    if (!forecast?.hourly?.weather_code) return { hasStorm: false, etaHours: null, description: null };
+    
+    const codes = forecast.hourly.weather_code;
+    const maxHoursToCheck = 12;
+    
+    // WMO codes 95, 96, 99 = thunderstorm
+    for (let i = 0; i < Math.min(codes.length, maxHoursToCheck); i++) {
+        const code = codes[i];
+        if (code === 95 || code === 96 || code === 99) {
+            const descriptions = {
+                95: 'Thunderstorm',
+                96: 'Thunderstorm with slight hail',
+                99: 'Thunderstorm with heavy hail'
+            };
+            return {
+                hasStorm: true,
+                etaHours: i,
+                description: descriptions[code] || 'Thunderstorm approaching'
+            };
+        }
+    }
+    
+    return { hasStorm: false, etaHours: null, description: null };
+}
+
+// Checks if user was already notified about a storm at this location
+// within the cooldown period.
+async function shouldNotifyAboutStorm(userId, locationKey) {
+    const recentNotif = await StormNotification.findOne({
+        userId,
+        locationKey,
+        notifiedAt: { $gte: new Date(Date.now() - STORM_NOTIFICATION_COOLDOWN_MS) }
+    }).lean();
+    
+    return !recentNotif;
+}
+
+// Main storm checker that runs on an interval
+async function checkAndNotifyStorms() {
+    try {
+        // Fetch all users with push subscriptions
+        const usersWithSubs = await User.find().select('_id city region lat lng secondaryLocation').lean();
+        if (!usersWithSubs.length) return;
+        
+        const userIds = usersWithSubs.map(u => String(u._id));
+        const subscribers = await PushSubscription.find({
+            userId: { $in: userIds }
+        }).select('userId location platform subscription fcmToken').lean();
+        
+        if (!subscribers.length) return;
+        
+        // Group subscribers by userId for easier lookup
+        const subsByUserId = new Map();
+        subscribers.forEach(sub => {
+            const uid = String(sub.userId);
+            if (!subsByUserId.has(uid)) subsByUserId.set(uid, []);
+            subsByUserId.get(uid).push(sub);
+        });
+        
+        let notificationssSent = 0;
+        
+        // Check weather for each user's locations
+        for (const user of usersWithSubs) {
+            const userId = String(user._id);
+            const userSubs = subsByUserId.get(userId);
+            if (!userSubs || !userSubs.length) continue;
+            
+            const locationsToCheck = [];
+            
+            // Primary location
+            if (user.lat && user.lng) {
+                locationsToCheck.push({
+                    lat: user.lat,
+                    lng: user.lng,
+                    locationKey: normalizeLocation(user.city).split(',')[0].trim(),
+                    label: titleCaseLocation(user.city)
+                });
+            }
+            
+            // Secondary location if set
+            if (user.secondaryLocation?.city && user.secondaryLocation?.region) {
+                const secondLat = user.secondaryLocation?.lat;
+                const secondLng = user.secondaryLocation?.lng;
+                if (secondLat && secondLng) {
+                    locationsToCheck.push({
+                        lat: secondLat,
+                        lng: secondLng,
+                        locationKey: normalizeLocation(user.secondaryLocation.city).split(',')[0].trim(),
+                        label: titleCaseLocation(user.secondaryLocation.city)
+                    });
+                }
+            }
+            
+            // Check each location for storms
+            for (const loc of locationsToCheck) {
+                // Skip if already notified recently
+                const shouldNotify = await shouldNotifyAboutStorm(userId, loc.locationKey);
+                if (!shouldNotify) continue;
+                
+                // Fetch weather
+                const forecast = await fetchWeatherForCoords(loc.lat, loc.lng);
+                if (!forecast) continue;
+                
+                // Assess risk
+                const risk = assessStormRisk(forecast);
+                if (!risk.hasStorm) continue;
+                
+                // Send notifications to all this user's devices
+                const payload = {
+                    title: '⚠️ Storm Warning',
+                    body: risk.etaHours === 0 
+                        ? `Heavy storm now in ${loc.label}! Seek shelter.`
+                        : `Storm warning: ${risk.description} approaching ${loc.label} in ${risk.etaHours} hour${risk.etaHours === 1 ? '' : 's'}`,
+                    url: '/pages/home.html',
+                    tag: `storm-${loc.locationKey}`,
+                    requireInteraction: true,
+                    vibrate: [500, 200, 500, 200, 500],
+                    tone: 'storm'
+                };
+                
+                try {
+                    await sendPushToSubscribers(userSubs, payload);
+                    notificationssSent += userSubs.length;
+                    
+                    // Track the notification
+                    await StormNotification.create({
+                        userId,
+                        locationKey: loc.locationKey,
+                        etaHours: risk.etaHours
+                    });
+                    
+                    console.log(`Storm warning sent to user ${userId} for ${loc.label} (ETA: ${risk.etaHours}h)`);
+                } catch (err) {
+                    console.error(`Failed to send storm warning for ${loc.label}:`, err.message);
+                }
+            }
+        }
+        
+        if (notificationssSent > 0) {
+            console.log(`Storm warning cycle complete: ${notificationssSent} notification(s) sent`);
+        }
+    } catch (err) {
+        console.error('Storm check error:', err.message);
+    }
+}
+
+if (process.env.NODE_ENV !== 'test') {
+    setInterval(checkAndNotifyStorms, STORM_CHECK_INTERVAL_MS);
+    // Run once on startup after a 2-minute delay to let everything initialize
+    setTimeout(() => {
+        console.log('Starting periodic storm warning checks (every 20 minutes)');
+        checkAndNotifyStorms();
+    }, 2 * 60 * 1000);
+}
+
 async function sendPushToOne(sub, notification) {
     if (sub.platform === 'android') {
         return sendFcmToOne(sub, notification);
@@ -4541,6 +4733,21 @@ require('./weather')(app, {
     // "Your area" — see weather.js's own comment on getCityForCoords().
     reverseGeocodeCity
 });
+
+// ── ECG staff auth & organization system (ecg-auth.js) — invitation-
+//    only ECG staff accounts, org hierarchy (HQ → regional → district),
+//    private branch keys, RBAC, audit log. Must be wired in BEFORE
+//    ecg-news.js, which reuses its models/middleware off app.locals.ecg.
+//    Powers ecg-dashboard.html, the single shared ECG staff dashboard. ──
+require('./ecg-auth')(app, { mongoose, jwt, JWT_SECRET, verifyAdminToken });
+
+// ── ECG official updates feed (ecg-news.js) — authoritative
+//    outage/restoration/maintenance/advisory events published by
+//    invited ECG staff through ecg-dashboard.html, scoped to their
+//    organization unit's real coverage areas. Separate from the
+//    scraped/inferred news.js feed above — see that file's header for
+//    why they're kept as distinct collections/routes. ──
+require('./ecg-news')(app, { mongoose });
 
 // ---- HEALTH CHECK ----
 app.get('/', (req, res) => {
