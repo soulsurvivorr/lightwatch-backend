@@ -579,10 +579,23 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
     });
 
     // ---- PROTECTED: staff list, scoped ----
+    // Includes orgUnitName/orgUnitType alongside each staff row — this is
+    // what lets a manager visually confirm "this account is assigned to
+    // the station/region I meant it to be" instead of just seeing a role.
     app.get('/ecg/staff', verifyEcgToken, async (req, res) => {
         const unitIds = await scopedUnitIds(req.ecgStaff);
         const staff = await EcgStaff.find({ orgUnitId: { $in: unitIds } }).sort({ createdAt: -1 }).lean();
-        return res.json(staff.map(publicStaff));
+        const units = await OrgUnit.find({ _id: { $in: [...new Set(staff.map(s => String(s.orgUnitId)))] } }, 'name type region').lean();
+        const unitById = new Map(units.map(u => [String(u._id), u]));
+        return res.json(staff.map(s => {
+            const unit = unitById.get(String(s.orgUnitId));
+            return {
+                ...publicStaff(s),
+                orgUnitName: unit ? unit.name : null,
+                orgUnitType: unit ? unit.type : null,
+                orgUnitRegion: unit ? unit.region : null
+            };
+        }));
     });
 
     // ---- PROTECTED: activate/deactivate/edit a staff member ----
@@ -655,14 +668,24 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
         }
     });
 
+    // Same visual-confirmation fix as GET /ecg/staff above, applied to
+    // pending invitations — so you can see exactly where an invite will
+    // land before (and after) it's accepted, not just who it's for.
     app.get('/ecg/invitations', verifyEcgToken, async (req, res) => {
         const unitIds = await scopedUnitIds(req.ecgStaff);
         const invitations = await EcgInvitation.find({ orgUnitId: { $in: unitIds }, usedAt: null, revoked: false })
             .sort({ createdAt: -1 }).lean();
-        return res.json(invitations.map(inv => ({
-            id: inv._id, email: inv.email, role: inv.role, orgUnitId: inv.orgUnitId,
-            expiresAt: inv.expiresAt, createdAt: inv.createdAt
-        })));
+        const units = await OrgUnit.find({ _id: { $in: [...new Set(invitations.map(i => String(i.orgUnitId)))] } }, 'name type region').lean();
+        const unitById = new Map(units.map(u => [String(u._id), u]));
+        return res.json(invitations.map(inv => {
+            const unit = unitById.get(String(inv.orgUnitId));
+            return {
+                id: inv._id, email: inv.email, role: inv.role, orgUnitId: inv.orgUnitId,
+                orgUnitName: unit ? unit.name : null,
+                orgUnitType: unit ? unit.type : null,
+                expiresAt: inv.expiresAt, createdAt: inv.createdAt
+            };
+        }));
     });
 
     app.delete('/ecg/invitations/:id', verifyEcgToken, async (req, res) => {
