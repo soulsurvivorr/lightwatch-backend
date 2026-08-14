@@ -107,7 +107,9 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
         'manage_org_units', 'manage_regional_offices', 'manage_local_stations',
         'delete_org_units',
         // Sensitive / system-level
-        'manage_branch_keys', 'manage_operational_permissions', 'manage_ecg_config'
+        'manage_branch_keys', 'manage_operational_permissions', 'manage_ecg_config',
+        // Assets & announcements (see ecg-ops.js)
+        'manage_power_plants', 'manage_transmission', 'manage_announcements', 'manage_integrations'
     ];
 
     // Everything HQ Super Admin gets, always, non-negotiable.
@@ -118,12 +120,14 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
         hq_manager: [
             'view_nationwide_status', 'view_all_regions', 'view_community_reports',
             'view_outages', 'monitor_stations', 'view_audit_log',
-            'publish_updates', 'manage_events', 'invite_staff'
+            'publish_updates', 'manage_events', 'invite_staff',
+            'manage_power_plants', 'manage_transmission', 'manage_announcements'
             // Deliberately excluded: assign_roles beyond hq_staff, manage_staff over
             // peers/super admin, manage_org_units, delete_org_units, manage_branch_keys,
-            // manage_operational_permissions, manage_ecg_config, control_nationwide_power.
-            // These require an explicit grant from an HQ Super Admin (see canGrantRole /
-            // invitation permission checks below) — never assumed by the hq_manager role.
+            // manage_operational_permissions, manage_ecg_config, manage_integrations,
+            // control_nationwide_power. These require an explicit grant from an HQ
+            // Super Admin (see canGrantRole / invitation permission checks below) —
+            // never assumed by the hq_manager role.
         ],
         hq_staff: [
             'view_nationwide_status', 'view_outages', 'view_community_reports', 'monitor_stations'
@@ -131,7 +135,8 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
         regional_manager: [
             'view_nationwide_status', 'view_all_regions', 'view_community_reports',
             'view_outages', 'monitor_stations', 'publish_updates', 'manage_events',
-            'invite_staff', 'manage_local_stations', 'control_regional_power'
+            'invite_staff', 'manage_local_stations', 'control_regional_power',
+            'manage_power_plants', 'manage_transmission', 'manage_announcements'
         ],
         regional_staff: [
             'view_nationwide_status', 'view_community_reports', 'view_outages',
@@ -139,7 +144,8 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
         ],
         station_manager: [
             'view_community_reports', 'view_outages', 'monitor_stations',
-            'publish_updates', 'manage_events', 'invite_staff', 'control_district_power'
+            'publish_updates', 'manage_events', 'invite_staff', 'control_district_power',
+            'manage_transmission', 'manage_announcements'
         ],
         station_operator: [
             'view_community_reports', 'view_outages', 'monitor_stations', 'control_district_power'
@@ -621,6 +627,11 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
                 canManageStaff: has('manage_staff') || ['hq_super_admin', 'regional_manager', 'station_manager'].includes(req.ecgStaff.role),
                 canManageOperationalPermissions: has('manage_operational_permissions'),
                 canManageEcgConfig: has('manage_ecg_config'),
+                canManagePowerPlants: has('manage_power_plants'),
+                canManageTransmission: has('manage_transmission'),
+                canManageAnnouncements: has('manage_announcements'),
+                canManageIntegrations: has('manage_integrations'),
+                canViewRegionsOverview: req.ecgOrgUnit.type === 'headquarters',
                 scopedUnitCount: unitIds.length
             }
         });

@@ -4757,6 +4757,13 @@ require('./ecg-news')(app, { mongoose });
 //    NewsEvent model it mirrors into already exists. ──
 require('./ecg-power')(app, { mongoose });
 
+// ── ECG operations: power plants, transmission lines, regions
+//    overview, alerts & announcements, reports & analytics, per-unit
+//    settings, integrations, and system health (ecg-ops.js). Wired in
+//    after ecg-auth.js (reuses its shared models/middleware/helpers
+//    off app.locals.ecg, same pattern as ecg-news.js/ecg-power.js). ──
+require('./ecg-ops')(app, { mongoose });
+
 // ---- HEALTH CHECK ----
 app.get('/', (req, res) => {
     const dbState = mongoose.connection.readyState;
