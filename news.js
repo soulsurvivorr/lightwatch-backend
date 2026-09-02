@@ -1267,7 +1267,7 @@ module.exports = function initNewsSystem(app, deps) {
         const articleUrl = raw.url;
         if (!title || !articleUrl) return null;
 
-        const summary = stripHtml(raw.summary || '').slice(0, 500) || title;
+        const summary = stripHtml(raw.summary || '').slice(0, 30000) || title;
         const combinedText = `${title} ${summary}`;
         const dedupeKey = titleDedupeKey(title);
 
@@ -1301,8 +1301,17 @@ module.exports = function initNewsSystem(app, deps) {
         // layer below wants to see (extra corroboration), so they're
         // no longer dropped/replaced here the way the old version of
         // this file did.
-        const existing = await NewsArticle.findOne({ articleUrl }).select('_id imageUrl resolvedUrl eventId').lean();
+        const existing = await NewsArticle.findOne({ articleUrl }).select('_id summary imageUrl resolvedUrl eventId').lean();
         if (existing) {
+            if (summary.length > String(existing.summary || '').length) {
+                await NewsArticle.updateOne({ _id: existing._id }, { $set: { summary } });
+                if (existing.eventId) {
+                    await NewsEvent.updateOne(
+                        { _id: existing.eventId },
+                        { $set: { summary } }
+                    );
+                }
+            }
             // Self-heal: articles stored before the media:content/
             // media:thumbnail extraction fix (see extractImageFromRssItem)
             // are sitting in the DB with imageUrl: null forever, since a
@@ -1532,7 +1541,7 @@ module.exports = function initNewsSystem(app, deps) {
             }
             const doc = await storeArticle({
                 title,
-                summary: item.contentSnippet || item.content || item.summary || '',
+                summary: item.content || item.summary || item.contentSnippet || '',
                 url: item.link,
                 imageUrl,
                 resolvedUrl,
@@ -1736,7 +1745,7 @@ module.exports = function initNewsSystem(app, deps) {
             const imageUrl = extractImageFromRssItem(item);
             const doc = await storeArticle({
                 title: item.title,
-                summary: item.contentSnippet || item.content || item.summary || '',
+                summary: item.content || item.summary || item.contentSnippet || '',
                 url: item.link,
                 imageUrl,
                 publishedAt: item.isoDate ? new Date(item.isoDate) : new Date()
@@ -2217,6 +2226,11 @@ module.exports = function initNewsSystem(app, deps) {
     app.get('/news/:id/content', async (req, res) => {
         try {
             const event = await NewsEvent.findById(req.params.id).select('summary sources').lean();
+            const storedArticles = await NewsArticle.find({ eventId: req.params.id }).select('summary').lean();
+            const storedContent = storedArticles.reduce((longest, article) => {
+                const content = String(article.summary || '');
+                return content.length > longest.length ? content : longest;
+            }, '');
             const sources = Array.isArray(event?.sources) ? event.sources : [];
             const articleSource = [...sources].reverse().find((source) => {
                 const candidate = source.resolvedUrl || source.url;
@@ -2227,7 +2241,7 @@ module.exports = function initNewsSystem(app, deps) {
                 }
             }) || sources[sources.length - 1];
             const articleUrl = articleSource?.resolvedUrl || articleSource?.url;
-            if (!articleUrl) return res.json({ content: event?.summary || '' });
+            if (!articleUrl) return res.json({ content: storedContent || event?.summary || '' });
 
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 9000);
@@ -2253,15 +2267,14 @@ module.exports = function initNewsSystem(app, deps) {
                     .get()
                     .filter((paragraph) => paragraph.length >= 35);
                 const content = (paragraphs.length > 0 ? paragraphs.join('\n\n') : root.text().replace(/\s+/g, ' ').trim()).slice(0, 30000);
-                return res.json({ content: content || event.summary || '' });
+                return res.json({ content: content || storedContent || event.summary || '' });
             } finally {
                 clearTimeout(timeout);
             }
         } catch (error) {
             console.warn('[news] Article content fetch failed:', error.message);
             try {
-                const event = await NewsEvent.findById(req.params.id).select('summary').lean();
-                return res.json({ content: event?.summary || '' });
+                return res.json({ content: storedContent || event?.summary || '' });
             } catch (_) {
                 return res.status(404).json({ error: 'Article content unavailable' });
             }
