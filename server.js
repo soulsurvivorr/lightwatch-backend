@@ -1786,7 +1786,7 @@ app.post('/verify', async (req, res) => {
     try {
         let userId;
         let chatHandle;
-        let name, city, region;
+        let name, city, region, createdAt;
 
         if (pending.type === 'signup') {
             const chatHandleValue = await generateUniqueChatHandle();
@@ -1800,6 +1800,7 @@ app.post('/verify', async (req, res) => {
             name = newUser.name;
             city = newUser.city;
             region = newUser.region;
+            createdAt = newUser.createdAt;
             console.log("User saved to MongoDB:", newUser.emailPhone);
         } else if (pending.type === 'signin') {
             const existingUser = await User.findById(pending.userId);
@@ -1812,6 +1813,7 @@ app.post('/verify', async (req, res) => {
             name = existingUser?.name;
             city = existingUser?.city;
             region = existingUser?.region;
+            createdAt = existingUser?.createdAt;
         }
 
         await PendingVerification.deleteOne({ emailPhone });
@@ -1829,7 +1831,8 @@ app.post('/verify', async (req, res) => {
             chatHandle,
             name,
             city,
-            region
+            region,
+            createdAt: createdAt || null
         });
     } catch (err) {
         console.error("Verify error:", err.message);

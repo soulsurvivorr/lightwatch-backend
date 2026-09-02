@@ -1984,13 +1984,14 @@ module.exports = function initNewsSystem(app, deps) {
     }
 
     // ---- Scheduler ------------------------------------------------
-    // 5–10 min window as requested; default sits in the middle of it.
+    // Refresh source feeds every two minutes by default; deployments can
+    // override this with NEWS_FETCH_INTERVAL_MS when needed.
     // NOTE: this cycle now hits ~8 Google News queries plus ~11 direct
     // feeds every run — comfortably fine at this interval, but if more
     // queries/outlets get added later and outbound requests start
     // taking noticeably longer than the interval itself, raise this
     // rather than let cycles start overlapping.
-    const NEWS_FETCH_INTERVAL_MS = Number(process.env.NEWS_FETCH_INTERVAL_MS) || 7 * 60 * 1000;
+    const NEWS_FETCH_INTERVAL_MS = Number(process.env.NEWS_FETCH_INTERVAL_MS) || 2 * 60 * 1000;
     const EVENT_MATCH_WINDOW_MS = Number(process.env.NEWS_EVENT_MATCH_WINDOW_MS) || 5 * 24 * 60 * 60 * 1000;
 
     const initialFetchTimer = setTimeout(() => { runNewsFetchCycle().catch(err => console.error('[news] Initial fetch failed:', err.message)); }, 10000);
