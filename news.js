@@ -1509,10 +1509,26 @@ module.exports = function initNewsSystem(app, deps) {
             }
             let imageUrl = extractImageFromRssItem(item);
             let resolvedUrl = null;
-            if (!imageUrl && source.type === 'google-news') {
+            // IMPORTANT: this must run for every Google News item, not just
+            // ones missing a feed thumbnail. item.link for a Google News
+            // source is a news.google.com/rss/articles/... wrapper — it is
+            // NOT independently fetchable as an article page (no simple
+            // redirect; Google serves an interstitial/consent flow instead).
+            // Both the /news/:id/content route and the client's own
+            // in-app-reader fallback need the real publisher URL
+            // (resolvedUrl) to fetch anything readable. Previously this only
+            // ran when `!imageUrl`, so any Google News item that already had
+            // a media:thumbnail/media:content image (common — see the
+            // rss-parser customFields note above) never got a resolvedUrl at
+            // all, and silently fell back to the short feed summary forever.
+            // scrapeOgImage() still does the redirect-follow + og:image
+            // scrape in one request; we just no longer gate the resolvedUrl
+            // capture behind "no image yet" — we only gate which image wins.
+            if (source.type === 'google-news') {
                 const debugInfo = {};
-                imageUrl = await scrapeOgImage(item.link, debugInfo);
+                const scrapedImage = await scrapeOgImage(item.link, debugInfo);
                 resolvedUrl = debugInfo.resolvedUrl || null;
+                if (!imageUrl) imageUrl = scrapedImage;
             }
             const doc = await storeArticle({
                 title,
@@ -2192,6 +2208,63 @@ module.exports = function initNewsSystem(app, deps) {
         } catch (err) {
             console.error('News fetch error:', err.message);
             return res.status(500).json({ error: 'Server error fetching news' });
+        }
+    });
+
+    // Return readable publisher text for clients that show an in-app reader.
+    // The feed summary is intentionally short, so fetch the linked page only
+    // when a user opens an article instead of doing this for every feed item.
+    app.get('/news/:id/content', async (req, res) => {
+        try {
+            const event = await NewsEvent.findById(req.params.id).select('summary sources').lean();
+            const sources = Array.isArray(event?.sources) ? event.sources : [];
+            const articleSource = [...sources].reverse().find((source) => {
+                const candidate = source.resolvedUrl || source.url;
+                try {
+                    return candidate && !/(^|\.)news\.google\.com$/i.test(new URL(candidate).hostname);
+                } catch (_) {
+                    return false;
+                }
+            }) || sources[sources.length - 1];
+            const articleUrl = articleSource?.resolvedUrl || articleSource?.url;
+            if (!articleUrl) return res.json({ content: event?.summary || '' });
+
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 9000);
+            try {
+                const response = await fetch(articleUrl, {
+                    redirect: 'follow',
+                    signal: controller.signal,
+                    headers: OUTBOUND_HEADERS
+                });
+                if (!response.ok) throw new Error(`publisher returned ${response.status}`);
+                const contentType = response.headers.get('content-type') || '';
+                if (!contentType.includes('html')) throw new Error('publisher did not return HTML');
+
+                const html = await response.text();
+                const $ = cheerio.load(html);
+                $('script, style, noscript, nav, header, footer, aside, form, iframe').remove();
+                const root = $('article').first().length
+                    ? $('article').first()
+                    : $('[itemprop="articleBody"]').first().length
+                        ? $('[itemprop="articleBody"]').first()
+                        : $('main').first().length ? $('main').first() : $('body');
+                const paragraphs = root.find('p').map((_, paragraph) => $(paragraph).text().replace(/\s+/g, ' ').trim())
+                    .get()
+                    .filter((paragraph) => paragraph.length >= 35);
+                const content = (paragraphs.length > 0 ? paragraphs.join('\n\n') : root.text().replace(/\s+/g, ' ').trim()).slice(0, 30000);
+                return res.json({ content: content || event.summary || '' });
+            } finally {
+                clearTimeout(timeout);
+            }
+        } catch (error) {
+            console.warn('[news] Article content fetch failed:', error.message);
+            try {
+                const event = await NewsEvent.findById(req.params.id).select('summary').lean();
+                return res.json({ content: event?.summary || '' });
+            } catch (_) {
+                return res.status(404).json({ error: 'Article content unavailable' });
+            }
         }
     });
 
