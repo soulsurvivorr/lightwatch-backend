@@ -367,6 +367,11 @@ const userSchema = new mongoose.Schema({
     chatHandle: { type: String },
     // Optional uploaded avatar image (data URL) used as profile photo.
     avatarImage: { type: String, default: null },
+    secondaryContacts: [{
+        value: { type: String },
+        verified: { type: Boolean, default: false },
+        addedAt: { type: Date, default: Date.now }
+    }],
     favoriteLocationKeys: { type: [String], default: [] },
     // Optional second monitored location (e.g. "Work") — separate from the
     // primary signup region/city above, which stays the account's home base.
@@ -574,7 +579,9 @@ const pushSubscriptionSchema = new mongoose.Schema({
     //    matched by the outage filter, the same way chat pushes above
     //    already respect chatMentionsEnabled/muteGlobalChat.
     checkInAlertsEnabled: { type: Boolean, default: true },
-    outageNewsAlertsEnabled: { type: Boolean, default: true }
+    outageNewsAlertsEnabled: { type: Boolean, default: true },
+    outageAlertsEnabled: { type: Boolean, default: true },
+    restoredAlertsEnabled: { type: Boolean, default: true }
 });
 // sparse: true on both — a row only ever populates ONE of these two
 // identifiers depending on `platform`, and without sparse:true, Mongo
@@ -1309,7 +1316,7 @@ async function getLightStatusStats(locationKey) {
 // The TTL index below makes MongoDB auto-delete expired docs on its own.
 const pendingVerificationSchema = new mongoose.Schema({
     emailPhone: { type: String, required: true, unique: true },
-    type:       { type: String, enum: ['signup', 'signin'], required: true },
+    type:       { type: String, enum: ['signup', 'signin', 'contact'], required: true },
     code:       { type: String, required: true },
     attempts:   { type: Number, default: 0 },
     userData:   { type: Object },   // only for type: 'signup'
@@ -1786,7 +1793,7 @@ app.post('/verify', async (req, res) => {
     try {
         let userId;
         let chatHandle;
-        let name, city, region, createdAt;
+        let name, city, region, createdAt, avatarImage;
 
         if (pending.type === 'signup') {
             const chatHandleValue = await generateUniqueChatHandle();
@@ -1801,6 +1808,7 @@ app.post('/verify', async (req, res) => {
             city = newUser.city;
             region = newUser.region;
             createdAt = newUser.createdAt;
+            avatarImage = newUser.avatarImage || null;
             console.log("User saved to MongoDB:", newUser.emailPhone);
         } else if (pending.type === 'signin') {
             const existingUser = await User.findById(pending.userId);
@@ -1814,6 +1822,7 @@ app.post('/verify', async (req, res) => {
             city = existingUser?.city;
             region = existingUser?.region;
             createdAt = existingUser?.createdAt;
+            avatarImage = existingUser?.avatarImage || null;
         }
 
         await PendingVerification.deleteOne({ emailPhone });
@@ -1832,7 +1841,8 @@ app.post('/verify', async (req, res) => {
             name,
             city,
             region,
-            createdAt: createdAt || null
+            createdAt: createdAt || null,
+            avatarImage: avatarImage || null
         });
     } catch (err) {
         console.error("Verify error:", err.message);
@@ -1886,6 +1896,100 @@ app.post('/resend', async (req, res) => {
 
     console.log(`Resent code for ${emailPhone}`);
     return res.json({ success: true, maskedContact: maskContact(emailPhone) });
+});
+
+// ---- SECONDARY CONTACTS ----------------------------------------
+// Secondary contacts are deliberately separate from the account's primary
+// login contact. They remain visibly unverified until this OTP flow succeeds.
+app.get('/user/:id/contacts', async (req, res) => {
+    try {
+        const user = await User.findById(req.params.id).select('secondaryContacts').lean();
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        return res.json({ contacts: user.secondaryContacts || [] });
+    } catch (err) {
+        return res.status(500).json({ error: 'Server error fetching contacts' });
+    }
+});
+
+app.post('/user/:id/contacts', async (req, res) => {
+    const value = String(req.body?.value || '').toLowerCase().trim();
+    if (!value) return res.status(400).json({ error: 'Email or phone number is required' });
+    try {
+        const user = await User.findById(req.params.id);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        const existing = user.secondaryContacts.find((contact) => contact.value === value);
+        if (!existing) user.secondaryContacts.push({ value, verified: false });
+        await user.save();
+        return res.json({ success: true, contacts: user.secondaryContacts });
+    } catch (err) {
+        console.error('Add secondary contact error:', err.message);
+        return res.status(500).json({ error: 'Could not save contact' });
+    }
+});
+
+app.post('/user/:id/contacts/request', async (req, res) => {
+    const value = String(req.body?.value || '').toLowerCase().trim();
+    if (!value) return res.status(400).json({ error: 'Email or phone number is required' });
+    try {
+        const user = await User.findById(req.params.id).select('name secondaryContacts').lean();
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        const duplicate = (user.secondaryContacts || []).some((contact) => contact.value === value);
+        if (duplicate) return res.status(409).json({ error: 'That contact is already added' });
+
+        const code = isDevLoginContact(value) ? DEV_LOGIN_CODE : generateOtpCode();
+        await PendingVerification.deleteOne({ emailPhone: value });
+        await PendingVerification.create({
+            emailPhone: value,
+            type: 'contact',
+            code,
+            userId: String(user._id),
+            expiresAt: new Date(Date.now() + OTP_EXPIRY_MS)
+        });
+        if (!isDevLoginContact(value)) {
+            sendOtp(value, code, user.name).catch((err) => console.error('[CONTACT OTP] send failed:', err.message));
+        }
+        return res.json({ success: true, value, maskedContact: maskContact(value) });
+    } catch (err) {
+        return res.status(500).json({ error: 'Could not send verification code' });
+    }
+});
+
+app.post('/user/:id/contacts/verify', async (req, res) => {
+    const value = String(req.body?.value || '').toLowerCase().trim();
+    const code = String(req.body?.code || '').trim();
+    if (!value || !code) return res.status(400).json({ error: 'Contact and verification code are required' });
+    try {
+        const pending = await PendingVerification.findOne({ emailPhone: value, type: 'contact', userId: req.params.id });
+        if (!pending || pending.expiresAt < new Date()) return res.status(400).json({ error: 'Code expired. Request a new one.' });
+        if (pending.code !== code) {
+            pending.attempts += 1;
+            await pending.save();
+            return res.status(400).json({ error: 'Incorrect verification code' });
+        }
+        const user = await User.findById(req.params.id);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        const existing = user.secondaryContacts.find((contact) => contact.value === value);
+        if (existing) existing.verified = true;
+        else user.secondaryContacts.push({ value, verified: true });
+        await user.save();
+        await PendingVerification.deleteOne({ _id: pending._id });
+        return res.json({ success: true, contacts: user.secondaryContacts });
+    } catch (err) {
+        return res.status(500).json({ error: 'Could not verify contact' });
+    }
+});
+
+app.delete('/user/:id/contacts', async (req, res) => {
+    const value = String(req.body?.value || '').toLowerCase().trim();
+    try {
+        const user = await User.findById(req.params.id);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        user.secondaryContacts = user.secondaryContacts.filter((contact) => contact.value !== value);
+        await user.save();
+        return res.json({ success: true, contacts: user.secondaryContacts });
+    } catch (err) {
+        return res.status(500).json({ error: 'Could not remove contact' });
+    }
 });
 
 // ---- CHATS ----
@@ -4069,8 +4173,10 @@ async function applyLightStatusUpdate(rawLocation, status, { userId = null, repo
                 tone: status === 'on' ? 'power-on' : 'power-off'
             };
 
+            const preferenceField = status === 'off' ? 'outageAlertsEnabled' : 'restoredAlertsEnabled';
             const subscribers = await PushSubscription.find({
-                $or: [{ location: key }, { favoriteLocationKeys: key }]
+                $or: [{ location: key }, { favoriteLocationKeys: key }],
+                [preferenceField]: { $ne: false }
             }).lean();
             console.log(`Sending push to ${subscribers.length} subscriber(s) at ${key}`);
             sendPushToSubscribers(subscribers, payload);
@@ -4092,7 +4198,7 @@ async function applyLightStatusUpdate(rawLocation, status, { userId = null, repo
                     tone: status === 'on' ? 'power-on' : 'power-off'
                 };
 
-                const secondarySubscribers = await PushSubscription.find({ secondaryLocationKey: key }).lean();
+                const secondarySubscribers = await PushSubscription.find({ secondaryLocationKey: key, [preferenceField]: { $ne: false } }).lean();
                 console.log(`Sending secondary-location push to ${secondarySubscribers.length} subscriber(s) watching ${key}`);
 
                     sendPushToSubscribers(secondarySubscribers, secondaryPayload);
@@ -4428,8 +4534,8 @@ app.get('/subscribe/preferences', async (req, res) => {
     try {
         const sub = await PushSubscription.findOne({
             userId,
-            'subscription.endpoint': endpoint
-        }).select('muteGlobalChat chatMentionsEnabled secondaryLocationKey secondaryLocationLabel checkInAlertsEnabled outageNewsAlertsEnabled').lean();
+            $or: [{ 'subscription.endpoint': endpoint }, { fcmToken: endpoint }]
+        }).select('muteGlobalChat chatMentionsEnabled secondaryLocationKey secondaryLocationLabel checkInAlertsEnabled outageNewsAlertsEnabled outageAlertsEnabled restoredAlertsEnabled').lean();
 
         if (!sub) {
             return res.status(404).json({ error: 'Subscription not found for this user/device' });
@@ -4441,7 +4547,9 @@ app.get('/subscribe/preferences', async (req, res) => {
             secondaryLocationKey: sub.secondaryLocationKey || null,
             secondaryLocationLabel: sub.secondaryLocationLabel || null,
             checkInAlertsEnabled: sub.checkInAlertsEnabled !== false,
-            outageNewsAlertsEnabled: sub.outageNewsAlertsEnabled !== false
+            outageNewsAlertsEnabled: sub.outageNewsAlertsEnabled !== false,
+            outageAlertsEnabled: sub.outageAlertsEnabled !== false,
+            restoredAlertsEnabled: sub.restoredAlertsEnabled !== false
         });
     } catch (err) {
         console.error('Get subscribe preferences error:', err.message);
@@ -4450,17 +4558,19 @@ app.get('/subscribe/preferences', async (req, res) => {
 });
 
 app.patch('/subscribe/preferences', async (req, res) => {
-    const { userId, endpoint, muteGlobalChat, chatMentionsEnabled, secondaryLocation, checkInAlertsEnabled, outageNewsAlertsEnabled } = req.body;
+    const { userId, endpoint, muteGlobalChat, chatMentionsEnabled, secondaryLocation, checkInAlertsEnabled, outageNewsAlertsEnabled, outageAlertsEnabled, restoredAlertsEnabled } = req.body;
     const hasMuteUpdate = typeof muteGlobalChat === 'boolean';
     const hasMentionsUpdate = typeof chatMentionsEnabled === 'boolean';
     const hasCheckInUpdate = typeof checkInAlertsEnabled === 'boolean';
     const hasOutageNewsUpdate = typeof outageNewsAlertsEnabled === 'boolean';
+    const hasOutageUpdate = typeof outageAlertsEnabled === 'boolean';
+    const hasRestoredUpdate = typeof restoredAlertsEnabled === 'boolean';
     // secondaryLocation is a tri-state: a non-empty string sets the watch,
     // null explicitly clears it, undefined means "not part of this update".
     const hasSecondaryUpdate = secondaryLocation !== undefined;
 
-    if (!userId || !endpoint || (!hasMuteUpdate && !hasMentionsUpdate && !hasSecondaryUpdate && !hasCheckInUpdate && !hasOutageNewsUpdate)) {
-        return res.status(400).json({ error: 'userId, endpoint, and at least one of muteGlobalChat/chatMentionsEnabled/secondaryLocation/checkInAlertsEnabled/outageNewsAlertsEnabled are required' });
+    if (!userId || !endpoint || (!hasMuteUpdate && !hasMentionsUpdate && !hasSecondaryUpdate && !hasCheckInUpdate && !hasOutageNewsUpdate && !hasOutageUpdate && !hasRestoredUpdate)) {
+        return res.status(400).json({ error: 'userId, endpoint, and at least one preference are required' });
     }
 
     const update = {};
@@ -4468,6 +4578,8 @@ app.patch('/subscribe/preferences', async (req, res) => {
     if (hasMentionsUpdate) update.chatMentionsEnabled = chatMentionsEnabled;
     if (hasCheckInUpdate) update.checkInAlertsEnabled = checkInAlertsEnabled;
     if (hasOutageNewsUpdate) update.outageNewsAlertsEnabled = outageNewsAlertsEnabled;
+    if (hasOutageUpdate) update.outageAlertsEnabled = outageAlertsEnabled;
+    if (hasRestoredUpdate) update.restoredAlertsEnabled = restoredAlertsEnabled;
     if (hasSecondaryUpdate) {
         if (secondaryLocation) {
             update.secondaryLocationKey = normalizeLocation(secondaryLocation).split(',')[0].trim();
@@ -4482,7 +4594,7 @@ app.patch('/subscribe/preferences', async (req, res) => {
         const updated = await PushSubscription.findOneAndUpdate(
             {
                 userId,
-                'subscription.endpoint': endpoint
+                $or: [{ 'subscription.endpoint': endpoint }, { fcmToken: endpoint }]
             },
             update,
             { new: true }
@@ -4498,7 +4610,9 @@ app.patch('/subscribe/preferences', async (req, res) => {
             chatMentionsEnabled: updated.chatMentionsEnabled,
             secondaryLocationKey: updated.secondaryLocationKey || null,
             checkInAlertsEnabled: updated.checkInAlertsEnabled,
-            outageNewsAlertsEnabled: updated.outageNewsAlertsEnabled
+            outageNewsAlertsEnabled: updated.outageNewsAlertsEnabled,
+            outageAlertsEnabled: updated.outageAlertsEnabled,
+            restoredAlertsEnabled: updated.restoredAlertsEnabled
         });
     } catch (err) {
         console.error('Subscribe preferences error:', err.message);
