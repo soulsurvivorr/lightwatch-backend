@@ -17,6 +17,7 @@ const admin = require('firebase-admin');
 const cloudinary = require('./cloudinary');
 const multer = require('multer');
 const { upload: genericUpload, uploadBufferToCloudinary } = require('./upload');
+const { normalizeBookmarkArticle, mergeBookmarks } = require('./bookmark-utils');
 
 // MONGODB CONNECTION
 const MONGO_URI = process.env.MONGODB_URI;
@@ -373,6 +374,7 @@ const userSchema = new mongoose.Schema({
         addedAt: { type: Date, default: Date.now }
     }],
     favoriteLocationKeys: { type: [String], default: [] },
+    bookmarks: { type: [Object], default: [] },
     // Optional second monitored location (e.g. "Work") — separate from the
     // primary signup region/city above, which stays the account's home base.
     secondaryLocation: {
@@ -3250,6 +3252,58 @@ app.get('/stats', async (req, res) => {
     } catch (err) {
         console.error("Stats error:", err.message);
         return res.status(500).json({ error: "Could not load stats" });
+    }
+});
+
+// ---- USER BOOKMARKS ----
+app.get('/user/:id/bookmarks', async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        const user = await User.findById(id).select('bookmarks').lean();
+        if (!user) return res.status(404).json({ error: 'User not found' });
+
+        const bookmarks = Array.isArray(user.bookmarks) ? user.bookmarks.map(normalizeBookmarkArticle).filter(Boolean) : [];
+        return res.json(bookmarks);
+    } catch (err) {
+        console.error('User bookmarks fetch error:', err.message);
+        return res.status(500).json({ error: 'Could not load bookmarks' });
+    }
+});
+
+app.patch('/user/:id/bookmarks', async (req, res) => {
+    const { id } = req.params;
+    const { action, bookmarks, article } = req.body || {};
+    const requestedAction = String(action || 'replace').toLowerCase();
+
+    try {
+        const user = await User.findById(id);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+
+        const current = Array.isArray(user.bookmarks) ? user.bookmarks.map(normalizeBookmarkArticle).filter(Boolean) : [];
+
+        let nextBookmarks = current;
+        if (requestedAction === 'replace') {
+            const next = Array.isArray(bookmarks) ? bookmarks.map(normalizeBookmarkArticle).filter(Boolean) : [];
+            nextBookmarks = next;
+        } else if (requestedAction === 'add' || requestedAction === 'remove' || requestedAction === 'toggle') {
+            const normalizedArticle = normalizeBookmarkArticle(article);
+            if (!normalizedArticle) {
+                return res.status(400).json({ error: 'A valid article payload is required' });
+            }
+
+            const exists = current.some((item) => item.id === normalizedArticle.id);
+            const actionToUse = requestedAction === 'toggle' ? (exists ? 'remove' : 'add') : requestedAction;
+            nextBookmarks = mergeBookmarks(current, normalizedArticle, actionToUse);
+        }
+
+        user.bookmarks = nextBookmarks;
+        await user.save();
+
+        return res.json({ success: true, bookmarks: nextBookmarks });
+    } catch (err) {
+        console.error('User bookmark update error:', err.message);
+        return res.status(500).json({ error: 'Could not update bookmarks' });
     }
 });
 
