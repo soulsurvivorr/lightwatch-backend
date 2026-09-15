@@ -1160,6 +1160,37 @@ function scheduleAfterPreviousGeocode(task) {
     return result;
 }
 
+async function reverseGeocodeViaNominatim(lat, lng) {
+    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lng)}&zoom=18&addressdetails=1`;
+    try {
+        const response = await timeExternalCall(`Nominatim reverse geocode (${lat},${lng})`, () => fetch(url, {
+            headers: {
+                'User-Agent': 'LightWatch-Kumasi/1.0 (community power-outage tracker for Kumasi, Ghana)'
+            }
+        }));
+        if (!response.ok) return null;
+        const result = await response.json();
+        const address = result && result.address;
+        if (!address) return null;
+
+        // Use the smallest useful named settlement first. Nominatim uses
+        // suburb/neighbourhood for areas inside a larger city and town or
+        // village for independent settlements.
+        return address.suburb
+            || address.neighbourhood
+            || address.city_district
+            || address.town
+            || address.village
+            || address.municipality
+            || address.city
+            || address.county
+            || null;
+    } catch (err) {
+        console.error('Nominatim reverse geocoding error:', err.message);
+        return null;
+    }
+}
+
 // Region is included in the query string whenever we have one, since
 // Ghana has multiple towns/suburbs that share a bare name (e.g. more
 // than one "Aputuogya") — "<name>, <region>, Ghana" disambiguates the
@@ -1568,8 +1599,7 @@ function maskContact(value) {
 // nothing usable came back (caller falls back to manual entry).
 async function reverseGeocodeCity(lat, lng) {
     if (!process.env.GOOGLE_MAPS_API_KEY) {
-        console.log('[DEV MODE — no GOOGLE_MAPS_API_KEY set] Skipping reverse geocode lookup.');
-        return null;
+        return scheduleAfterPreviousGeocode(() => reverseGeocodeViaNominatim(lat, lng));
     }
 
     const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${process.env.GOOGLE_MAPS_API_KEY}`;
@@ -1580,7 +1610,7 @@ async function reverseGeocodeCity(lat, lng) {
 
     const data = await response.json();
     if (data.status !== 'OK' || !Array.isArray(data.results) || !data.results.length) {
-        return null;
+        return scheduleAfterPreviousGeocode(() => reverseGeocodeViaNominatim(lat, lng));
     }
 
     // Prefer the most specific named place. Google often returns a broad
@@ -1601,7 +1631,8 @@ async function reverseGeocodeCity(lat, lng) {
             if (match) return match.long_name;
         }
     }
-    return data.results[0].formatted_address || null;
+    return data.results[0].formatted_address
+        || await scheduleAfterPreviousGeocode(() => reverseGeocodeViaNominatim(lat, lng));
 }
 
 // ---------------------------------------------------------------------------
