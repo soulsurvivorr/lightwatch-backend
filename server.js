@@ -1583,10 +1583,18 @@ async function reverseGeocodeCity(lat, lng) {
         return null;
     }
 
-    // Prefer an actual city/town over a broader region — first address
-    // component of the first result that matches one of these types,
-    // checked in order of specificity.
-    const preferredTypes = ['locality', 'postal_town', 'sublocality', 'administrative_area_level_2', 'administrative_area_level_1'];
+    // Prefer the most specific named place. Google often returns a broad
+    // locality such as Kumasi for a GPS fix that is actually in one of its
+    // suburbs or neighboring towns, so do not accept the broad locality
+    // before checking sub-locality and postal-town components.
+    const preferredTypes = [
+        'sublocality_level_1',
+        'sublocality',
+        'postal_town',
+        'locality',
+        'administrative_area_level_2',
+        'administrative_area_level_1',
+    ];
     for (const type of preferredTypes) {
         for (const result of data.results) {
             const match = (result.address_components || []).find(c => c.types.includes(type));
