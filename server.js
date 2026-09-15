@@ -774,10 +774,8 @@ app.use('/images', express.static(path.join(__dirname, 'public/images'), {
 }));
 
 // If a logo file was placed at the backend root (e.g. backend/dev-logo.png),
-// serve that single file at /images/dev-logo.png so email templates and
-// LOGO_URL point to a hosted asset even when the frontend is deployed
-// separately (Netlify). This keeps the rest of the backend's files
-// private while exposing only that one image path.
+// serve that single file at /images/dev-logo.png so email templates can use
+// a public absolute image URL even when the frontend is deployed separately.
 const backendLogoPath = path.join(__dirname, 'dev-logo.png');
 const backendPublicLogoPath = path.join(__dirname, 'public', 'logo.png');
 if (fs.existsSync(backendLogoPath)) {
@@ -790,12 +788,13 @@ if (fs.existsSync(backendLogoPath)) {
     });
 }
 
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://lightwatch-backend-lightwatch-backend.up.railway.app';
+const LOGO_URL = process.env.EMAIL_LOGO_URL || `${PUBLIC_BASE_URL}/images/dev-logo.png`;
+
 // Email clients need an absolute, publicly reachable image URL. The old
 // Render fallback could leave the OTP template pointing at a retired host,
 // so use the current Railway backend by default and allow deployments to
 // provide an explicit image URL when their public host differs.
-const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://lightwatch-backend-lightwatch-backend.up.railway.app';
-const LOGO_URL = process.env.EMAIL_LOGO_URL || `${PUBLIC_BASE_URL}/images/dev-logo.png`;
 
 // ---- REQUEST PERFORMANCE LOGGING ----
 // Times every request end-to-end and logs method, path, status, and
@@ -1411,7 +1410,7 @@ if (!process.env.BREVO_API_KEY) {
 // with inline styles (not classes) because most email clients strip
 // <style> blocks and external CSS — inline is the only thing that
 // renders consistently across Gmail, Outlook, Apple Mail, etc.
-function buildOtpEmailHtml(code, name, logoSource = `cid:lightwatch-logo`) {
+function buildOtpEmailHtml(code, name) {
     const year = new Date().getFullYear();
     const greetingName = escapeHtml(getLastName(name) || 'there');
     return `
@@ -1426,7 +1425,7 @@ function buildOtpEmailHtml(code, name, logoSource = `cid:lightwatch-logo`) {
             <!-- Header -->
             <tr>
               <td align="center" style="background-color:#0a0e1a; padding:32px 24px;">
-                <img src="${logoSource}" width="56" height="56" alt="LightWatch" style="display:block; border-radius:14px;" />
+                                <img src="${LOGO_URL}" width="56" height="56" alt="LightWatch" style="display:block; border-radius:14px;" />
                 <div style="margin-top:12px; font-size:18px; font-weight:600; color:#ffffff; letter-spacing:0.3px;">
                   LightWatch
                 </div>
@@ -1500,12 +1499,6 @@ async function sendOtpEmail(email, code, name) {
         controller.abort();
         console.error(`[OTP] Email send timed out after ${timeoutMs}ms for ${email}`);
     }, timeoutMs);
-    const logoPath = path.join(__dirname, 'public', 'logo.png');
-    if (!fs.existsSync(logoPath)) {
-        clearTimeout(timeoutId);
-        throw new Error(`Email logo asset is missing at ${logoPath}`);
-    }
-    const logoContent = fs.readFileSync(logoPath).toString('base64');
     let response;
     try {
         response = await timeExternalCall(`Brevo OTP email (${email})`, () => fetch('https://api.brevo.com/v3/smtp/email', {
@@ -1524,12 +1517,7 @@ async function sendOtpEmail(email, code, name) {
                 subject: 'Your LightWatch verification code',
                 htmlContent: buildOtpEmailHtml(code, name),
                 // Plain-text fallback for clients that block/strip HTML.
-                textContent: `Your LightWatch verification code is ${code}. It expires in 10 minutes. If you didn't request this, you can ignore this email.`,
-                attachment: [{
-                    content: logoContent,
-                    name: 'lightwatch-logo.png',
-                    contentId: 'lightwatch-logo'
-                }]
+                textContent: `Your LightWatch verification code is ${code}. It expires in 10 minutes. If you didn't request this, you can ignore this email.`
             })
         }));
     } catch (err) {
