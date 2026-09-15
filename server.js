@@ -790,9 +790,12 @@ if (fs.existsSync(backendLogoPath)) {
     });
 }
 
-// Set this to your public backend URL, or override it with PUBLIC_BASE_URL.
-const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://lightwatch-backend-1yko.onrender.com';
-const LOGO_URL = `${PUBLIC_BASE_URL}/images/dev-logo.png`;
+// Email clients need an absolute, publicly reachable image URL. The old
+// Render fallback could leave the OTP template pointing at a retired host,
+// so use the current Railway backend by default and allow deployments to
+// provide an explicit image URL when their public host differs.
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://lightwatch-backend-lightwatch-backend.up.railway.app';
+const LOGO_URL = process.env.EMAIL_LOGO_URL || `${PUBLIC_BASE_URL}/images/dev-logo.png`;
 
 // ---- REQUEST PERFORMANCE LOGGING ----
 // Times every request end-to-end and logs method, path, status, and
@@ -1837,7 +1840,10 @@ app.post('/verify', async (req, res) => {
         return res.status(400).json({ error: "This code has expired. Please request a new one." });
     }
 
-    if (pending.code !== code) {
+    // Mongo may return a numeric code for older pending records while the
+    // client always submits text. Compare normalized strings so a valid OTP
+    // cannot be rejected because of storage type rather than its value.
+    if (String(pending.code).trim() !== code) {
         pending.attempts = (pending.attempts || 0) + 1;
         if (pending.attempts >= OTP_MAX_ATTEMPTS) {
             await PendingVerification.deleteOne({ emailPhone });
