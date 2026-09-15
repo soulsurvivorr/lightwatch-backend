@@ -1403,13 +1403,15 @@ function escapeHtml(str) {
 // needed on Render's side.
 if (!process.env.BREVO_API_KEY) {
     console.warn("WARNING: BREVO_API_KEY not set. Email OTPs will just be logged to the console instead of sent.");
+} else if (!process.env.BREVO_SENDER_EMAIL) {
+    console.error("ERROR: BREVO_SENDER_EMAIL is not set. Brevo requires a verified sender email; OTP email delivery will fail.");
 }
 
 // Builds the branded HTML body for the OTP email. Kept as a plain string
 // with inline styles (not classes) because most email clients strip
 // <style> blocks and external CSS — inline is the only thing that
 // renders consistently across Gmail, Outlook, Apple Mail, etc.
-function buildOtpEmailHtml(code, name) {
+function buildOtpEmailHtml(code, name, logoSource = `cid:lightwatch-logo`) {
     const year = new Date().getFullYear();
     const greetingName = escapeHtml(getLastName(name) || 'there');
     return `
@@ -1424,7 +1426,7 @@ function buildOtpEmailHtml(code, name) {
             <!-- Header -->
             <tr>
               <td align="center" style="background-color:#0a0e1a; padding:32px 24px;">
-                <img src="${LOGO_URL}" width="56" height="56" alt="LightWatch" style="display:block; border-radius:14px;" />
+                <img src="${logoSource}" width="56" height="56" alt="LightWatch" style="display:block; border-radius:14px;" />
                 <div style="margin-top:12px; font-size:18px; font-weight:600; color:#ffffff; letter-spacing:0.3px;">
                   LightWatch
                 </div>
@@ -1487,8 +1489,10 @@ function buildOtpEmailHtml(code, name) {
 
 async function sendOtpEmail(email, code, name) {
     if (!process.env.BREVO_API_KEY) {
-        console.log(`[DEV MODE — no BREVO_API_KEY set] OTP for ${email} is ${code}`);
-        return;
+        throw new Error('BREVO_API_KEY is not configured; email OTP cannot be sent.');
+    }
+    if (!process.env.BREVO_SENDER_EMAIL) {
+        throw new Error('BREVO_SENDER_EMAIL is not configured; set it to a verified Brevo sender email.');
     }
     const timeoutMs = Number(process.env.OTP_SEND_TIMEOUT_MS || 25000);
     const controller = new AbortController();
@@ -1496,6 +1500,12 @@ async function sendOtpEmail(email, code, name) {
         controller.abort();
         console.error(`[OTP] Email send timed out after ${timeoutMs}ms for ${email}`);
     }, timeoutMs);
+    const logoPath = path.join(__dirname, 'public', 'logo.png');
+    if (!fs.existsSync(logoPath)) {
+        clearTimeout(timeoutId);
+        throw new Error(`Email logo asset is missing at ${logoPath}`);
+    }
+    const logoContent = fs.readFileSync(logoPath).toString('base64');
     let response;
     try {
         response = await timeExternalCall(`Brevo OTP email (${email})`, () => fetch('https://api.brevo.com/v3/smtp/email', {
@@ -1508,13 +1518,18 @@ async function sendOtpEmail(email, code, name) {
             body: JSON.stringify({
                 sender: {
                     name: 'LightWatch',
-                    email: process.env.BREVO_SENDER_EMAIL || 'no-reply@lightwatch.app'
+                    email: process.env.BREVO_SENDER_EMAIL
                 },
                 to: [{ email }],
                 subject: 'Your LightWatch verification code',
                 htmlContent: buildOtpEmailHtml(code, name),
                 // Plain-text fallback for clients that block/strip HTML.
-                textContent: `Your LightWatch verification code is ${code}. It expires in 10 minutes. If you didn't request this, you can ignore this email.`
+                textContent: `Your LightWatch verification code is ${code}. It expires in 10 minutes. If you didn't request this, you can ignore this email.`,
+                attachment: [{
+                    content: logoContent,
+                    name: 'lightwatch-logo.png',
+                    contentId: 'lightwatch-logo'
+                }]
             })
         }));
     } catch (err) {
@@ -1527,7 +1542,7 @@ async function sendOtpEmail(email, code, name) {
     }
     if (!response.ok) {
         const errText = await response.text();
-        throw new Error(`Email send failed: ${response.status} ${errText}`);
+        throw new Error(`Brevo email send failed: ${response.status} ${errText.slice(0, 500)}`);
     }
 }
 
