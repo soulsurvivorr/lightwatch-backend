@@ -1176,7 +1176,7 @@ async function reverseGeocodeViaNominatim(lat, lng) {
         // Use the smallest useful named settlement first. Nominatim uses
         // suburb/neighbourhood for areas inside a larger city and town or
         // village for independent settlements.
-        return address.suburb
+        const city = address.suburb
             || address.neighbourhood
             || address.city_district
             || address.town
@@ -1185,6 +1185,8 @@ async function reverseGeocodeViaNominatim(lat, lng) {
             || address.city
             || address.county
             || null;
+        const region = address.state || address.region || null;
+        return city ? { city, region } : null;
     } catch (err) {
         console.error('Nominatim reverse geocoding error:', err.message);
         return null;
@@ -1613,6 +1615,19 @@ async function reverseGeocodeCity(lat, lng) {
         return scheduleAfterPreviousGeocode(() => reverseGeocodeViaNominatim(lat, lng));
     }
 
+    const regionTypes = ['administrative_area_level_1', 'administrative_area_level_2'];
+    let region = null;
+    for (const type of regionTypes) {
+        for (const result of data.results) {
+            const match = (result.address_components || []).find(c => c.types.includes(type));
+            if (match) {
+                region = match.long_name;
+                break;
+            }
+        }
+        if (region) break;
+    }
+
     // Prefer the most specific named place. Google often returns a broad
     // locality such as Kumasi for a GPS fix that is actually in one of its
     // suburbs or neighboring towns, so do not accept the broad locality
@@ -1628,11 +1643,12 @@ async function reverseGeocodeCity(lat, lng) {
     for (const type of preferredTypes) {
         for (const result of data.results) {
             const match = (result.address_components || []).find(c => c.types.includes(type));
-            if (match) return match.long_name;
+            if (match) return { city: match.long_name, region };
         }
     }
-    return data.results[0].formatted_address
+    const city = data.results[0].formatted_address
         || await scheduleAfterPreviousGeocode(() => reverseGeocodeViaNominatim(lat, lng));
+    return typeof city === 'string' ? { city, region } : city;
 }
 
 // ---------------------------------------------------------------------------
@@ -1649,11 +1665,11 @@ app.get('/geocode/reverse', async (req, res) => {
     }
 
     try {
-        const city = await reverseGeocodeCity(lat, lng);
-        if (!city) {
+        const location = await reverseGeocodeCity(lat, lng);
+        if (!location) {
             return res.status(404).json({ error: 'Could not determine a city for this location' });
         }
-        res.json({ city });
+        res.json(location);
     } catch (err) {
         console.error('Reverse geocode error:', err);
         res.status(502).json({ error: 'Location lookup failed' });

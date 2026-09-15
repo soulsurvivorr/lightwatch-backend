@@ -95,7 +95,8 @@ module.exports = function registerWeatherRoutes(app, deps) {
             return cached.city;
         }
         try {
-            const city = await reverseGeocodeCity(lat, lng);
+            const location = await reverseGeocodeCity(lat, lng);
+            const city = typeof location === 'string' ? location : location?.city || null;
             cityCache.set(key, { city, fetchedAt: Date.now() });
             return city;
         } catch (err) {
