@@ -2131,6 +2131,7 @@ module.exports = function initNewsSystem(app, deps) {
     app.get('/news', async (req, res) => {
         const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 100);
         const includeNationwide = ['1', 'true'].includes(String(req.query.includeNationwide || '').toLowerCase());
+        const notificationRelevant = ['1', 'true'].includes(String(req.query.notificationRelevant || '').toLowerCase());
         const cacheKey = req.originalUrl;
         const cached = newsResponseCache.get(cacheKey);
         if (cached && cached.expiresAt > Date.now()) return res.json(cached.body);
@@ -2142,7 +2143,24 @@ module.exports = function initNewsSystem(app, deps) {
             const beforeDate = new Date(req.query.before);
             if (!isNaN(beforeDate)) andClauses.push({ lastUpdatedAt: { $lt: beforeDate } });
         }
-        if (req.query.location) {
+        if (notificationRelevant) {
+            const relevanceTerms = [
+                req.query.location,
+                req.query.city,
+                req.query.region,
+            ]
+                .map((value) => normalizeLocation(String(value || '')).trim())
+                .filter(Boolean);
+            const relevanceRegex = /dumsor|outages?|light\s*out|power\s+outages?/i;
+            const relevanceClauses = [
+                { headline: relevanceRegex },
+                { summary: relevanceRegex },
+                { eventType: relevanceRegex },
+                { 'sources.headline': relevanceRegex },
+                ...relevanceTerms.map((term) => ({ affectedLocations: { $regex: escapeRegex(term), $options: 'i' } })),
+            ];
+            andClauses.push({ $or: relevanceClauses });
+        } else if (req.query.location) {
             const key = normalizeLocation(req.query.location).split(',')[0].trim();
             andClauses.push(
                 includeNationwide

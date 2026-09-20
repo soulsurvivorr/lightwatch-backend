@@ -374,6 +374,7 @@ const userSchema = new mongoose.Schema({
         addedAt: { type: Date, default: Date.now }
     }],
     favoriteLocationKeys: { type: [String], default: [] },
+    mutedChatHandles: { type: [String], default: [] },
     bookmarks: { type: [Object], default: [] },
     // Optional second monitored location (e.g. "Work") — separate from the
     // primary signup region/city above, which stays the account's home base.
@@ -2086,9 +2087,29 @@ function buildChatsFilter(scope, location) {
     };
 }
 
+async function hydrateChatEngagement(chats, userId) {
+    if (!Array.isArray(chats) || chats.length === 0) return chats;
+
+    const chatIds = chats.map((chat) => String(chat._id));
+    const replyCounts = await Chat.aggregate([
+        { $match: { 'replyTo.chatId': { $in: chatIds } } },
+        { $group: { _id: '$replyTo.chatId', count: { $sum: 1 } } }
+    ]);
+    const repliesByChatId = new Map(replyCounts.map((entry) => [String(entry._id), entry.count]));
+    const validUserId = userId && mongoose.Types.ObjectId.isValid(userId) ? String(userId) : null;
+
+    return chats.map((chat) => ({
+        ...chat,
+        commentCount: repliesByChatId.get(String(chat._id)) || 0,
+        liked: validUserId ? (chat.likedBy || []).some((id) => String(id) === validUserId) : false,
+        reposted: validUserId ? (chat.repostedBy || []).some((id) => String(id) === validUserId) : false
+    }));
+}
+
 app.get('/chats', async (req, res) => {
     const location = req.query.location;
     const scope = (req.query.scope || 'local').toString().toLowerCase() === 'global' ? 'global' : 'local';
+    const userId = req.query.userId;
 
     try {
         const filter = buildChatsFilter(scope, location);
@@ -2144,7 +2165,7 @@ app.get('/chats', async (req, res) => {
                 ];
 
                 const top = await Chat.aggregate(pipeline).exec();
-                return res.json(top);
+                return res.json(await hydrateChatEngagement(top, userId));
             } catch (err) {
                 console.error('Get chats (trending) error:', err.message);
                 return res.status(500).json({ error: 'Server error fetching trending chat' });
@@ -2152,7 +2173,7 @@ app.get('/chats', async (req, res) => {
         }
 
         const chats = await Chat.find(query).sort({ createdAt: -1 }).limit(500).lean();
-        return res.json(chats);
+        return res.json(await hydrateChatEngagement(chats, userId));
     } catch (err) {
         console.error("Get chats error:", err.message);
         return res.status(500).json({ error: "Server error fetching chats" });
@@ -5236,5 +5257,130 @@ app.patch('/subscribe/favorites', async (req, res) => {
     } catch (err) {
         console.error('Favorite location preference error:', err.message);
         return res.status(500).json({ error: 'Could not save favorite location' });
+    }
+});
+
+// GET /chats/:chatId/comments
+app.get('/chats/:chatId/comments', async (req, res) => {
+    const { chatId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(chatId)) return res.status(400).json({ error: 'Invalid chat id' });
+
+    try {
+        const comments = await Chat.find({ 'replyTo.chatId': chatId }).sort({ createdAt: 1 }).lean();
+        return res.json(comments.map((comment) => ({ ...comment, avatarUrl: comment.avatarImage || null })));
+    } catch (err) {
+        console.error('Get chat comments error:', err.message);
+        return res.status(500).json({ error: 'Server error fetching comments' });
+    }
+});
+
+// POST /chats/:chatId/comments { userId, text }
+app.post('/chats/:chatId/comments', async (req, res) => {
+    const { chatId } = req.params;
+    const { userId, text } = req.body || {};
+    const normalizedText = String(text || '').trim();
+
+    if (!mongoose.Types.ObjectId.isValid(chatId) || !mongoose.Types.ObjectId.isValid(userId)) {
+        return res.status(400).json({ error: 'Valid chat id and userId are required' });
+    }
+    if (!normalizedText) return res.status(400).json({ error: 'Comment text is required' });
+
+    try {
+        const [parent, user] = await Promise.all([
+            Chat.findById(chatId).select('scope location').lean(),
+            User.findById(userId).select('chatHandle avatarImage').lean()
+        ]);
+        if (!parent || !user) return res.status(404).json({ error: 'Post or user not found' });
+
+        const comment = await Chat.create({
+            userId,
+            handle: user.chatHandle || String(req.body.handle || 'Community member').slice(0, 80),
+            avatarImage: user.avatarImage || null,
+            text: normalizedText.slice(0, 1000),
+            scope: parent.scope || 'local',
+            location: parent.location,
+            locationKey: normalizeLocation(parent.location),
+            replyTo: { chatId, handle: String(req.body.handle || '').slice(0, 80), text: normalizedText.slice(0, 220) }
+        });
+        const saved = comment.toObject();
+        saved.userId = String(saved.userId);
+        saved.avatarUrl = saved.avatarImage || null;
+        return res.status(201).json(saved);
+    } catch (err) {
+        console.error('Create chat comment error:', err.message);
+        return res.status(500).json({ error: 'Server error saving comment' });
+    }
+});
+
+// GET /chats/:chatId/likes
+app.get('/chats/:chatId/likes', async (req, res) => {
+    const { chatId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(chatId)) return res.status(400).json({ error: 'Invalid chat id' });
+
+    try {
+        const chat = await Chat.findById(chatId).select('likedBy').lean();
+        if (!chat) return res.status(404).json({ error: 'Post not found' });
+        const users = await User.find({ _id: { $in: chat.likedBy || [] } }).select('chatHandle name avatarImage').lean();
+        return res.json(users.map((user) => ({
+            userId: String(user._id),
+            handle: user.chatHandle || user.name || 'Community member',
+            name: user.name,
+            avatarUrl: user.avatarImage || null
+        })));
+    } catch (err) {
+        console.error('Get chat likes error:', err.message);
+        return res.status(500).json({ error: 'Server error fetching likes' });
+    }
+});
+
+// POST /chats/:chatId/repost { userId }
+app.post('/chats/:chatId/repost', async (req, res) => {
+    const { chatId } = req.params;
+    const { userId } = req.body || {};
+    if (!mongoose.Types.ObjectId.isValid(chatId) || !mongoose.Types.ObjectId.isValid(userId)) {
+        return res.status(400).json({ error: 'Valid chat id and userId are required' });
+    }
+
+    try {
+        const chat = await Chat.findById(chatId).select('repostedBy repostCount').lean();
+        if (!chat) return res.status(404).json({ error: 'Post not found' });
+        const alreadyReposted = (chat.repostedBy || []).some((id) => String(id) === String(userId));
+        const update = alreadyReposted
+            ? { $pull: { repostedBy: userId }, $inc: { repostCount: -1 } }
+            : { $addToSet: { repostedBy: userId }, $inc: { repostCount: 1 } };
+        const updated = await Chat.findByIdAndUpdate(chatId, update, { new: true }).select('repostCount repostedBy').lean();
+        return res.json({ reposted: !alreadyReposted, repostCount: Math.max(0, updated?.repostCount || 0) });
+    } catch (err) {
+        console.error('Toggle chat repost error:', err.message);
+        return res.status(500).json({ error: 'Server error toggling repost' });
+    }
+});
+
+app.get('/user/:id/muted-handles', async (req, res) => {
+    try {
+        const user = await User.findById(req.params.id).select('mutedChatHandles').lean();
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        return res.json({ handles: user.mutedChatHandles || [] });
+    } catch (err) {
+        console.error('Muted handles fetch error:', err.message);
+        return res.status(500).json({ error: 'Could not load muted people' });
+    }
+});
+
+app.patch('/user/:id/muted-handles', async (req, res) => {
+    const handles = Array.isArray(req.body?.handles)
+        ? [...new Set(req.body.handles.map((handle) => String(handle || '').trim().toLowerCase()).filter(Boolean))].slice(0, 500)
+        : [];
+    try {
+        const user = await User.findByIdAndUpdate(
+            req.params.id,
+            { $set: { mutedChatHandles: handles } },
+            { new: true, runValidators: true }
+        ).select('mutedChatHandles').lean();
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        return res.json({ handles: user.mutedChatHandles || [] });
+    } catch (err) {
+        console.error('Muted handles update error:', err.message);
+        return res.status(500).json({ error: 'Could not save muted people' });
     }
 });
