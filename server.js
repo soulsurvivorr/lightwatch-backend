@@ -472,6 +472,7 @@ chatSchema.index({ scope: 1, createdAt: -1 });
 chatSchema.index({ isAdmin: 1, createdAt: -1 });
 chatSchema.index({ userId: 1 });
 chatSchema.index({ 'replyTo.chatId': 1 });
+chatSchema.index({ 'quote.chatId': 1 });
 
 const notificationSchema = new mongoose.Schema({
     recipientUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
@@ -2112,6 +2113,20 @@ app.get('/chats', async (req, res) => {
     const userId = req.query.userId;
 
     try {
+        // ?quoteOf=<chatId> — return ONLY the quote posts that point at that
+        // one report. Previously this param was ignored, so the Quotes tab
+        // in the thread view received the whole feed. Deliberately skips the
+        // scope/location filter: a quote belongs to its thread wherever it
+        // was posted.
+        if (req.query.quoteOf) {
+            const quoteOf = String(req.query.quoteOf).trim();
+            const quotes = await Chat.find({ 'quote.chatId': quoteOf })
+                .sort({ createdAt: -1 })
+                .limit(200)
+                .lean();
+            return res.json(await hydrateChatEngagement(quotes, userId));
+        }
+
         const filter = buildChatsFilter(scope, location);
 
         // Optional delta cursor: ?since=<ISO timestamp>. This is the
