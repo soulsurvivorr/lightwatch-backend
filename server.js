@@ -972,6 +972,11 @@ function sanitizeMediaDataUrl(raw, kind = 'image') {
     return value;
 }
 
+function sanitizeHostedMediaUrl(raw) {
+    const value = String(raw || '').trim();
+    return /^https:\/\/res\.cloudinary\.com\/[a-z0-9_-]+\/.*$/i.test(value) ? value : null;
+}
+
 // Uploads an already-validated media data URL to Cloudinary and
 // returns the hosted secure_url, or null if there was nothing to upload.
 // One upload failure must never 500 the whole request (a post/profile
@@ -2345,10 +2350,15 @@ app.post('/chats', async (req, res) => {
     const normalizedText = String(text || '').trim();
     const normalizedMediaKind = media?.kind === 'video' ? 'video' : 'image';
     const normalizedMedia = sanitizeMediaDataUrl(media?.url, normalizedMediaKind);
+    const hostedMediaUrl = sanitizeHostedMediaUrl(media?.url);
     const hasQuote = Boolean(quote && (quote.chatId || quote.handle || quote.text));
     const hasRepost = Boolean(repost && (repost.chatId || repost.handle || repost.text));
-    if (!userId || (!normalizedText && !normalizedMedia && !hasQuote && !hasRepost) || (normalizedScope === 'local' && !location)) {
-        return res.status(400).json({ error: "Missing user, content, or location" });
+    const missingFields = [];
+    if (!userId) missingFields.push('user');
+    if (!normalizedText && !normalizedMedia && !hostedMediaUrl && !hasQuote && !hasRepost) missingFields.push('content');
+    if (normalizedScope === 'local' && !location) missingFields.push('location');
+    if (missingFields.length) {
+        return res.status(400).json({ error: `Missing ${missingFields.join(', ')}` });
     }
 
     try {
@@ -2357,7 +2367,7 @@ app.post('/chats', async (req, res) => {
             return res.status(400).json({ error: "Invalid user" });
         }
 
-        let mediaUrl = null;
+        let mediaUrl = hostedMediaUrl;
         if (normalizedMedia) {
             try {
                 mediaUrl = await uploadMediaToCloudinary(normalizedMedia, normalizedMediaKind, 'lightwatch/chat-media');
