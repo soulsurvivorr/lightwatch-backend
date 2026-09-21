@@ -2069,7 +2069,16 @@ app.delete('/user/:id/contacts', async (req, res) => {
 // always treated as local by the old `(chat.scope || 'local')` fallback).
 function buildChatsFilter(scope, location) {
     const scopeQuery = scope === 'global' ? { scope: 'global' } : { scope: { $ne: 'global' } };
-    if (scope === 'global' || !location) return scopeQuery;
+    // Comments/replies are saved as their own Chat docs (see POST
+    // /chats/:chatId/comments) so their likes/replies can be tracked
+    // independently, but they belong inside their parent's thread — not
+    // as a stray top-level card in the main feed. Exclude anything with
+    // a replyTo set from the general feed/count queries; the thread's
+    // own GET /chats/:chatId/comments route (and the "all posts by this
+    // author" profile query) intentionally query around this filter to
+    // still surface them where they belong.
+    const notAReply = { 'replyTo.chatId': { $exists: false } };
+    if (scope === 'global' || !location) return { ...scopeQuery, ...notAReply };
 
     // Same locationsFuzzyMatch() rule (exact match, or either string
     // containing the other), evaluated by Mongo per-document via
@@ -2079,6 +2088,7 @@ function buildChatsFilter(scope, location) {
     const normalizedLocation = normalizeLocation(location);
     return {
         ...scopeQuery,
+        ...notAReply,
         $expr: {
             $or: [
                 { $gte: [{ $indexOfCP: ['$locationKey', normalizedLocation] }, 0] },
@@ -2109,7 +2119,8 @@ async function hydrateChatEngagement(chats, userId) {
 
 app.get('/chats', async (req, res) => {
     const location = req.query.location;
-    const scope = (req.query.scope || 'local').toString().toLowerCase() === 'global' ? 'global' : 'local';
+    const requestedScope = (req.query.scope || 'local').toString().toLowerCase();
+    const scope = requestedScope === 'global' ? 'global' : 'local';
     const userId = req.query.userId;
 
     try {
@@ -2127,7 +2138,26 @@ app.get('/chats', async (req, res) => {
             return res.json(await hydrateChatEngagement(quotes, userId));
         }
 
-        const filter = buildChatsFilter(scope, location);
+        const filter = requestedScope === 'all' ? {} : buildChatsFilter(scope, location);
+        if (req.query.authorHandle) {
+            // Case-insensitive exact match — handles are unique regardless of
+            // case, and a stray casing mismatch here used to fall through to
+            // "no filter at all" further down in some callers, which made a
+            // profile look like it was showing every post on the app.
+            filter.handle = new RegExp(`^${escapeRegex(String(req.query.authorHandle).trim())}$`, 'i');
+        }
+        // Optional exact-owner queries, used by the account Activity screen
+        // to pull "my own reports/comments", "posts I liked" and "posts I
+        // reposted" without caring about scope/location at all.
+        if (req.query.authorId && mongoose.Types.ObjectId.isValid(req.query.authorId)) {
+            filter.userId = req.query.authorId;
+        }
+        if (req.query.likedBy && mongoose.Types.ObjectId.isValid(req.query.likedBy)) {
+            filter.likedBy = req.query.likedBy;
+        }
+        if (req.query.repostedBy && mongoose.Types.ObjectId.isValid(req.query.repostedBy)) {
+            filter.repostedBy = req.query.repostedBy;
+        }
 
         // Optional delta cursor: ?since=<ISO timestamp>. This is the
         // single hottest polling route in the app (it's in
