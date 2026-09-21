@@ -426,7 +426,9 @@ const chatSchema = new mongoose.Schema({
     },
     media: {
         kind: { type: String, enum: ['image', 'video'] },
-        url: { type: String }
+        url: { type: String },
+        muted: { type: Boolean, default: false },
+        crop: { type: Boolean, default: false }
     },
     // Persisted like state so counts are shared across every user/device
     // instead of living only in that one browser tab's DOM (see POST
@@ -2412,7 +2414,12 @@ app.post('/chats', async (req, res) => {
                 handle: String(quote.handle || '').slice(0, 80),
                 text: String(quote.text || '').slice(0, 220)
             } : undefined,
-            media: mediaUrl ? { kind: normalizedMediaKind, url: mediaUrl } : undefined,
+            media: mediaUrl ? {
+                kind: normalizedMediaKind,
+                url: mediaUrl,
+                muted: normalizedMediaKind === 'video' && Boolean(media?.muted),
+                crop: Boolean(media?.crop)
+            } : undefined,
             location: savedLocation,
             locationKey: normalizedLocation
         });
@@ -2648,9 +2655,9 @@ app.post('/chats', async (req, res) => {
     }
 });
 
-const CHAT_EDIT_DELETE_WINDOW_MS = 15 * 60 * 1000;
+const CHAT_EDIT_WINDOW_MS = 15 * 60 * 1000;
 
-function canUserModifyChat(chat, userId) {
+function canUserOwnChat(chat, userId) {
     if (!chat) return { allowed: false, status: 404, error: 'Post not found' };
     if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
         return { allowed: false, status: 400, error: 'Valid userId is required' };
@@ -2660,15 +2667,19 @@ function canUserModifyChat(chat, userId) {
         return { allowed: false, status: 403, error: 'You can only modify your own posts' };
     }
 
+    return { allowed: true };
+}
+
+function canUserEditChat(chat, userId) {
+    const ownership = canUserOwnChat(chat, userId);
+    if (!ownership.allowed) return ownership;
     const createdAtMs = chat.createdAt ? new Date(chat.createdAt).getTime() : NaN;
     if (!Number.isFinite(createdAtMs)) {
         return { allowed: false, status: 400, error: 'Post timestamp is invalid' };
     }
-
-    if ((Date.now() - createdAtMs) > CHAT_EDIT_DELETE_WINDOW_MS) {
-        return { allowed: false, status: 403, error: 'Edit/delete allowed only within 15 minutes of posting' };
+    if ((Date.now() - createdAtMs) > CHAT_EDIT_WINDOW_MS) {
+        return { allowed: false, status: 403, error: 'Editing is allowed only within 15 minutes of posting' };
     }
-
     return { allowed: true };
 }
 
@@ -2684,7 +2695,7 @@ app.patch('/chats/:chatId', async (req, res) => {
 
     try {
         const chat = await Chat.findById(chatId);
-        const gate = canUserModifyChat(chat, userId);
+        const gate = canUserEditChat(chat, userId);
         if (!gate.allowed) {
             return res.status(gate.status).json({ error: gate.error });
         }
@@ -2708,7 +2719,7 @@ app.patch('/chats/:chatId', async (req, res) => {
 });
 
 // DELETE /chats/:chatId { userId }
-// Owner-only and only within 15 minutes from createdAt.
+// Owner-only. Posts can be deleted at any time; the 15-minute limit is edit-only.
 app.delete('/chats/:chatId', async (req, res) => {
     const { chatId } = req.params;
     const { userId } = req.body || {};
@@ -2719,7 +2730,7 @@ app.delete('/chats/:chatId', async (req, res) => {
 
     try {
         const chat = await Chat.findById(chatId);
-        const gate = canUserModifyChat(chat, userId);
+        const gate = canUserOwnChat(chat, userId);
         if (!gate.allowed) {
             return res.status(gate.status).json({ error: gate.error });
         }
