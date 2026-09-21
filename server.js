@@ -521,6 +521,7 @@ const lightStatusEventSchema = new mongoose.Schema({
     locationKey: { type: String, required: true },
     status: { type: String, enum: ['on', 'off'], required: true },
     reportedBy: { type: String },
+    reason: { type: String, default: null },
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     reportedAt: { type: Date, default: Date.now }
 });
@@ -1105,6 +1106,8 @@ const GHANA_TOWN_COORDS = {
     ho: [6.6108, 0.4708], bolgatanga: [10.7854, -0.8513], wa: [10.0601, -2.5099],
     techiman: [7.5833, -1.9333], obuasi: [6.2020, -1.6700], tema: [5.6698, -0.0166],
     nsawam: [5.8083, -0.3500], winneba: [5.3511, -0.6231], akimoda: [5.9260, -0.9877],
+    // Explicit correction: Kromoase-Adwaase, Kwadaso/Kumasi area, Ashanti.
+    kromoase: [6.663429, -1.6757252],
     berekum: [7.4531, -2.5850], nkawkaw: [6.5500, -0.7667], dunkwa: [5.9667, -1.7833],
     yendi: [9.4427, -0.0093], bawku: [11.0575, -0.2417], navrongo: [10.8956, -1.0925],
     hohoe: [7.1517, 0.4747], kpando: [6.9922, 0.2919], keta: [5.9186, 0.9897],
@@ -1266,10 +1269,17 @@ async function geocodeWithCache(locationKey, displayLabel, region) {
 //      nothing either (offline, unresolvable name, etc.).
 // Now async because of step 3 — callers must await this.
 async function resolveLocationCoords(locationKey, storedLat, storedLng, displayLabel, region) {
+    const normalizedKey = String(locationKey || '').replace(/[^a-z0-9]/g, '');
+    const tableHit = GHANA_TOWN_COORDS[normalizedKey];
+    // Kromoase previously received an incorrect persisted/geocoded point.
+    // Keep this explicit correction authoritative so old stored fixes do not
+    // continue placing the shared map marker incorrectly.
+    if (normalizedKey === 'kromoase' && tableHit) {
+        return { lat: tableHit[0], lng: tableHit[1], approximate: false };
+    }
     if (typeof storedLat === 'number' && typeof storedLng === 'number') {
         return { lat: storedLat, lng: storedLng, approximate: false };
     }
-    const tableHit = GHANA_TOWN_COORDS[String(locationKey || '').replace(/[^a-z0-9]/g, '')];
     if (tableHit) return { lat: tableHit[0], lng: tableHit[1], approximate: false };
 
     const geocoded = await geocodeWithCache(locationKey, displayLabel || locationKey, region);
@@ -3519,7 +3529,8 @@ app.get('/lightstatus/history', async (req, res) => {
             id: event._id,
             status: event.status,
             reportedAt: event.reportedAt,
-            source: event.reportedBy === 'anonymous' ? 'A volunteer' : (event.reportedBy || 'A volunteer')
+            source: event.reportedBy === 'anonymous' ? 'A volunteer' : (event.reportedBy || 'A volunteer'),
+            reason: event.reason || (event.status === 'on' ? 'Power restored' : 'Power outage reported')
         })));
     } catch (err) {
         console.error('Light-status history error:', err.message);
@@ -4293,7 +4304,7 @@ async function sendFcmToOne(sub, notification) {
 // admin-set status shows up on users' home pages (poll + push) exactly
 // the same way a real user report does. `reportedByOverride` lets the
 // admin route label events as "LightWatch Admin" instead of a handle. ──
-async function applyLightStatusUpdate(rawLocation, status, { userId = null, reportedByOverride = null, lat = null, lng = null } = {}) {
+async function applyLightStatusUpdate(rawLocation, status, { userId = null, reportedByOverride = null, reason = null, lat = null, lng = null } = {}) {
     const key = normalizeLocation(rawLocation).split(',')[0].trim();
     const keyTitle = titleCaseLocation(key);
     const hasFix = typeof lat === 'number' && typeof lng === 'number' && !Number.isNaN(lat) && !Number.isNaN(lng);
@@ -4328,6 +4339,7 @@ async function applyLightStatusUpdate(rawLocation, status, { userId = null, repo
         locationKey: key,
         status,
         reportedBy,
+        reason: reason || (reportedByOverride ? 'Admin status update' : 'Community status report'),
         userId: userId || undefined,
         reportedAt: new Date()
     });
@@ -4417,7 +4429,7 @@ async function applyLightStatusUpdate(rawLocation, status, { userId = null, repo
 
 // POST /lightstatus  { location, status, userId }
 app.post('/lightstatus', async (req, res) => {
-    const { location, status, userId, lat, lng } = req.body;
+    const { location, status, userId, reason, lat, lng } = req.body;
     if (!location || !status) return res.status(400).json({ error: 'location and status required' });
     if (!['on', 'off'].includes(status)) return res.status(400).json({ error: 'status must be on or off' });
 
@@ -4438,6 +4450,7 @@ app.post('/lightstatus', async (req, res) => {
         const parsedLng = typeof lng === 'number' ? lng : parseFloat(lng);
         const { record } = await applyLightStatusUpdate(location, status, {
             userId,
+            reason,
             lat: Number.isFinite(parsedLat) ? parsedLat : null,
             lng: Number.isFinite(parsedLng) ? parsedLng : null
         });
@@ -4454,12 +4467,12 @@ app.post('/lightstatus', async (req, res) => {
 // (next poll of GET /lightstatus, plus an immediate push to subscribers)
 // with no separate sync path for admin to keep in mind.
 app.post('/admin/lightstatus', verifyAdminToken, async (req, res) => {
-    const { location, status } = req.body;
+    const { location, status, reason } = req.body;
     if (!location || !status) return res.status(400).json({ error: 'location and status required' });
     if (!['on', 'off'].includes(status)) return res.status(400).json({ error: 'status must be on or off' });
 
     try {
-        const { record, keyTitle } = await applyLightStatusUpdate(location, status, { reportedByOverride: 'LightWatch Admin' });
+        const { record, keyTitle } = await applyLightStatusUpdate(location, status, { reportedByOverride: 'LightWatch Admin', reason });
         return res.json({ ...record.toObject(), locationLabel: keyTitle });
     } catch (err) {
         console.error('Admin light status error:', err.message);

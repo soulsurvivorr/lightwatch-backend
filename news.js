@@ -76,13 +76,13 @@ const OUTBOUND_HEADERS = {
 };
 
 // How long raw articles/events stick around before MongoDB auto-deletes
-// them (TTL indexes below). 12 days = a week and 5 days — once an
-// article/event ages past that it's gone from the DB entirely, and
+// them (TTL indexes below). Once an article/event reaches two weeks,
+// it is gone from the DB entirely, and
 // since GET /news is read straight from the DB (no separate delete
 // step needed), it disappears from every client's feed too, on their
 // next fetch/cache expiry. Override with NEWS_RETENTION_DAYS on Render
 // if needed.
-const NEWS_RETENTION_DAYS = Number(process.env.NEWS_RETENTION_DAYS) || 12;
+const NEWS_RETENTION_DAYS = Number(process.env.NEWS_RETENTION_DAYS) || 14;
 const NEWS_RETENTION_SECONDS = NEWS_RETENTION_DAYS * 24 * 60 * 60;
 
 const rssParser = new Parser({
@@ -944,6 +944,26 @@ module.exports = function initNewsSystem(app, deps) {
     newsEventSchema.index({ dedupeKey: 1 });
 
     const NewsEvent = mongoose.models.NewsEvent || mongoose.model('NewsEvent', newsEventSchema);
+
+    async function syncNewsRetentionIndexes() {
+        if (mongoose.connection.readyState !== 1) return;
+        const updates = [
+            { collection: NewsArticle.collection.name, keyPattern: { publishedAt: 1 } },
+            { collection: NewsEvent.collection.name, keyPattern: { lastUpdatedAt: 1 } },
+        ];
+        await Promise.all(updates.map(({ collection, keyPattern }) =>
+            mongoose.connection.db.command({
+                collMod: collection,
+                index: { keyPattern, expireAfterSeconds: NEWS_RETENTION_SECONDS },
+            }).catch((err) => console.warn(`[NEWS] Could not sync TTL for ${collection}:`, err.message))
+        ));
+    }
+
+    if (mongoose.connection.readyState === 1) {
+        void syncNewsRetentionIndexes();
+    } else {
+        mongoose.connection.once('connected', () => void syncNewsRetentionIndexes());
+    }
 
     // ---- Location matching (unchanged) -----------------------------
     async function getKnownLocationKeys() {
