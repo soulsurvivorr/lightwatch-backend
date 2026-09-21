@@ -5088,25 +5088,6 @@ app.get('/', (req, res) => {
     });
 });
 
-// This backend is API-only — the frontend deploys independently to
-// Netlify (see the express.static comment above), so there is no
-// index.html to serve here and there never will be. This used to try
-// res.sendFile(path.join(__dirname, '../frontend/index.html')) as an
-// SPA fallback for every unmatched request, with no error handling.
-// That path never resolves on Render, so it failed on essentially
-// every stray/bot/probe request that didn't match an API route —
-// and each failed attempt queues an fs.stat on Node's shared libuv
-// threadpool (default size 4), the SAME pool zlib uses for the
-// compression() middleware wrapping every JSON response above. Enough
-// of these piling up at once was starving that pool and stalling
-// unrelated API responses for tens of seconds — the random
-// across-every-endpoint slowness this was originally reported as.
-// A plain, fast JSON 404 does no filesystem I/O at all, so it can't
-// contend for that pool no matter how often it's hit.
-app.get('*', (req, res) => {
-    res.status(404).json({ error: 'Not found' });
-});
-
 // START
 const PORT = process.env.PORT || 3000;
 
@@ -5441,4 +5422,29 @@ app.patch('/user/:id/muted-handles', async (req, res) => {
         console.error('Muted handles update error:', err.message);
         return res.status(500).json({ error: 'Could not save muted people' });
     }
+});
+
+// ---- 404 FALLBACK (must stay the LAST route) ----
+// Express matches routes in registration order. This catch-all used to sit
+// above the /chats/:chatId/comments, /chats/:chatId/likes, /user/:id/muted-handles
+// and /admin/clear-subscriptions routes, so every GET to them got a 404 before
+// reaching its handler (thread replies always looked empty). Keep it at the
+// very bottom of the file, after every other route.
+// This backend is API-only — the frontend deploys independently to
+// Netlify (see the express.static comment above), so there is no
+// index.html to serve here and there never will be. This used to try
+// res.sendFile(path.join(__dirname, '../frontend/index.html')) as an
+// SPA fallback for every unmatched request, with no error handling.
+// That path never resolves on Render, so it failed on essentially
+// every stray/bot/probe request that didn't match an API route —
+// and each failed attempt queues an fs.stat on Node's shared libuv
+// threadpool (default size 4), the SAME pool zlib uses for the
+// compression() middleware wrapping every JSON response above. Enough
+// of these piling up at once was starving that pool and stalling
+// unrelated API responses for tens of seconds — the random
+// across-every-endpoint slowness this was originally reported as.
+// A plain, fast JSON 404 does no filesystem I/O at all, so it can't
+// contend for that pool no matter how often it's hit.
+app.get('*', (req, res) => {
+    res.status(404).json({ error: 'Not found' });
 });
