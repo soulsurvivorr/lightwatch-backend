@@ -400,6 +400,7 @@ const chatSchema = new mongoose.Schema({
     handle: { type: String, required: true },
     // Text can be empty when the post is image-only.
     text: { type: String, default: '' },
+    reportCategory: { type: String, default: null },
     // Snapshot of sender avatar at post time so feeds can render
     // without extra user lookups per message.
     avatarImage: { type: String, default: null },
@@ -2345,7 +2346,7 @@ async function createNotificationForUser({ recipientUserId, actorUserId, actorHa
 }
 
 app.post('/chats', async (req, res) => {
-    const { userId, text, location, replyTo, repost, quote, media, scope, mentions } = req.body;
+    const { userId, text, location, replyTo, repost, quote, media, scope, mentions, reportCategory } = req.body;
     const normalizedScope = (scope || 'local').toString().toLowerCase() === 'global' ? 'global' : 'local';
     const normalizedText = String(text || '').trim();
     const normalizedMediaKind = media?.kind === 'video' ? 'video' : 'image';
@@ -2393,6 +2394,7 @@ app.post('/chats', async (req, res) => {
             userId,
             handle: user.chatHandle,
             text: normalizedText,
+            reportCategory: reportCategory ? String(reportCategory).slice(0, 40) : null,
             avatarImage: user.avatarImage || null,
             scope: normalizedScope,
             replyTo: replyTo ? {
