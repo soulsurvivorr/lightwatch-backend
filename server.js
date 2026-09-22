@@ -980,6 +980,26 @@ function sanitizeHostedMediaUrl(raw) {
     return /^https:\/\/res\.cloudinary\.com\/[a-z0-9_-]+\/.*$/i.test(value) ? value : null;
 }
 
+// The composer's trim scrubber (VideoTrimmer, client-side) only ever
+// changed what PLAYED during editing — the full, untrimmed file the
+// person picked was always what got uploaded and stored, so
+// trimStartMs/trimEndMs arrived on every /chats POST and were silently
+// dropped. Cloudinary can deliver a trimmed clip from the SAME uploaded
+// asset via a `so_<seconds>,eo_<seconds>` (start offset / end offset)
+// transformation in the URL — generated and cached on first request, no
+// re-upload and no ffmpeg needed here. This turns that pair of fields
+// into the actual stored/delivered clip.
+function applyCloudinaryVideoTrim(url, trimStartMs, trimEndMs) {
+    if (!url || !/\/video\/upload\//.test(url)) return url;
+    const startSec = Number.isFinite(trimStartMs) && trimStartMs > 0 ? trimStartMs / 1000 : null;
+    const endSec = Number.isFinite(trimEndMs) && trimEndMs > 0 ? trimEndMs / 1000 : null;
+    if (startSec == null && endSec == null) return url;
+    const segments = [];
+    if (startSec != null) segments.push(`so_${startSec.toFixed(2)}`);
+    if (endSec != null) segments.push(`eo_${endSec.toFixed(2)}`);
+    return url.replace('/video/upload/', `/video/upload/${segments.join(',')}/`);
+}
+
 // Uploads an already-validated media data URL to Cloudinary and
 // returns the hosted secure_url, or null if there was nothing to upload.
 // One upload failure must never 500 the whole request (a post/profile
@@ -2348,7 +2368,7 @@ async function createNotificationForUser({ recipientUserId, actorUserId, actorHa
 }
 
 app.post('/chats', async (req, res) => {
-    const { userId, text, location, replyTo, repost, quote, media, scope, mentions, reportCategory } = req.body;
+    const { userId, text, location, replyTo, repost, quote, media, scope, mentions, reportCategory, trimStartMs, trimEndMs } = req.body;
     const normalizedScope = (scope || 'local').toString().toLowerCase() === 'global' ? 'global' : 'local';
     const normalizedText = String(text || '').trim();
     const normalizedMediaKind = media?.kind === 'video' ? 'video' : 'image';
@@ -2378,6 +2398,9 @@ app.post('/chats', async (req, res) => {
                 console.error('Cloudinary chat media upload error:', uploadErr.message);
                 return res.status(502).json({ error: 'Could not upload media, please try again' });
             }
+        }
+        if (normalizedMediaKind === 'video' && mediaUrl) {
+            mediaUrl = applyCloudinaryVideoTrim(mediaUrl, Number(trimStartMs), Number(trimEndMs));
         }
 
         if (!user.chatHandle) {
