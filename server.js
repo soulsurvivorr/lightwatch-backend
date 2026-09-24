@@ -3924,7 +3924,7 @@ app.get('/reports', async (req, res) => {
             text: item.text,
             reportedAt: item.createdAt,
             type: item.type,
-            chatId: item.chatId || null,
+            chatId: item.parentChatId || item.chatId || null,
             chatScope: item.chatScope || null,
             chatLocation: item.chatLocation || null,
             url: item.url || '/notifications'
@@ -4287,21 +4287,13 @@ async function sendFcmToOne(sub, notification) {
     if (!fcmEnabled) return { ok: false, statusCode: 503 };
     if (!sub.fcmToken) return { ok: false, statusCode: 400 };
 
-    // Maps to the channels created natively in MainActivity.java
-    // (createNotificationChannels()) — each one has its own custom
-    // sound baked in at creation time, so this is what makes a
-    // power-on push actually ring differently from a power-off push
-    // or a chat push, instead of Android's single default tone.
-    // `sound` (the raw resource name, no extension) is the fallback
-    // for Android <8 devices, which have no channel system at all —
-    // channelId is silently ignored there and this is what applies
-    // instead.
-    let soundResource = 'lw_chat';
-    if (notification.tone === 'power-on') soundResource = 'lw_power_on';
-    else if (notification.tone === 'power-off') soundResource = 'lw_power_off';
-    else if (notification.tone === 'chat') soundResource = 'lw_chat';
-    else if (notification.tone === 'news') soundResource = 'lw_news';
-    const channelId = `${soundResource}_v2`; // v2 recreates channels whose old sound may have been silent
+    // The React Native app creates these channels with high importance and
+    // the system default sound. Keep the channel IDs stable so Android can
+    // display a heads-up popup and play the sound while the app is closed.
+    let channelId = 'lw_chat_v2';
+    if (notification.tone === 'power-on') channelId = 'lw_power_on_v2';
+    else if (notification.tone === 'power-off') channelId = 'lw_power_off_v2';
+    else if (notification.tone === 'news') channelId = 'lw_news_v2';
 
     const vibrateTimings = Array.isArray(notification.vibrate)
         ? notification.vibrate.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n >= 0)
@@ -4324,7 +4316,7 @@ async function sendFcmToOne(sub, notification) {
                 notification: {
                     tag: notification.tag || undefined,
                     channelId,
-                    sound: soundResource,
+                    sound: 'default',
                     vibrateTimingsMillis: vibrateTimings || undefined
                 }
             }
