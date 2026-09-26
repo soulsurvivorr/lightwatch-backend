@@ -113,7 +113,7 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
         console.error("FIREBASE_SERVICE_ACCOUNT_KEY is set but invalid JSON:", err.message);
     }
 } else {
-    console.log("Firebase Admin (FCM) ready for native Android push delivery.");
+    console.warn("Firebase Admin (FCM) is disabled: FIREBASE_SERVICE_ACCOUNT_KEY is missing. Native Android push delivery will fail.");
 }
 
 // Log a masked version of the URI so we can confirm which form is being used (no secrets printed)
@@ -4290,10 +4290,10 @@ async function sendFcmToOne(sub, notification) {
     // The React Native app creates these channels with high importance and
     // the system default sound. Keep the channel IDs stable so Android can
     // display a heads-up popup and play the sound while the app is closed.
-    let channelId = 'lw_chat_v2';
-    if (notification.tone === 'power-on') channelId = 'lw_power_on_v2';
-    else if (notification.tone === 'power-off') channelId = 'lw_power_off_v2';
-    else if (notification.tone === 'news') channelId = 'lw_news_v2';
+    let channelId = 'lw_chat_v3';
+    if (notification.tone === 'power-on') channelId = 'lw_power_on_v3';
+    else if (notification.tone === 'power-off') channelId = 'lw_power_off_v3';
+    else if (notification.tone === 'news') channelId = 'lw_news_v3';
 
     const vibrateTimings = Array.isArray(notification.vibrate)
         ? notification.vibrate.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n >= 0)
@@ -5364,7 +5364,7 @@ app.post('/chats/:chatId/comments', async (req, res) => {
 
     try {
         const [parent, user] = await Promise.all([
-            Chat.findById(chatId).select('scope location').lean(),
+            Chat.findById(chatId).select('userId handle text scope location').lean(),
             User.findById(userId).select('chatHandle avatarImage').lean()
         ]);
         if (!parent || !user) return res.status(404).json({ error: 'Post or user not found' });
@@ -5382,6 +5382,21 @@ app.post('/chats/:chatId/comments', async (req, res) => {
         const saved = comment.toObject();
         saved.userId = String(saved.userId);
         saved.avatarUrl = saved.avatarImage || null;
+        if (parent.userId && String(parent.userId) !== String(userId)) {
+            void createNotificationForUser({
+                recipientUserId: String(parent.userId),
+                actorUserId: String(userId),
+                actorHandle: user.chatHandle || 'Someone',
+                type: 'comment',
+                chatId: String(comment._id),
+                parentChatId: String(chatId),
+                title: `${user.chatHandle || 'Someone'} commented on your post`,
+                text: normalizedText.slice(0, 140),
+                url: `/chat?chatId=${encodeURIComponent(String(chatId))}`,
+                chatScope: parent.scope || null,
+                chatLocation: parent.location || null
+            });
+        }
         return res.status(201).json(saved);
     } catch (err) {
         console.error('Create chat comment error:', err.message);
@@ -5419,13 +5434,29 @@ app.post('/chats/:chatId/repost', async (req, res) => {
     }
 
     try {
-        const chat = await Chat.findById(chatId).select('repostedBy repostCount').lean();
+        const chat = await Chat.findById(chatId).select('userId handle text repostedBy repostCount').lean();
         if (!chat) return res.status(404).json({ error: 'Post not found' });
         const alreadyReposted = (chat.repostedBy || []).some((id) => String(id) === String(userId));
         const update = alreadyReposted
             ? { $pull: { repostedBy: userId }, $inc: { repostCount: -1 } }
             : { $addToSet: { repostedBy: userId }, $inc: { repostCount: 1 } };
         const updated = await Chat.findByIdAndUpdate(chatId, update, { new: true }).select('repostCount repostedBy').lean();
+        if (!alreadyReposted && chat.userId && String(chat.userId) !== String(userId)) {
+            const actor = await User.findById(userId).select('chatHandle').lean();
+            void createNotificationForUser({
+                recipientUserId: String(chat.userId),
+                actorUserId: String(userId),
+                actorHandle: actor?.chatHandle || 'Someone',
+                type: 'repost',
+                chatId: String(chatId),
+                parentChatId: String(chatId),
+                title: `${actor?.chatHandle || 'Someone'} reposted your post`,
+                text: String(chat.text || '').slice(0, 140),
+                url: `/chat?chatId=${encodeURIComponent(String(chatId))}`,
+                chatScope: null,
+                chatLocation: null
+            });
+        }
         return res.json({ reposted: !alreadyReposted, repostCount: Math.max(0, updated?.repostCount || 0) });
     } catch (err) {
         console.error('Toggle chat repost error:', err.message);

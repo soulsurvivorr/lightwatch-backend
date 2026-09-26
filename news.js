@@ -76,13 +76,13 @@ const OUTBOUND_HEADERS = {
 };
 
 // How long raw articles/events stick around before MongoDB auto-deletes
-// them (TTL indexes below). Once an article/event reaches two weeks,
+// them (TTL indexes below). Once an article/event reaches three weeks,
 // it is gone from the DB entirely, and
 // since GET /news is read straight from the DB (no separate delete
 // step needed), it disappears from every client's feed too, on their
 // next fetch/cache expiry. Override with NEWS_RETENTION_DAYS on Render
-// if needed.
-const NEWS_RETENTION_DAYS = Number(process.env.NEWS_RETENTION_DAYS) || 14;
+// if needed, but never below the three-week minimum.
+const NEWS_RETENTION_DAYS = Math.max(Number(process.env.NEWS_RETENTION_DAYS) || 21, 21);
 const NEWS_RETENTION_SECONDS = NEWS_RETENTION_DAYS * 24 * 60 * 60;
 
 const rssParser = new Parser({
@@ -281,7 +281,7 @@ function sanitizeFeedXml(xml) {
 // back out so the real outlet still gets credited as the source
 // instead of everything showing up as "Google News".
 function googleNewsUrl(query) {
-    return `https://news.google.com/rss/search?q=${encodeURIComponent(query)}+when:14d&hl=en-GH&gl=GH&ceid=GH:en`;
+    return `https://news.google.com/rss/search?q=${encodeURIComponent(query)}+when:21d&hl=en-GH&gl=GH&ceid=GH:en`;
 }
 
 const GOOGLE_NEWS_QUERIES = [
