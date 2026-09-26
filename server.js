@@ -427,6 +427,12 @@ const chatSchema = new mongoose.Schema({
             kind: { type: String, enum: ['image', 'video'] },
             url: { type: String },
             crop: { type: Boolean, default: false }
+        },
+        article: {
+            title: { type: String },
+            url: { type: String },
+            image: { type: String },
+            source: { type: String }
         }
     },
     article: {
@@ -2285,15 +2291,35 @@ app.get('/chats', async (req, res) => {
 app.get('/chats/counts', async (req, res) => {
     const location = req.query.location;
     const scope = (req.query.scope || 'local').toString().toLowerCase() === 'global' ? 'global' : 'local';
+    const userId = req.query.userId;
 
     try {
         const filter = buildChatsFilter(scope, location);
         const counts = await Chat.find(filter)
-            .select('likeCount likedBy shareCount viewCount replyTo.chatId createdAt')
+            .select('_id likeCount likedBy repostCount repostedBy quoteCount shareCount viewCount replyTo.chatId createdAt')
             .sort({ createdAt: -1 })
             .limit(500)
             .lean();
-        return res.json(counts);
+        const chatIds = counts.map((chat) => String(chat._id));
+        const replyCounts = chatIds.length
+            ? await Chat.aggregate([
+                { $match: { 'replyTo.chatId': { $in: chatIds } } },
+                { $group: { _id: '$replyTo.chatId', count: { $sum: 1 } } }
+            ])
+            : [];
+        const repliesByChatId = new Map(replyCounts.map((entry) => [String(entry._id), entry.count]));
+        const validUserId = userId && mongoose.Types.ObjectId.isValid(userId) ? String(userId) : null;
+        return res.json(counts.map((chat) => ({
+            _id: String(chat._id),
+            likeCount: chat.likeCount || 0,
+            liked: validUserId ? (chat.likedBy || []).some((id) => String(id) === validUserId) : false,
+            repostCount: chat.repostCount || 0,
+            reposted: validUserId ? (chat.repostedBy || []).some((id) => String(id) === validUserId) : false,
+            quoteCount: chat.quoteCount || 0,
+            shareCount: chat.shareCount || 0,
+            viewCount: chat.viewCount || 0,
+            commentCount: repliesByChatId.get(String(chat._id)) || 0
+        })));
     } catch (err) {
         console.error("Get chats/counts error:", err.message);
         return res.status(500).json({ error: "Server error fetching chat counts" });
@@ -2387,9 +2413,10 @@ app.post('/chats', async (req, res) => {
     const hostedMediaUrl = sanitizeHostedMediaUrl(media?.url);
     const hasQuote = Boolean(quote && (quote.chatId || quote.handle || quote.text));
     const hasRepost = Boolean(repost && (repost.chatId || repost.handle || repost.text));
+    const hasArticle = Boolean(article && (article.url || article.image || article.title));
     const missingFields = [];
     if (!userId) missingFields.push('user');
-    if (!normalizedText && !normalizedMedia && !hostedMediaUrl && !hasQuote && !hasRepost) missingFields.push('content');
+    if (!normalizedText && !normalizedMedia && !hostedMediaUrl && !hasQuote && !hasRepost && !hasArticle) missingFields.push('content');
     if (normalizedScope === 'local' && !location) missingFields.push('location');
     if (missingFields.length) {
         return res.status(400).json({ error: `Missing ${missingFields.join(', ')}` });
@@ -2451,6 +2478,12 @@ app.post('/chats', async (req, res) => {
                     kind: quote.media.kind === 'video' ? 'video' : 'image',
                     url: String(quote.media.url).slice(0, 2048),
                     crop: Boolean(quote.media.crop)
+                } : undefined,
+                article: quote.article ? {
+                    title: String(quote.article.title || '').slice(0, 300),
+                    url: String(quote.article.url || '').slice(0, 2048),
+                    image: String(quote.article.image || '').slice(0, 2048),
+                    source: String(quote.article.source || '').slice(0, 120)
                 } : undefined
             } : undefined,
             article: article ? {
