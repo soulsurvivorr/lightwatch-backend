@@ -422,7 +422,18 @@ const chatSchema = new mongoose.Schema({
     quote: {
         chatId: { type: String },
         handle: { type: String },
-        text: { type: String }
+        text: { type: String },
+        media: {
+            kind: { type: String, enum: ['image', 'video'] },
+            url: { type: String },
+            crop: { type: Boolean, default: false }
+        }
+    },
+    article: {
+        title: { type: String },
+        url: { type: String },
+        image: { type: String },
+        source: { type: String }
     },
     media: {
         kind: { type: String, enum: ['image', 'video'] },
@@ -2368,7 +2379,7 @@ async function createNotificationForUser({ recipientUserId, actorUserId, actorHa
 }
 
 app.post('/chats', async (req, res) => {
-    const { userId, text, location, replyTo, repost, quote, media, scope, mentions, reportCategory, trimStartMs, trimEndMs } = req.body;
+    const { userId, text, location, replyTo, repost, quote, article, media, scope, mentions, reportCategory, trimStartMs, trimEndMs } = req.body;
     const normalizedScope = (scope || 'local').toString().toLowerCase() === 'global' ? 'global' : 'local';
     const normalizedText = String(text || '').trim();
     const normalizedMediaKind = media?.kind === 'video' ? 'video' : 'image';
@@ -2435,7 +2446,18 @@ app.post('/chats', async (req, res) => {
             quote: quote ? {
                 chatId: String(quote.chatId || ''),
                 handle: String(quote.handle || '').slice(0, 80),
-                text: String(quote.text || '').slice(0, 220)
+                text: String(quote.text || '').slice(0, 220),
+                media: quote.media?.url ? {
+                    kind: quote.media.kind === 'video' ? 'video' : 'image',
+                    url: String(quote.media.url).slice(0, 2048),
+                    crop: Boolean(quote.media.crop)
+                } : undefined
+            } : undefined,
+            article: article ? {
+                title: String(article.title || '').slice(0, 300),
+                url: String(article.url || '').slice(0, 2048),
+                image: String(article.image || '').slice(0, 2048),
+                source: String(article.source || '').slice(0, 120)
             } : undefined,
             media: mediaUrl ? {
                 kind: normalizedMediaKind,
