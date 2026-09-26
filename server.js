@@ -2194,7 +2194,15 @@ app.get('/chats', async (req, res) => {
         }
 
         const filter = requestedScope === 'all' ? {} : buildChatsFilter(scope, location);
-        if (req.query.authorHandle) {
+        let profileUserId = null;
+        if (req.query.profileHandle) {
+            const profileHandle = String(req.query.profileHandle).trim();
+            const handlePattern = new RegExp(`^${escapeRegex(profileHandle)}$`, 'i');
+            const profileUser = await User.findOne({ chatHandle: handlePattern }).select('_id').lean();
+            profileUserId = profileUser?._id || null;
+            filter.$or = [{ handle: handlePattern }];
+            if (profileUserId) filter.$or.push({ repostedBy: profileUserId });
+        } else if (req.query.authorHandle) {
             // Case-insensitive exact match — handles are unique regardless of
             // case, and a stray casing mismatch here used to fall through to
             // "no filter at all" further down in some callers, which made a
@@ -2273,7 +2281,14 @@ app.get('/chats', async (req, res) => {
         }
 
         const chats = await Chat.find(query).sort({ createdAt: -1 }).limit(500).lean();
-        return res.json(await hydrateChatEngagement(chats, userId));
+        const hydrated = await hydrateChatEngagement(chats, userId);
+        if (profileUserId) {
+            return res.json(hydrated.map((chat) => ({
+                ...chat,
+                profileReposted: (chat.repostedBy || []).some((id) => String(id) === String(profileUserId))
+            })));
+        }
+        return res.json(hydrated);
     } catch (err) {
         console.error("Get chats error:", err.message);
         return res.status(500).json({ error: "Server error fetching chats" });
