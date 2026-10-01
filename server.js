@@ -678,6 +678,14 @@ const stormNotificationSchema = new mongoose.Schema({
 });
 stormNotificationSchema.index({ userId: 1, locationKey: 1, notifiedAt: -1 });
 
+const lightCheckInScheduleSchema = new mongoose.Schema({
+    _id: { type: String },
+    hour: { type: Number, required: true },
+    sentAt: { type: Date, default: null },
+    createdAt: { type: Date, default: Date.now }
+});
+lightCheckInScheduleSchema.index({ createdAt: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60 });
+
 const User             = mongoose.model('User', userSchema);
 const Chat             = mongoose.model('Chat', chatSchema);
 const Notification     = mongoose.model('Notification', notificationSchema);
@@ -685,6 +693,7 @@ const LightStatus      = mongoose.model('LightStatus', lightStatusSchema);
 const LightStatusEvent = mongoose.model('LightStatusEvent', lightStatusEventSchema);
 const PushSubscription = mongoose.model('PushSubscription', pushSubscriptionSchema);
 const StormNotification = mongoose.model('StormNotification', stormNotificationSchema);
+const LightCheckInSchedule = mongoose.model('LightCheckInSchedule', lightCheckInScheduleSchema);
 const AdminLocation     = mongoose.model('AdminLocation', new mongoose.Schema({
     locationKey: { type: String, required: true, unique: true },
     label: { type: String, required: true },
@@ -3639,7 +3648,7 @@ app.get('/lightstatus/history', async (req, res) => {
         if (days > 0) query.reportedAt = { $gte: new Date(Date.now() - days * 24 * 60 * 60 * 1000) };
 
         let request = LightStatusEvent.find(query).sort({ reportedAt: -1 }).lean();
-        if (limit > 0) request = request.limit(Math.min(limit, 100));
+        if (limit > 0) request = request.limit(Math.min(limit, 1000));
         const events = await request;
         return res.json(events.map(event => ({
             id: event._id,
@@ -4051,9 +4060,6 @@ const CHECKIN_MESSAGES = [
     'Still got power? Let your area know in one tap.',
     'Checking in — has your light status changed today?'
 ];
-let lastCheckInDateKey = null;
-let todaysCheckInHour = null;
-
 function pickTodaysCheckInHour() {
     const span = CHECKIN_WINDOW_END_HOUR - CHECKIN_WINDOW_START_HOUR;
     return CHECKIN_WINDOW_START_HOUR + Math.floor(Math.random() * span);
@@ -4081,19 +4087,35 @@ async function sendLightCheckInPush() {
 }
 
 if (process.env.NODE_ENV !== 'test') {
-    setInterval(() => {
+    setInterval(async () => {
         const now = new Date();
         const dateKey = now.toISOString().slice(0, 10);
-        if (dateKey !== lastCheckInDateKey) {
-            // New calendar day — roll a fresh random hour to send at.
-            lastCheckInDateKey = dateKey;
-            todaysCheckInHour = pickTodaysCheckInHour();
-        }
-        if (todaysCheckInHour !== null && now.getHours() === todaysCheckInHour) {
-            // Clear the target so we don't fire again this same day if
-            // this interval ticks more than once during that hour.
-            todaysCheckInHour = null;
-            sendLightCheckInPush();
+        try {
+            // The date key is the document ID, so all backend instances use
+            // the same randomly selected hour and send-once marker.
+            let schedule;
+            try {
+                schedule = await LightCheckInSchedule.findOneAndUpdate(
+                    { _id: dateKey },
+                    { $setOnInsert: { hour: pickTodaysCheckInHour() } },
+                    { upsert: true, new: true, setDefaultsOnInsert: true }
+                ).lean();
+            } catch (err) {
+                if (err.code !== 11000) throw err;
+                schedule = await LightCheckInSchedule.findById(dateKey).lean();
+            }
+
+            if (schedule?.hour === now.getHours()) {
+                const claimed = await LightCheckInSchedule.findOneAndUpdate(
+                    { _id: dateKey, sentAt: null },
+                    { $set: { sentAt: now } },
+                    { new: true }
+                );
+                if (!claimed) return;
+                await sendLightCheckInPush();
+            }
+        } catch (err) {
+            console.error('Light check-in schedule error:', err.message);
         }
     }, 30 * 60 * 1000); // check twice an hour — plenty of margin to land within the target hour
 }
