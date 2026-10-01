@@ -3746,6 +3746,7 @@ async function getLocationsMapData() {
 
         return {
             name: titleCaseLocation(key),
+            region: meta?.region || null,
             locationKey: key,
             lat: coords.lat,
             lng: coords.lng,
