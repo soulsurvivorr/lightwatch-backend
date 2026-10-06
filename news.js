@@ -1228,6 +1228,7 @@ module.exports = function initNewsSystem(app, deps) {
             await event.save();
             article.eventId = event._id;
             await article.save();
+            clearNewsCache();
             await notifyForEvent(event, combinedText);
             return event;
         }
@@ -1291,6 +1292,7 @@ module.exports = function initNewsSystem(app, deps) {
         await event.save();
         article.eventId = event._id;
         await article.save();
+        clearNewsCache();
         await notifyForEvent(event, combinedText);
         return event;
     }
@@ -2038,12 +2040,12 @@ module.exports = function initNewsSystem(app, deps) {
             }
         } finally {
             activeCycleQueue = null; // stop queuing before flushing, so nothing sent here loops back into itself
+            clearNewsCache();
             await flushCycleQueue(cycleQueue);
         }
 
         stats.finishedAt = new Date();
         lastFetchStats = stats;
-        clearNewsCache();
         console.log('[news] Fetch cycle complete:', JSON.stringify(stats.sources));
     }
 
