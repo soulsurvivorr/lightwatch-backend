@@ -4853,6 +4853,21 @@ app.post('/subscribe/fcm', async (req, res) => {
     }
 });
 
+app.delete('/subscribe/fcm', async (req, res) => {
+    const { userId, fcmToken } = req.body;
+    if (!userId || !fcmToken) {
+        return res.status(400).json({ error: 'userId and fcmToken required' });
+    }
+
+    try {
+        const result = await PushSubscription.deleteOne({ userId, fcmToken, platform: 'android' });
+        return res.json({ success: true, removed: result.deletedCount > 0 });
+    } catch (err) {
+        console.error('FCM unsubscribe error:', err.message);
+        return res.status(500).json({ error: 'Server error removing FCM token' });
+    }
+});
+
 app.get('/subscribe/preferences', async (req, res) => {
     const { userId, endpoint } = req.query;
     if (!userId || !endpoint) {

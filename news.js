@@ -455,6 +455,22 @@ const GHANA_PLACE_REGEX = new RegExp(
     'i'
 );
 
+// Pulls Ghanaian cities/regions straight out of an article's text using
+// the static gazetteer above, independent of whether any LightWatch
+// user lives there. Without this, affectedLocations only ever contained
+// cities that already had a subscriber, so a story about an outage in
+// e.g. Tarkwa listed no location at all until someone signed up there.
+const GHANA_PLACE_GLOBAL_REGEX = new RegExp(GHANA_PLACE_REGEX.source, 'gi');
+function extractGhanaPlaces(text) {
+    const found = new Set();
+    const matches = String(text || '').match(GHANA_PLACE_GLOBAL_REGEX) || [];
+    for (const m of matches) found.add(m.toLowerCase());
+    return [...found];
+}
+function mergeLocations(...lists) {
+    return [...new Set(lists.flat().filter(Boolean))];
+}
+
 function isGhanaRelevant(text, mentionedLocations) {
     return GHANA_SPECIFIC_REGEX.test(text)
         || GHANA_MENTION_REGEX.test(text)
@@ -1304,7 +1320,10 @@ module.exports = function initNewsSystem(app, deps) {
         // story that names a subscriber's city but never says "Ghana"
         // out loud still counts as relevant.
         const knownKeys = opts.knownKeys || await getKnownLocationKeys();
-        const mentionedLocations = findMentionedLocations(combinedText, knownKeys);
+        const mentionedLocations = mergeLocations(
+            findMentionedLocations(combinedText, knownKeys),
+            extractGhanaPlaces(combinedText)
+        );
 
         if (!opts.skipRelevanceFilter) {
             if (!isRelevantArticle(combinedText)) return null;
@@ -2157,7 +2176,11 @@ module.exports = function initNewsSystem(app, deps) {
         if (cached && cached.expiresAt > Date.now()) return res.json(cached.body);
 
         const andClauses = [];
-        if (req.query.category) andClauses.push({ category: req.query.category });
+        if (req.query.category) {
+            const cats = String(req.query.category).split(',').map(c => c.trim()).filter(Boolean);
+            andClauses.push(cats.length > 1 ? { category: { $in: cats } } : { category: cats[0] });
+        }
+        if (req.query.status) andClauses.push({ status: req.query.status });
         if (req.query.official === 'true') andClauses.push({ 'sources.official': true });
         if (req.query.before) {
             const beforeDate = new Date(req.query.before);
@@ -2237,7 +2260,10 @@ module.exports = function initNewsSystem(app, deps) {
                     // What span.news-item__time should show.
                     timeAgo: formatTimeAgo(e.lastUpdatedAt),
                     url: mainSource.url,
-                    locations: e.affectedLocations,
+                    locations: mergeLocations(
+                        e.affectedLocations || [],
+                        extractGhanaPlaces(`${e.headline} ${e.summary || ''}`)
+                    ),
                     isNationwide: !!e.isNationwide,
                     isAdminPosted: false,
                     // New, additive fields — safe for the current frontend
