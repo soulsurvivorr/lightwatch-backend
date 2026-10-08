@@ -1517,10 +1517,13 @@ function buildOtpEmailHtml(code, name) {
             <tr>
               <td align="center" style="padding:0 32px 24px 32px;">
                 <p style="margin:0 0 10px 0; font-size:13px; font-weight:600; letter-spacing:0.2px; color:#6b7280; text-transform:uppercase;">Your LightWatch verification code</p>
-                <div style="display:inline-block; padding:18px 36px; background:linear-gradient(135deg,#f4c95d,#5b8def); border-radius:10px;">
-                  <span style="font-size:38px; font-weight:700; letter-spacing:6px; color:#0a0e1a; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">${code}</span>
+                <div style="display:inline-block; padding:18px 36px; background-color:#f4c95d; background:linear-gradient(135deg,#f4c95d,#5b8def); border-radius:10px;">
+                  <span style="font-size:38px; font-weight:700; letter-spacing:6px; color:#0a0e1a; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; -webkit-user-select:all; user-select:all; cursor:pointer;">${code}</span>
                 </div>
-                <p style="margin:16px 0 0 0; font-size:13px; color:#6b7280;">
+                <p style="margin:12px 0 0 0; font-size:13px; color:#6b7280;">
+                  Tap and hold the code to copy it.
+                </p>
+                <p style="margin:6px 0 0 0; font-size:13px; color:#6b7280;">
                   This code expires in 10 minutes.
                 </p>
               </td>
@@ -1580,10 +1583,10 @@ async function sendOtpEmail(email, code, name) {
                     email: process.env.BREVO_SENDER_EMAIL
                 },
                 to: [{ email }],
-                subject: 'Your LightWatch verification code',
+                subject: `${code} is your LightWatch verification code`,
                 htmlContent: buildOtpEmailHtml(code, name),
                 // Plain-text fallback for clients that block/strip HTML.
-                textContent: `Your LightWatch verification code is ${code}. It expires in 10 minutes. If you didn't request this, you can ignore this email.`
+                textContent: `Your LightWatch verification code:\n\n${code}\n\nIt expires in 10 minutes. If you didn't request this, you can ignore this email.`
             })
         }));
     } catch (err) {
