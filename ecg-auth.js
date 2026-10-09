@@ -562,10 +562,46 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
 
     // ---- PUBLIC: staff login ----
     const loginAttempts = new Map(); // email -> { count, lockedUntil } — simple in-memory throttle
+    const testAdminLoginEnabled = process.env.ECG_TEST_ADMIN_LOGIN === 'true';
+    const testAdminEmail = (process.env.ECG_TEST_ADMIN_EMAIL || 'sarkdev@yahoo.com').toLowerCase().trim();
+    const adminPassword = process.env.ADMIN_PASSWORD || '';
+
+    function timingSafeEqualStrings(left, right) {
+        const leftBuffer = Buffer.from(String(left || ''));
+        const rightBuffer = Buffer.from(String(right || ''));
+        return leftBuffer.length > 0 && leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+    }
+
+    async function createTestAdminStaff(email) {
+        let headquarters = await OrgUnit.findOne({ type: 'headquarters', deletedAt: null });
+        if (!headquarters) {
+            headquarters = await OrgUnit.create({
+                name: 'ECG Headquarters',
+                type: 'headquarters',
+                region: null,
+                parentUnitId: null
+            });
+        }
+
+        try {
+            return await EcgStaff.create({
+                name: 'ECG Test Admin',
+                email,
+                passwordHash: hashPassword(randomToken(48)),
+                role: 'hq_super_admin',
+                orgUnitId: headquarters._id,
+                permissions: []
+            });
+        } catch (err) {
+            if (err.code !== 11000) throw err;
+            return EcgStaff.findOne({ email }).select('+passwordHash');
+        }
+    }
+
     app.post('/ecg/auth/login', async (req, res) => {
         try {
             const email = String(req.body?.email || '').toLowerCase().trim();
-            const password = req.body?.password || '';
+            const password = String(req.body?.password || '');
             if (!email || !password) return res.status(400).json({ error: 'email and password are required' });
 
             const attempt = loginAttempts.get(email) || { count: 0, lockedUntil: 0 };
@@ -573,8 +609,16 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
                 return res.status(429).json({ error: `Too many attempts. Try again in ${Math.ceil((attempt.lockedUntil - Date.now()) / 60000)}m.` });
             }
 
-            const staff = await EcgStaff.findOne({ email }).select('+passwordHash');
-            const passwordOk = staff && verifyPassword(password, staff.passwordHash);
+            let staff = await EcgStaff.findOne({ email }).select('+passwordHash');
+            const testAdminPasswordMatches = testAdminLoginEnabled && email === testAdminEmail &&
+                timingSafeEqualStrings(password, adminPassword);
+            if (!staff && testAdminPasswordMatches) staff = await createTestAdminStaff(email);
+
+            const storedPasswordMatches = staff && verifyPassword(password, staff.passwordHash);
+            const usedTestAdminPassword = Boolean(
+                staff && staff.role === 'hq_super_admin' && testAdminPasswordMatches && !storedPasswordMatches
+            );
+            const passwordOk = storedPasswordMatches || usedTestAdminPassword;
 
             if (!staff || !passwordOk) {
                 attempt.count += 1;
@@ -593,7 +637,13 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
 
             const orgUnit = await OrgUnit.findById(staff.orgUnitId);
             if (!orgUnit || orgUnit.deletedAt) return res.status(403).json({ error: 'Your organization unit is no longer active' });
-            await logAudit({ staff, orgUnit, action: 'login', req });
+            await logAudit({
+                staff,
+                orgUnit,
+                action: 'login',
+                details: usedTestAdminPassword ? { method: 'test_admin_password' } : null,
+                req
+            });
 
             const token = signStaffToken(staff);
             return res.json({ token, staff: publicStaff(staff), organizationUnit: publicOrgUnit(orgUnit) });

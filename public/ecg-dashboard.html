@@ -1,0 +1,2574 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <link rel="icon" href="/images/dev-logo.png?v=20261009" type="image/png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js" crossorigin=""></script>
+  <title>LightWatch — ECG Operations Dashboard</title>
+  <style>
+  :root {
+    --brand: #F2B33D; --brand2-solid: #FFD98A; --brand-dim: #2E2410;
+    --brand2: #5B8CF9; --brand2-dim: #131E36;
+    --ecg-red: #E4392E; --ecg-red-dim: #34120F;
+    --red: #FF5C66; --red-dim: #331215; --green: #2FE08C; --green-dim: #0F2A1D;
+    --bg: #05070B; --panel: #0E1219; --panel2: #131824; --panel-raised: #171D2B;
+    --glass: rgba(19, 24, 36, 0.62);
+    --border: #1D2432; --border2: #2A3346; --border-glow: rgba(242,179,61,0.35);
+    --txt: #F5F7FB; --muted: #8E99B0; --faint: #576074;
+    --font: 'Inter', ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+    --r-sm: 9px; --r-md: 13px; --r-lg: 20px; --r-xl: 26px;
+    --sidebar-w: 262px;
+    --shadow-card: 0 1px 0 rgba(255,255,255,0.03) inset, 0 1px 2px rgba(0,0,0,0.4), 0 18px 40px -12px rgba(0,0,0,0.55);
+    --shadow-pop: 0 30px 90px -20px rgba(0,0,0,0.75), 0 0 0 1px rgba(255,255,255,0.04) inset;
+    --shadow-btn: 0 8px 20px -6px rgba(0,0,0,0.45);
+    --ease: cubic-bezier(.2,.8,.2,1);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { color-scheme: dark; }
+  body {
+    background:
+      radial-gradient(1200px 640px at 8% -14%, rgba(228,57,46,0.14), transparent 58%),
+      radial-gradient(1000px 620px at 104% -6%, rgba(91,140,249,0.12), transparent 55%),
+      radial-gradient(760px 560px at 46% 118%, rgba(242,179,61,0.08), transparent 60%),
+      linear-gradient(180deg, #070A0F 0%, var(--bg) 40%);
+    background-attachment: fixed; color: var(--txt); font-family: var(--font);
+    font-size: 14px; min-height: 100vh; -webkit-font-smoothing: antialiased;
+    letter-spacing: -0.01em; font-weight: 450;
+  }
+  a { color: inherit; }
+  button, input, select, textarea { font-family: var(--font); }
+  h1, h2, h3, h4 { font-weight: 800; letter-spacing: -0.02em; }
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 99px; border: 2px solid var(--bg); }
+  ::-webkit-scrollbar-thumb:hover { background: #3a445c; }
+  ::selection { background: rgba(242,179,61,0.35); color: #fff; }
+  :focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 6px; }
+
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes popIn { from { opacity: 0; transform: scale(.96) translateY(6px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+  @keyframes pulseGlow { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
+  @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+
+  .hidden { display: none !important; }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+    padding: 10.5px 17px; border-radius: var(--r-md); border: 1px solid var(--border2);
+    background: var(--panel-raised); color: var(--txt); font-weight: 700; font-size: 0.84rem;
+    letter-spacing: -0.01em; cursor: pointer; transition: transform .14s var(--ease), border-color .14s ease, background .14s ease, box-shadow .14s ease;
+    box-shadow: var(--shadow-btn);
+  }
+  .btn:hover { border-color: #3A455C; background: #1B2233; transform: translateY(-1px); }
+  .btn:active { transform: translateY(0) scale(0.97); }
+  .btn--primary { background: linear-gradient(160deg, var(--brand2-solid), var(--brand) 70%); color: #241a05; border-color: var(--brand); box-shadow: 0 10px 24px -6px rgba(242,179,61,0.4); }
+  .btn--primary:hover { background: linear-gradient(160deg, #FFE3A6, #F5BA45 70%); box-shadow: 0 12px 28px -6px rgba(242,179,61,0.5); }
+  .btn--danger { background: var(--red-dim); color: var(--red); border-color: rgba(255,92,102,0.35); box-shadow: none; }
+  .btn--danger:hover { border-color: var(--red); background: #3d161a; }
+  .btn--ghost { background: transparent; box-shadow: none; border-color: transparent; }
+  .btn--ghost:hover { background: var(--panel2); }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; box-shadow: none; }
+  .btn--sm { padding: 7px 12px; font-size: 0.74rem; border-radius: var(--r-sm); }
+
+  input[type=text], input[type=email], input[type=password], select, textarea {
+    width: 100%; padding: 12px 14px; border-radius: var(--r-md); border: 1px solid var(--border2);
+    background: var(--panel2); color: var(--txt); font-size: 0.87rem; outline: none;
+    transition: border-color .14s ease, box-shadow .14s ease, background .14s ease;
+  }
+  input::placeholder, textarea::placeholder { color: var(--faint); }
+  input:hover, select:hover, textarea:hover { border-color: #37415A; }
+  input:focus, select:focus, textarea:focus { border-color: var(--brand); box-shadow: 0 0 0 4px rgba(242,179,61,0.12); background: var(--panel-raised); }
+  select { appearance: none; -webkit-appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 18px) 50%, calc(100% - 13px) 50%; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; padding-right: 34px; }
+  label.field { display: block; font-size: 0.72rem; color: var(--muted); margin-bottom: 7px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.07em; }
+  .field-wrap { margin-bottom: 15px; }
+  .field-hint { color: var(--faint); font-size: 0.74rem; margin-top: 6px; line-height: 1.45; }
+
+  .badge { display: inline-flex; align-items: center; gap: 5px; padding: 4px 11px; border-radius: 99px; font-size: 0.66rem; font-weight: 800; letter-spacing: 0.03em; text-transform: uppercase; }
+  .badge::before { content: ""; width: 5px; height: 5px; border-radius: 99px; background: currentColor; opacity: .9; }
+  .badge--hq { background: var(--ecg-red-dim); color: #FF8177; }
+  .badge--regional { background: var(--brand2-dim); color: #7FA3FA; }
+  .badge--district { background: var(--green-dim); color: var(--green); }
+  .badge--operator { background: var(--panel-raised); color: var(--muted); border: 1px solid var(--border2); }
+  .badge--active { background: var(--green-dim); color: var(--green); }
+  .badge--inactive { background: var(--red-dim); color: var(--red); }
+  .badge--ok, .badge--operational, .badge--connected, .badge--info, .badge--resolved { background: var(--green-dim); color: var(--green); }
+  .badge--warn, .badge--degraded, .badge--maintenance, .badge--warning { background: var(--brand-dim); color: var(--brand2-solid); }
+  .badge--danger, .badge--offline, .badge--fault, .badge--critical, .badge--disconnected { background: var(--red-dim); color: var(--red); }
+  .badge--muted { background: var(--panel-raised); color: var(--muted); border: 1px solid var(--border2); }
+  .toggle-switch { position: relative; display: inline-block; width: 40px; height: 22px; flex-shrink: 0; }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .toggle-switch .slider { position: absolute; cursor: pointer; inset: 0; background: var(--panel-raised); border: 1px solid var(--border2); transition: .18s; border-radius: 22px; }
+  .toggle-switch .slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 2px; top: 2px; background: var(--faint); transition: .18s; border-radius: 50%; }
+  .toggle-switch input:checked + .slider { background: var(--green-dim); border-color: var(--green); }
+  .toggle-switch input:checked + .slider:before { transform: translateX(18px); background: var(--green); }
+  .stat-bar-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; }
+  .stat-bar-row .sbr-name { width: 130px; flex-shrink: 0; font-size: 0.82rem; color: var(--txt); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stat-bar-row .sbr-track { flex: 1; height: 9px; background: var(--panel-raised); border-radius: 6px; overflow: hidden; }
+  .stat-bar-row .sbr-fill { height: 100%; border-radius: 6px; }
+  .stat-bar-row .sbr-val { width: 74px; text-align: right; font-size: 0.78rem; font-weight: 700; flex-shrink: 0; }
+
+  /* ===== AUTH VIEW ===== */
+  #authView {
+    min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px;
+  }
+  .auth-card {
+    width: 100%; max-width: 448px; background: linear-gradient(180deg, var(--panel-raised), var(--panel) 60%);
+    border: 1px solid var(--border); border-radius: var(--r-xl); padding: 34px 30px;
+    box-shadow: var(--shadow-pop); position: relative; overflow: hidden; animation: popIn .38s var(--ease);
+  }
+  .auth-card::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 4px; background: linear-gradient(90deg, var(--ecg-red), var(--brand), var(--brand2)); }
+  .auth-mark { width: 48px; height: 48px; border-radius: 14px; background: linear-gradient(155deg, #FF5A4E, var(--ecg-red) 60%, #A8190F); display: flex; align-items: center; justify-content: center; font-weight: 900; color: #fff; font-size: 1.05rem; margin-bottom: 18px; box-shadow: 0 10px 26px -4px rgba(228,57,46,0.45); }
+  .auth-card h1 { font-size: 1.22rem; margin-bottom: 5px; letter-spacing: -0.03em; }
+  .auth-card p.sub { color: var(--muted); font-size: 0.83rem; margin-bottom: 24px; line-height: 1.5; }
+  .auth-tabs { display: flex; gap: 4px; background: var(--panel2); padding: 4px; border-radius: var(--r-md); margin-bottom: 24px; border: 1px solid var(--border); }
+  .auth-tab { flex: 1; text-align: center; padding: 9.5px; border-radius: 9px; font-size: 0.79rem; font-weight: 700; cursor: pointer; color: var(--muted); transition: all .16s var(--ease); }
+  .auth-tab.active { background: linear-gradient(160deg, var(--brand2-solid), var(--brand)); color: #241a05; box-shadow: 0 6px 16px -4px rgba(242,179,61,0.4); }
+  .invite-info {
+    background: var(--panel2); border: 1px solid var(--border2); border-radius: var(--r-md);
+    padding: 13px 15px; margin-bottom: 18px; font-size: 0.8rem; color: var(--muted); line-height: 1.6;
+  }
+  .invite-info b { color: var(--txt); }
+  .auth-error { background: var(--red-dim); color: #FF8A92; border: 1px solid rgba(255,92,102,0.25); border-radius: var(--r-sm); padding: 10px 13px; font-size: 0.8rem; margin-bottom: 15px; }
+  .auth-note { text-align: center; margin-top: 18px; font-size: 0.73rem; color: var(--faint); line-height: 1.6; }
+
+  /* ===== APP SHELL ===== */
+  #appView { display: none; min-height: 100vh; }
+  #appView.show { display: flex; }
+  .sidebar {
+    width: var(--sidebar-w); flex-shrink: 0; background: var(--glass); backdrop-filter: blur(16px);
+    border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 22px 16px;
+    position: sticky; top: 0; height: 100vh;
+  }
+  .sidebar__brand { display: flex; align-items: center; gap: 11px; padding: 4px 8px 22px; }
+  .sidebar__brand-mark { width: 38px; height: 38px; border-radius: 11px; background: linear-gradient(155deg, #FF5A4E, var(--ecg-red) 55%, #8f150e); display: flex; align-items: center; justify-content: center; font-weight: 900; color: #fff; font-size: .92rem; box-shadow: 0 8px 20px -4px rgba(228,57,46,0.5); flex-shrink: 0; }
+  .sidebar__brand-text b { display: block; font-size: 0.95rem; font-weight: 800; letter-spacing: -0.02em; line-height: 1.25; }
+  .sidebar__brand-text span { display: block; font-size: 0.66rem; color: var(--faint); font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; margin-top: 1px; }
+  .nav-section-label { padding: 14px 12px 7px; font-size: 0.64rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.09em; color: var(--faint); }
+  .nav-item {
+    display: flex; align-items: center; gap: 12px; padding: 10.5px 13px; border-radius: var(--r-md);
+    font-size: 0.83rem; font-weight: 650; color: var(--muted); cursor: pointer; margin-bottom: 3px;
+    transition: background .14s var(--ease), color .14s ease, transform .12s ease; position: relative;
+  }
+  .nav-item .nav-ic { width: 19px; text-align: center; opacity: 0.85; font-size: 0.95rem; }
+  .nav-item:hover { background: var(--panel2); color: var(--txt); transform: translateX(1px); }
+  .nav-item.active { background: linear-gradient(90deg, var(--brand-dim), transparent); color: var(--brand); font-weight: 750; }
+  .nav-item.active::before { content: ""; position: absolute; left: -16px; top: 8px; bottom: 8px; width: 3px; border-radius: 0 4px 4px 0; background: linear-gradient(180deg, var(--brand2-solid), var(--brand)); box-shadow: 0 0 12px var(--border-glow); }
+  .sidebar__org { margin-top: auto; padding: 14px; border-radius: var(--r-md); background: var(--panel2); font-size: 0.75rem; border: 1px solid var(--border); }
+  .sidebar__org b { display: block; font-size: 0.83rem; margin-bottom: 3px; letter-spacing: -0.01em; }
+  .sidebar__org span { color: var(--muted); }
+
+  .main { flex: 1; min-width: 0; }
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between; padding: 19px 30px;
+    border-bottom: 1px solid var(--border); position: sticky; top: 0;
+    background: rgba(5,7,11,0.78); backdrop-filter: blur(14px) saturate(140%); z-index: 40;
+  }
+  .topbar h2 { font-size: 1.12rem; letter-spacing: -0.02em; }
+  .content { padding: 26px 30px 70px; max-width: 1140px; animation: fadeUp .3s var(--ease); }
+
+  .panel {
+    background: linear-gradient(180deg, var(--panel-raised) 0%, var(--panel) 100%);
+    border: 1px solid var(--border); border-radius: var(--r-lg); padding: 22px; margin-bottom: 20px;
+    box-shadow: var(--shadow-card); transition: border-color .16s ease;
+  }
+  .panel__head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; gap: 10px; flex-wrap: wrap; }
+  .panel__head h3 { font-size: 0.99rem; letter-spacing: -0.02em; }
+  .panel__head p { color: var(--muted); font-size: 0.78rem; margin-top: 4px; line-height: 1.5; }
+
+  table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 0.82rem; }
+  th { text-align: left; color: var(--muted); font-weight: 800; font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.06em; padding: 11px 12px; border-bottom: 1px solid var(--border); background: rgba(255,255,255,0.015); }
+  th:first-child { border-top-left-radius: var(--r-sm); }
+  th:last-child { border-top-right-radius: var(--r-sm); }
+  td { padding: 13px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tbody tr { transition: background .12s ease; }
+  tbody tr:hover td { background: rgba(255,255,255,0.02); }
+  tr:last-child td { border-bottom: none; }
+  .empty-row { color: var(--faint); text-align: center; padding: 34px; font-size: 0.8rem; }
+
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 15px; margin-bottom: 22px; }
+  .stat-card {
+    background: linear-gradient(160deg, var(--panel-raised), var(--panel) 75%);
+    border: 1px solid var(--border); border-radius: var(--r-lg); padding: 18px;
+    box-shadow: var(--shadow-card); position: relative; overflow: hidden;
+    transition: transform .18s var(--ease), border-color .18s ease;
+  }
+  .stat-card:hover { transform: translateY(-2px); border-color: var(--border2); }
+  .stat-card::after { content: ""; position: absolute; top: -30%; right: -20%; width: 120px; height: 120px; border-radius: 99px; background: radial-gradient(circle, rgba(242,179,61,0.14), transparent 70%); pointer-events: none; }
+  .stat-card b { display: block; font-size: 1.75rem; letter-spacing: -0.03em; font-weight: 900; margin-bottom: 2px; }
+  .stat-card span { color: var(--muted); font-size: 0.76rem; font-weight: 600; }
+
+  /* ===== Live Ops Dashboard (Overview) ===== */
+  .ov-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+  .ov-head h1 { font-size: 1.44rem; letter-spacing: -0.03em; margin-bottom: 4px; }
+  .ov-head p { color: var(--muted); font-size: 0.85rem; }
+  .ov-topmeta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .ov-chip { display: flex; align-items: center; gap: 7px; padding: 8.5px 14px; border-radius: 99px; background: var(--panel2); border: 1px solid var(--border2); font-size: 0.76rem; font-weight: 700; color: var(--muted); }
+  .ov-chip b { color: var(--txt); font-weight: 750; }
+
+  .hero-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(178px, 1fr)); gap: 14px; margin-bottom: 22px; }
+  .hero-card { background: linear-gradient(160deg, var(--panel-raised), var(--panel) 78%); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 16px 16px 15px; box-shadow: var(--shadow-card); display: flex; flex-direction: column; gap: 9px; min-width: 0; transition: transform .16s var(--ease), border-color .16s ease; }
+  .hero-card:hover { transform: translateY(-2px); border-color: var(--border2); }
+  .hero-card__top { display: flex; align-items: center; gap: 9px; }
+  .hero-ic { width: 32px; height: 32px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 0.95rem; flex-shrink: 0; }
+  .hero-ic--green { background: var(--green-dim); color: var(--green); }
+  .hero-ic--brand { background: var(--brand-dim); color: var(--brand); }
+  .hero-ic--red { background: var(--red-dim); color: var(--red); }
+  .hero-ic--blue { background: var(--brand2-dim); color: var(--brand2-solid); }
+  .hero-ic--orange { background: #331F0D; color: #FFA95C; }
+  .hero-label { font-size: 0.62rem; color: var(--faint); text-transform: uppercase; letter-spacing: 0.07em; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hero-card b { font-size: 1.3rem; font-weight: 900; letter-spacing: -0.03em; line-height: 1.1; }
+  .hero-card span.sub { color: var(--muted); font-size: 0.71rem; font-weight: 600; }
+
+  .dash-grid { display: grid; grid-template-columns: 1.85fr 1fr 1fr; gap: 20px; align-items: start; }
+  .dash-col { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+  @media (max-width: 1180px) { .dash-grid { grid-template-columns: 1fr 1fr; } .dash-col:nth-child(3) { grid-column: 1 / -1; } }
+  @media (max-width: 760px) { .dash-grid { grid-template-columns: 1fr; } }
+
+  .heatmap-row { display: flex; gap: 14px; }
+  .heatmap-wrap { position: relative; border-radius: var(--r-md); overflow: hidden; background: radial-gradient(circle at 50% 0%, #101725, #070A10 78%); border: 1px solid var(--border); flex: 1; min-height: 640px; }
+  .map-legend-col { display: flex; flex-direction: column; align-items: center; gap: 7px; padding: 6px 2px; }
+  .map-legend-col span { font-size: 0.63rem; color: var(--muted); font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; }
+  .map-legend-col .grad { width: 9px; flex: 1; min-height: 110px; border-radius: 99px; background: linear-gradient(180deg, #E4392E, #FF9A4D, #F2C230, #2FE08C); }
+  .map-updated { display: flex; align-items: center; justify-content: space-between; margin-top: 13px; font-size: 0.72rem; color: var(--faint); }
+  .map-refresh { cursor: pointer; width: 24px; height: 24px; border-radius: 99px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--border2); color: var(--muted); transition: all .18s ease; background: var(--panel2); font-size: 0.8rem; }
+  .map-refresh:hover { color: var(--brand); border-color: var(--brand); transform: rotate(90deg); }
+
+  /* ===== Real Leaflet basemap (heat map panel) ===== */
+  .lw-leaflet-map { width: 100%; height: 100%; min-height: 400px; background: #0A0E15; }
+  .lw-leaflet-map .leaflet-tile-pane { filter: brightness(0.72) saturate(0.85) contrast(1.05); }
+  .lw-leaflet-map .leaflet-control-attribution { background: rgba(5,7,11,0.72) !important; color: var(--faint) !important; font-size: 9px !important; }
+  .lw-leaflet-map .leaflet-control-attribution a { color: var(--muted) !important; }
+  .lw-leaflet-map .leaflet-control-zoom a { background: var(--panel-raised) !important; color: var(--txt) !important; border-color: var(--border2) !important; }
+  .lw-leaflet-map .leaflet-control-zoom a:hover { background: var(--panel2) !important; }
+  .lw-map-label { background: transparent; border: none; box-shadow: none; pointer-events: none; }
+  .lw-map-label__pin { display: flex; flex-direction: column; align-items: center; gap: 3px; transform: translateY(-2px); }
+  .lw-map-label__dot { width: 9px; height: 9px; border-radius: 99px; border: 1.5px solid #05070B; box-shadow: 0 0 0 3px rgba(255,255,255,0.06); }
+  .lw-map-label__name { font-family: var(--font); font-size: 11px; font-weight: 800; color: #F5F7FB; white-space: nowrap; text-shadow: 0 1px 3px #000, 0 0 8px rgba(0,0,0,0.9); letter-spacing: -0.01em; }
+  .lw-map-label__val { font-family: var(--font-mono); font-size: 9px; font-weight: 700; white-space: nowrap; text-shadow: 0 1px 3px #000; margin-top: -2px; }
+  .lw-map-popup .leaflet-popup-content-wrapper { background: var(--panel-raised); color: var(--txt); border: 1px solid var(--border2); border-radius: var(--r-md); box-shadow: var(--shadow-pop); }
+  .lw-map-popup .leaflet-popup-tip { background: var(--panel-raised); border: 1px solid var(--border2); }
+  .lw-map-popup .leaflet-popup-content { margin: 10px 12px; font-family: var(--font); }
+  .lw-map-popup b { font-size: 0.86rem; display: block; margin-bottom: 3px; }
+  .lw-map-popup .lw-pop-sub { color: var(--muted); font-size: 0.72rem; }
+
+  .weather-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 10px; max-height: 420px; overflow-y: auto; padding-right: 3px; }
+  .weather-card { background: var(--panel2); border: 1px solid var(--border); border-radius: var(--r-md); padding: 12px 13px; transition: border-color .14s ease; }
+  .weather-card:hover { border-color: var(--border2); }
+  .weather-card b.wname { display: block; font-size: 0.72rem; font-weight: 800; margin-bottom: 9px; color: var(--txt); letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .weather-card .wrow { display: flex; align-items: center; gap: 8px; }
+  .weather-card .wic { font-size: 1.25rem; line-height: 1; }
+  .weather-card .wtemp { font-size: 1.12rem; font-weight: 900; letter-spacing: -0.02em; }
+  .weather-card .wcond { font-size: 0.67rem; color: var(--muted); margin-top: 7px; }
+  .weather-card .whum { font-size: 0.67rem; color: var(--faint); margin-top: 2px; }
+
+  .chart-legend { display: flex; gap: 16px; font-size: 0.73rem; color: var(--muted); font-weight: 700; flex-wrap: wrap; }
+  .chart-legend .dot, .health-legend .dot, .donut-legend-row .dot { width: 9px; height: 9px; border-radius: 99px; display: inline-block; margin-right: 6px; }
+
+  .health-list { display: flex; flex-direction: column; gap: 12px; }
+  .health-row { display: grid; grid-template-columns: 100px 1fr 42px; align-items: center; gap: 10px; }
+  .health-row .hname { font-size: 0.76rem; font-weight: 700; color: var(--txt); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .health-track { height: 9px; border-radius: 99px; background: var(--panel2); overflow: hidden; position: relative; }
+  .health-fill { height: 100%; border-radius: 99px; transition: width .6s var(--ease); }
+  .health-row .hval { font-size: 0.75rem; font-weight: 800; text-align: right; }
+  .health-legend { display: flex; gap: 14px; margin-top: 16px; flex-wrap: wrap; font-size: 0.67rem; color: var(--muted); font-weight: 700; }
+
+  .donut-wrap { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+  .donut-legend { display: flex; flex-direction: column; gap: 9px; flex: 1; min-width: 150px; }
+  .donut-legend-row { display: flex; align-items: center; justify-content: space-between; font-size: 0.76rem; gap: 10px; }
+  .donut-legend-row .left { display: flex; align-items: center; gap: 8px; color: var(--txt); font-weight: 650; }
+  .donut-legend-row .cnt { color: var(--muted); font-weight: 700; white-space: nowrap; }
+
+  .activity-list { display: flex; flex-direction: column; gap: 2px; }
+  .activity-item { display: flex; align-items: flex-start; gap: 12px; padding: 11px 4px; border-bottom: 1px solid var(--border); }
+  .activity-item:last-child { border-bottom: none; }
+  .activity-ic { width: 27px; height: 27px; border-radius: 99px; display: flex; align-items: center; justify-content: center; font-size: 0.74rem; font-weight: 800; flex-shrink: 0; margin-top: 1px; }
+  .activity-ic--ok { background: var(--green-dim); color: var(--green); }
+  .activity-ic--warn { background: #331F0D; color: #FFA95C; }
+  .activity-ic--info { background: var(--brand2-dim); color: var(--brand2-solid); }
+  .activity-body { flex: 1; min-width: 0; }
+  .activity-body b { font-size: 0.79rem; font-weight: 700; display: block; }
+  .activity-body span.sub { font-size: 0.71rem; color: var(--muted); }
+  .activity-time { font-size: 0.67rem; color: var(--faint); white-space: nowrap; margin-top: 2px; }
+  .section-link { color: var(--brand2-solid); font-size: 0.78rem; font-weight: 700; display: inline-flex; align-items: center; gap: 5px; cursor: pointer; margin-top: 14px; }
+  .section-link:hover { text-decoration: underline; }
+
+  .topbar__right { display: flex; align-items: center; gap: 10px; }
+  .topbar__bell { position: relative; width: 36px; height: 36px; border-radius: 99px; background: var(--panel2); border: 1px solid var(--border2); display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 0.9rem; }
+  .topbar__bell .dot { position: absolute; top: -3px; right: -3px; background: var(--ecg-red); color: #fff; font-size: 0.58rem; font-weight: 800; border-radius: 99px; min-width: 15px; height: 15px; display: flex; align-items: center; justify-content: center; padding: 0 3px; box-shadow: 0 0 0 2px var(--bg); }
+  .topbar__avatar-wrap { position: relative; }
+  .topbar__avatar { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(155deg, var(--brand2-solid), var(--brand2) 70%); display: flex; align-items: center; justify-content: center; font-weight: 900; font-size: 0.72rem; color: #0b1220; overflow: hidden; cursor: pointer; border: 1px solid var(--border2); padding: 0; transition: border-color .14s ease, transform .14s ease; }
+  .topbar__avatar:hover { border-color: var(--brand); transform: translateY(-1px); }
+  .topbar__avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+  .profile-menu { position: absolute; top: calc(100% + 10px); right: 0; width: 240px; background: var(--panel-raised); border: 1px solid var(--border2); border-radius: var(--r-lg); box-shadow: var(--shadow-pop); padding: 16px; z-index: 200; animation: popIn .14s var(--ease); }
+  .profile-menu__head { display: flex; align-items: center; gap: 11px; margin-bottom: 13px; }
+  .profile-menu__avatar { width: 46px; height: 46px; border-radius: 12px; background: linear-gradient(155deg, var(--brand2-solid), var(--brand2) 70%); display: flex; align-items: center; justify-content: center; font-weight: 900; font-size: 0.85rem; color: #0b1220; overflow: hidden; flex-shrink: 0; }
+  .profile-menu__avatar img { width: 100%; height: 100%; object-fit: cover; }
+  .profile-menu__name { font-size: 0.85rem; font-weight: 800; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .profile-menu__role { font-size: 0.71rem; color: var(--muted); margin-top: 1px; }
+  .profile-menu__divider { height: 1px; background: var(--border); margin: 12px -16px; }
+  .profile-menu__btn { display: flex; align-items: center; gap: 9px; width: 100%; padding: 9px 8px; border-radius: 8px; border: none; background: transparent; color: var(--txt); font-size: 0.8rem; font-weight: 650; cursor: pointer; text-align: left; transition: background .12s ease; }
+  .profile-menu__btn:hover { background: var(--panel2); }
+  .profile-menu__btn--danger { color: var(--red); }
+
+  .table-avatar { width: 30px; height: 30px; border-radius: 9px; background: linear-gradient(155deg, var(--brand2-solid), var(--brand2) 70%); display: flex; align-items: center; justify-content: center; font-weight: 900; font-size: 0.62rem; color: #0b1220; overflow: hidden; flex-shrink: 0; }
+  .table-avatar img { width: 100%; height: 100%; object-fit: cover; }
+  .table-name-cell { display: flex; align-items: center; gap: 10px; }
+
+
+  .modal-backdrop { position: fixed; inset: 0; background: rgba(3,4,7,0.72); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; z-index: 999; padding: 20px; animation: fadeUp .18s ease; }
+  .modal-box { background: linear-gradient(180deg, var(--panel-raised), var(--panel) 65%); border: 1px solid var(--border2); border-radius: var(--r-lg); padding: 26px; width: 100%; max-width: 448px; box-shadow: var(--shadow-pop); max-height: 88vh; overflow-y: auto; animation: popIn .22s var(--ease); }
+  .modal-box h3 { margin-bottom: 5px; letter-spacing: -0.02em; }
+  .modal-box p.desc { color: var(--muted); font-size: 0.8rem; margin-bottom: 19px; line-height: 1.5; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 19px; }
+  .key-reveal { background: var(--brand-dim); border: 1px dashed var(--brand); border-radius: var(--r-md); padding: 15px; text-align: center; font-family: var(--font-mono); font-size: 0.98rem; letter-spacing: 0.02em; color: var(--brand2-solid); margin: 13px 0; word-break: break-all; }
+
+  /* ===== searchable select / coverage picker (org unit creation) ===== */
+  .static-field { padding: 12px 14px; border-radius: var(--r-md); border: 1px solid var(--border2); background: var(--panel2); font-size: 0.87rem; color: var(--txt); font-weight: 650; display: flex; align-items: center; gap: 8px; }
+  .search-list { max-height: 190px; overflow-y: auto; border: 1px solid var(--border2); border-radius: var(--r-md); margin-top: 8px; background: var(--panel2); }
+  .search-item { padding: 10px 13px; font-size: 0.83rem; cursor: pointer; border-bottom: 1px solid var(--border); transition: background .12s ease; }
+  .search-item:last-child { border-bottom: none; }
+  .search-item:hover { background: var(--panel-raised); }
+  .search-item.active { background: var(--brand-dim); color: var(--brand); font-weight: 750; }
+  .search-empty { padding: 15px; color: var(--faint); font-size: 0.8rem; text-align: center; }
+  .coverage-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+  .coverage-chip { display: flex; align-items: center; gap: 6px; padding: 7.5px 12px; border-radius: 99px; border: 1px solid var(--border2); background: var(--panel2); font-size: 0.78rem; cursor: pointer; user-select: none; transition: all .14s ease; }
+  .coverage-chip:hover { border-color: #3A455C; }
+  .coverage-chip:has(input:checked) { border-color: var(--green); color: var(--green); background: var(--green-dim); }
+  .coverage-chip input { width: auto; margin: 0; accent-color: var(--green); }
+  .illus-map-wrap { margin: 4px 0 14px; }
+  .illus-map-label { font-size: 0.66rem; color: var(--faint); text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 7px; font-weight: 800; }
+  select[size] { background-image: none; padding: 6px; }
+  select[size] option { padding: 9px 11px; border-radius: 7px; font-size: 0.85rem; }
+  select[size] option:checked { background: var(--brand-dim); color: var(--brand); }
+
+  /* ===== Power control ===== */
+  .power-card {
+    border-radius: var(--r-lg); border: 1px solid var(--border); padding: 22px; position: relative; overflow: hidden;
+    background: linear-gradient(165deg, var(--panel-raised), var(--panel) 80%); transition: border-color .2s ease, box-shadow .2s ease;
+  }
+  .power-card.is-off { border-color: rgba(255,92,102,0.55); box-shadow: 0 0 0 1px rgba(255,92,102,0.18) inset, 0 0 34px -14px rgba(255,92,102,0.4); }
+  .power-card.is-on { border-color: rgba(47,224,140,0.4); box-shadow: 0 0 0 1px rgba(47,224,140,0.1) inset; }
+  .power-card__head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 11px; }
+  .power-card__head h4 { font-size: 0.97rem; letter-spacing: -0.01em; display: flex; align-items: center; }
+  .power-dot { width: 10px; height: 10px; border-radius: 99px; display: inline-block; margin-right: 8px; }
+  .power-dot.on { background: var(--green); box-shadow: 0 0 10px var(--green); animation: pulseGlow 2.4s ease-in-out infinite; }
+  .power-dot.off { background: var(--red); box-shadow: 0 0 10px var(--red); animation: pulseGlow 1.4s ease-in-out infinite; }
+  .power-card p.hint { color: var(--muted); font-size: 0.78rem; margin-bottom: 16px; line-height: 1.55; }
+  .power-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+  .btn--power-off { background: linear-gradient(160deg, #FF8B92, var(--red) 70%); color: #2a0507; border-color: var(--red); box-shadow: 0 10px 22px -6px rgba(255,92,102,0.4); }
+  .btn--power-off:hover { background: linear-gradient(160deg, #FFA1A6, #FF6E78 70%); }
+  .btn--power-on { background: linear-gradient(160deg, #6DEBAA, var(--green) 70%); color: #052316; border-color: var(--green); box-shadow: 0 10px 22px -6px rgba(47,224,140,0.35); }
+  .btn--power-on:hover { background: linear-gradient(160deg, #82F0B9, #2FE08C 70%); }
+  .power-status-list { margin-top: 12px; }
+  .power-status-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 11px 13px; border-radius: var(--r-md); background: var(--panel2); border: 1px solid var(--border); margin-bottom: 8px; }
+  .power-status-row .meta { font-size: 0.72rem; color: var(--muted); margin-top: 2px; }
+  .perm-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 15px; background: var(--panel2); border: 1px solid var(--border2); border-radius: var(--r-md); padding: 14px 16px; }
+  .perm-check { display: flex; align-items: flex-start; gap: 9px; font-size: 0.78rem; color: var(--txt); cursor: pointer; padding: 5px 0; transition: color .12s ease; }
+  .perm-check:hover { color: var(--brand2-solid); }
+  .perm-check input { width: auto; margin-top: 2px; accent-color: var(--brand); }
+  .perm-check span.pdesc { display: block; color: var(--faint); font-size: 0.68rem; margin-top: 1px; }
+  @media (max-width: 640px) { .perm-grid { grid-template-columns: 1fr; } }
+
+  #toastContainer { position: fixed; bottom: 24px; right: 24px; z-index: 1200; display: flex; flex-direction: column; gap: 10px; }
+  .toast { background: linear-gradient(160deg, var(--panel-raised), var(--panel)); border: 1px solid var(--border2); border-radius: var(--r-md); padding: 13px 17px; font-size: 0.8rem; font-weight: 650; box-shadow: var(--shadow-pop); animation: popIn .22s var(--ease); }
+  .toast--err { border-color: rgba(255,92,102,0.4); color: #FF8A92; }
+  .toast--ok { border-color: rgba(47,224,140,0.4); color: var(--green); }
+
+  @media (max-width: 860px) {
+    .sidebar { position: fixed; z-index: 500; left: -270px; transition: left .22s var(--ease); }
+    .sidebar.open { left: 0; }
+    .content { padding: 18px; }
+    .topbar { padding: 14px 18px; }
+    .stat-card b { font-size: 1.5rem; }
+  }
+  </style>
+</head>
+<body>
+
+<div id="toastContainer"></div>
+
+<!-- ============== AUTH VIEW ============== -->
+<div id="authView">
+  <div class="auth-card">
+    <div class="auth-mark">ECG</div>
+    <h1>LightWatch ECG Operations</h1>
+    <p class="sub">Staff access is invitation-only. This page is separate from the public LightWatch app.</p>
+
+    <div class="auth-tabs">
+      <div class="auth-tab active" id="tabLogin" onclick="switchAuthTab('login')">Staff Login</div>
+      <div class="auth-tab" id="tabInvite" onclick="switchAuthTab('invite')">Accept Invitation</div>
+    </div>
+
+    <div id="authErrorBox" class="auth-error hidden"></div>
+
+    <!-- LOGIN PANEL -->
+    <form id="loginForm" onsubmit="return handleLogin(event)">
+      <div class="field-wrap">
+        <label class="field">Work Email</label>
+        <input type="email" id="loginEmail" required autocomplete="username" placeholder="you@ecg.example">
+      </div>
+      <div class="field-wrap">
+        <label class="field">Password</label>
+        <input type="password" id="loginPassword" required autocomplete="current-password" placeholder="••••••••">
+      </div>
+      <button class="btn btn--primary" style="width:100%" type="submit" id="loginBtn">Sign In</button>
+    </form>
+
+    <!-- INVITATION ACCEPT PANEL -->
+    <form id="inviteForm" class="hidden" onsubmit="return handleAcceptInvite(event)">
+      <div class="field-wrap">
+        <label class="field">Invitation Link / Code</label>
+        <input type="text" id="inviteTokenInput" placeholder="Paste your invitation link or code" oninput="onInviteTokenTyped()">
+      </div>
+      <div id="inviteInfoBox" class="invite-info hidden"></div>
+
+      <div class="field-wrap">
+        <label class="field">Your Name</label>
+        <input type="text" id="inviteName" required placeholder="Full name">
+      </div>
+      <div id="branchKeyField" class="field-wrap hidden">
+        <label class="field">Branch Access Key</label>
+        <input type="text" id="inviteBranchKey" placeholder="Provided by your station manager">
+      </div>
+      <div class="field-wrap">
+        <label class="field">Create Password</label>
+        <input type="password" id="invitePassword" required minlength="10" placeholder="At least 10 characters">
+      </div>
+      <button class="btn btn--primary" style="width:100%" type="submit" id="inviteBtn">Create Account</button>
+    </form>
+
+    <p class="auth-note">Don't have an invitation? Ask your regional office or district station manager to invite you — ECG accounts can't be self-registered.</p>
+  </div>
+</div>
+
+<!-- ============== APP SHELL (shared dashboard, all roles) ============== -->
+<div id="appView">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar__brand">
+      <div class="sidebar__brand-mark">⚡</div>
+      <div class="sidebar__brand-text"><b>LIGHTWATCH</b><span>ECG Operations</span></div>
+    </div>
+    <nav>
+      <div class="nav-section-label">Overview</div>
+      <div class="nav-item active" data-tab="overview" onclick="switchTab('overview')"><span class="nav-ic">📊</span> <span id="navOverviewLabel">National Overview</span></div>
+      <div class="nav-item" data-tab="livemap" onclick="switchTab('livemap')"><span class="nav-ic">🗺️</span> Live Map (Heat Map)</div>
+      <div class="nav-item" data-tab="events" onclick="switchTab('events')"><span class="nav-ic">⚡</span> Outage Reports</div>
+      <div class="nav-item" data-tab="plants" onclick="switchTab('plants')"><span class="nav-ic">🏭</span> Power Plants</div>
+      <div class="nav-item" data-tab="transmission" onclick="switchTab('transmission')"><span class="nav-ic">🗼</span> Transmission</div>
+      <div class="nav-item hidden" data-tab="power" data-role-gate="power" onclick="switchTab('power')"><span class="nav-ic">🔌</span> Power Control</div>
+
+      <div class="nav-section-label">Management</div>
+      <div class="nav-item hidden" data-tab="regions" data-role-gate="regions" onclick="switchTab('regions')"><span class="nav-ic">🌍</span> Regions</div>
+      <div class="nav-item hidden" data-tab="org" data-role-gate="org" onclick="switchTab('org')"><span class="nav-ic">🏢</span> Districts / Stations</div>
+      <div class="nav-item" data-tab="staff" onclick="switchTab('staff')"><span class="nav-ic">👥</span> Users &amp; Staff</div>
+      <div class="nav-item" data-tab="alerts" onclick="switchTab('alerts')"><span class="nav-ic">📣</span> Alerts &amp; Announcements</div>
+      <div class="nav-item hidden" data-tab="audit" data-role-gate="audit" onclick="switchTab('audit')"><span class="nav-ic">🕓</span> Audit Logs</div>
+
+      <div class="nav-section-label">System</div>
+      <div class="nav-item" data-tab="analytics" onclick="switchTab('analytics')"><span class="nav-ic">📈</span> Reports &amp; Analytics</div>
+      <div class="nav-item" data-tab="settings" onclick="switchTab('settings')"><span class="nav-ic">⚙️</span> Settings</div>
+      <div class="nav-item hidden" data-tab="integrations" data-role-gate="integrations" onclick="switchTab('integrations')"><span class="nav-ic">🔗</span> Integrations</div>
+      <div class="nav-item" data-tab="health" onclick="switchTab('health')"><span class="nav-ic">🩺</span> System Health</div>
+    </nav>
+    <div class="sidebar__org">
+      <b id="sbOrgName">—</b>
+      <span id="sbRole">—</span>
+      <div style="margin-top:10px"><button class="btn btn--ghost btn--sm" style="width:100%" onclick="handleLogout()">Sign Out</button></div>
+    </div>
+  </aside>
+
+  <div class="main">
+    <div class="topbar">
+      <div>
+        <h2 id="topbarTitle">Overview</h2>
+        <div id="topbarStaffName" style="color:var(--muted);font-size:0.8rem;margin-top:2px;"></div>
+      </div>
+      <div class="topbar__right">
+        <div class="topbar__bell" title="Notifications">🔔<span class="dot" id="topbarBellCount">0</span></div>
+        <div class="ov-chip" id="topbarDate">📅 <b>—</b></div>
+        <div class="topbar__avatar-wrap" id="profileMenuWrap">
+          <button class="topbar__avatar" id="topbarAvatar" title="My Profile" onclick="toggleProfileMenu(event)">EC</button>
+          <div class="profile-menu hidden" id="profileMenu"></div>
+        </div>
+        <input type="file" id="avatarFileInput" accept="image/*" class="hidden" onchange="handleAvatarFile(this)">
+      </div>
+    </div>
+    <div class="content" id="content">
+      <!-- panels injected by JS -->
+    </div>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// Config / API base — same resolution logic as admin.html so this
+// file behaves identically wherever it's deployed alongside it.
+// ============================================================
+const API = (typeof window.API_URL === "string" && window.API_URL)
+  || (window.location.protocol === "file:"
+    ? "https://lightwatch-backend-lightwatch-backend.up.railway.app"
+    : window.location.origin);
+
+const TK = "lw_ecg_tk";
+function getToken() { return sessionStorage.getItem(TK); }
+function setToken(t) { sessionStorage.setItem(TK, t); }
+function clearToken() { sessionStorage.removeItem(TK); }
+
+let ME = null; // { staff, organizationUnit, permissions }
+
+// ============================================================
+// Ghana regions / districts / towns — illustrative reference data used to
+// power the searchable pickers and auto-loaded coverage suggestions when
+// staff create Regional Offices and District/Local Stations below. Real
+// coverage areas can always be added or removed by staff before saving.
+// ============================================================
+const GHANA_DATA = {"Ahafo": {"capital": "Goaso", "districts": {"Asunafo North Municipal": ["Goaso", "Kasapin", "Mim", "Ayomso"], "Asunafo South": ["Kukuom", "Kwapong", "Sankore"], "Asutifi North": ["Kenyasi", "Acherensua", "Gambia No.1"], "Asutifi South": ["Hwidiem", "Kenyasi No.2", "Gyedu"], "Tano North Municipal": ["Duayaw Nkwanta", "Tanoso", "Afrisipa"], "Tano South Municipal": ["Bechem", "Derma", "Kojina"]}}, "Ashanti": {"capital": "Kumasi", "districts": {"Kumasi Metropolitan": ["Adum", "Bantama", "Asafo", "Suame Roundabout", "Manhyia"], "Asokwa Municipal": ["Asokwa", "Atonsu", "Ahinsan"], "Oforikrom Municipal": ["Oforikrom", "KNUST", "Aboabo"], "Old Tafo Municipal": ["Tafo", "Pankrono", "Sepe Buokrom"], "Suame Municipal": ["Suame", "Bohyen", "Akwatia Line"], "Kwadaso Municipal": ["Kwadaso", "Kotei", "Ayeduase"], "Asokore Mampong Municipal": ["Asokore Mampong", "Sawaba", "Aboabo No.2"], "Kwabre East Municipal": ["Mamponteng", "Kenyase", "Antoa"], "Afigya Kwabre North": ["Boamang", "Adankwame"], "Afigya Kwabre South": ["Kodie", "Nkukua Buoho"], "Atwima Nwabiagya Municipal": ["Nkawie", "Barekese"], "Atwima Nwabiagya North": ["Barekese", "Toase"], "Atwima Kwanwoma": ["Foase", "Kotwi"], "Atwima Mponua": ["Nyinahin", "Toase"], "Bosomtwe": ["Kuntanase", "Feyiase"], "Bosome Freho": ["Asiwa", "Kokofu Junction"], "Ejisu Municipal": ["Ejisu", "Besease", "Bomfa"], "Juaben Municipal": ["Juaben", "Ejisu-Juaben"], "Asante Akim Central Municipal": ["Konongo", "Odumase"], "Asante Akim North": ["Agogo", "Domeabra"], "Asante Akim South": ["Juaso", "Bompata"], "Bekwai Municipal": ["Bekwai", "Anwiankwanta"], "Amansie Central": ["Jacobu", "Antoakrom"], "Amansie West": ["Manso Nkwanta", "Antoakrom"], "Amansie South": ["Manso Adubia", "Bepoase"], "Adansi North": ["Fomena", "Akrokerri"], "Adansi South": ["New Edubiase", "Dompoase"], "Adansi Asokwa": ["Adansi Asokwa", "Ahenkro"], "Obuasi Municipal": ["Obuasi", "Tutuka", "Anyinam"], "Obuasi East": ["Tutuka", "Kwabrafoso"], "Akrofuom": ["Akrofuom", "Diaso"], "Offinso Municipal": ["Offinso", "Abofour"], "Offinso North": ["Akomadan", "Afrancho"], "Ejura Sekyedumase Municipal": ["Ejura", "Sekyedumase"], "Sekyere Central": ["Nsuta", "Beposo"], "Sekyere East": ["Effiduase", "Asokore"], "Sekyere South": ["Agona", "Bodwesango"], "Sekyere Kumawu": ["Kumawu", "Woraso"], "Sekyere Afram Plains": ["Drobonso", "Kumawu Junction"], "Mampong Municipal": ["Mampong", "Nsuta-Beposo"], "Ahafo Ano North Municipal": ["Tepa", "Kunsu"], "Ahafo Ano South West": ["Mankranso", "Biemso"], "Ahafo Ano South East": ["Wioso", "Kokotenten"]}}, "Bono": {"capital": "Sunyani", "districts": {"Sunyani Municipal": ["Sunyani", "Abesim", "Fiapre"], "Sunyani West": ["Odumase", "Nsoatre"], "Berekum East Municipal": ["Berekum", "Senase"], "Berekum West": ["Jinijini", "Namasa"], "Dormaa Central Municipal": ["Dormaa Ahenkro", "Wamahinso"], "Dormaa East": ["Wamfie", "Kyekyewere"], "Dormaa West": ["Nkrankwanta", "Konkomaa"], "Jaman North": ["Sampa", "Suma Ahenkuro"], "Jaman South Municipal": ["Drobo", "Duayaw"], "Tain": ["Nsawkaw", "Namasa"], "Banda": ["Banda Ahenkro", "Kabrono"], "Wenchi Municipal": ["Wenchi", "Techimantia"]}}, "Bono East": {"capital": "Techiman", "districts": {"Techiman Municipal": ["Techiman", "Tanoso", "Krobo"], "Techiman North": ["Tuobodom", "Nsuta"], "Kintampo North Municipal": ["Kintampo", "Kunsu"], "Kintampo South": ["Jema", "Kawampe"], "Nkoranza North": ["Busunya", "Buesa"], "Nkoranza South Municipal": ["Nkoranza", "Akumsa"], "Atebubu-Amantin Municipal": ["Atebubu", "Amantin"], "Sene East": ["Kajaji", "Kwadwokrom"], "Sene West": ["Kwame Danso", "Kwabena Akwa"], "Pru East": ["Yeji", "Otisu"], "Pru West": ["Prang", "Zabrama"]}}, "Central": {"capital": "Cape Coast", "districts": {"Cape Coast Metropolitan": ["Cape Coast", "Pedu", "Abura"], "Abura Asebu Kwamankese": ["Abura Dunkwa", "Kwamankese"], "Twifo Atti Morkwa": ["Twifo Praso", "Mankessim Junction"], "Twifo Heman Lower Denkyira": ["Jukwa", "Heman"], "Assin North Municipal": ["Assin Fosu", "Nyankumasi"], "Assin South": ["Nsuaem Kyekyewere", "Assin Bereku"], "Assin Central Municipal": ["Assin Fosu", "Assin Manso"], "Ajumako Enyan Essiam": ["Ajumako", "Enyan Denkyira"], "Ekumfi": ["Essarkyir", "Ekumfi Otuam"], "Mfantsiman Municipal": ["Saltpond", "Anomabo"], "Gomoa East": ["Potsin", "Afransi"], "Gomoa Central": ["Afransi", "Bawjiase Junction"], "Gomoa West": ["Apam", "Mumford"], "Effutu Municipal": ["Winneba", "Gomoa Ajumako"], "Awutu Senya East Municipal": ["Kasoa", "Opeikuma"], "Awutu Senya West": ["Awutu Bereku", "Bawjiase"], "Agona East": ["Nsaba", "Duakwa"], "Agona West Municipal": ["Agona Swedru", "Nyakrom"], "Asikuma Odoben Brakwa": ["Breman Asikuma", "Odoben"], "Upper Denkyira East Municipal": ["Dunkwa-on-Offin", "Diaso Junction"], "Upper Denkyira West": ["Diaso", "Kyekyewere"], "Komenda Edina Eguafo Abirem Municipal": ["Elmina", "Komenda", "Abrem Agona"]}}, "Eastern": {"capital": "Koforidua", "districts": {"New Juaben South Municipal": ["Koforidua", "Adweso", "Effiduase"], "New Juaben North Municipal": ["Effiduase-Koforidua", "Densuano"], "Abuakwa North Municipal": ["Kukurantumi", "Asiakwa"], "Abuakwa South Municipal": ["Kibi", "Apedwa"], "Akyemansa": ["Ofoase Kokoben", "Anyinasin"], "Atiwa East": ["Anyinam", "Bunso"], "Atiwa West": ["Kwabeng", "Akropong Atiwa"], "Birim Central Municipal": ["Oda", "Akyease"], "Birim North": ["New Abirem", "Afosu"], "Birim South": ["Achiase", "Akyem Swedru"], "Denkyembour": ["Akwatia", "Asuom"], "Kwaebibirem Municipal": ["Kade", "Asuom"], "West Akim Municipal": ["Asamankese", "Akwatia Road"], "Upper West Akim": ["Adeiso", "Osenase"], "Akuapim North Municipal": ["Akropong", "Mampong Akuapim"], "Akuapim South": ["Aburi", "Nsawam"], "Nsawam Adoagyiri Municipal": ["Nsawam", "Adoagyiri"], "Suhum Municipal": ["Suhum", "Otoase"], "Ayensuano": ["Coaltar", "Anyinam Ayensuano"], "Fanteakwa North": ["Begoro", "Abomosu"], "Fanteakwa South": ["Osino", "Adukrom Junction"], "Kwahu East": ["Abetifi", "Obomeng"], "Kwahu West Municipal": ["Nkawkaw", "Obo"], "Kwahu South": ["Mpraeso", "Kwahu Tafo"], "Kwahu Afram Plains North": ["Donkorkrom", "Tease"], "Kwahu Afram Plains South": ["Tease", "Mem-Chemfe"], "Asuogyaman": ["Atimpoku", "Akosombo"], "Yilo Krobo Municipal": ["Somanya", "Kpong Junction"], "Lower Manya Krobo Municipal": ["Odumase Krobo", "Kpong"], "Upper Manya Krobo": ["Asesewa", "Sekesua"], "Okere": ["Adukrom", "Abiriw"]}}, "Greater Accra": {"capital": "Accra", "districts": {"Accra Metropolitan": ["Osu", "Adabraka", "Jamestown", "Korle Gonno", "Kokomlemle"], "Ablekuma North Municipal": ["Darkuman", "Kaneshie"], "Ablekuma South Municipal": ["Dansoman", "Chorkor"], "Ablekuma West Municipal": ["Dansoman West", "Mataheko"], "Ablekuma Central Municipal": ["Awoshie", "Odorkor"], "Ayawaso Central Municipal": ["Kotobabi", "Alajo"], "Ayawaso East Municipal": ["Nima", "Maamobi"], "Ayawaso North Municipal": ["Accra New Town", "Kotobabi"], "Ayawaso West Municipal": ["Dzorwulu", "Legon", "Airport Residential"], "Okaikwei North Municipal": ["Abeka", "Achimota"], "Korle Klottey Municipal": ["Ridge", "Labone", "Cantonments"], "La Dade-Kotopon Municipal": ["La", "Labadi", "Teshie Junction"], "La Nkwantanang Madina Municipal": ["Madina", "Ashongman", "Ritz"], "Ledzokuku Municipal": ["Teshie", "Nungua Junction"], "Krowor Municipal": ["Nungua", "Baatsona"], "Tema Metropolitan": ["Tema Community 1", "Tema Community 9", "Tema Newtown"], "Tema West Municipal": ["Community 25", "Sakumono"], "Kpone Katamanso Municipal": ["Kpone", "Katamanso", "Community 22"], "Ashaiman Municipal": ["Ashaiman", "Klagon", "Zenu"], "Adenta Municipal": ["Adenta", "Frafraha"], "Ga East Municipal": ["Abokobi", "Dome", "Taifa"], "Ga West Municipal": ["Amasaman", "Pokuase", "Ofankor"], "Ga Central Municipal": ["Sowutuom", "Bortianor Junction"], "Ga South Municipal": ["Domeabra", "Ngleshie Amanfro"], "Ga North Municipal": ["Ofankor", "Achiaman"], "Weija Gbawe Municipal": ["Weija", "Gbawe", "Mallam"], "Ningo Prampram": ["Prampram", "Ningo", "Dawhenya"], "Shai Osudoku": ["Dodowa", "Agomeda"]}}, "North East": {"capital": "Nalerigu", "districts": {"East Mamprusi Municipal": ["Gambaga", "Nalerigu", "Langbinsi"], "West Mamprusi Municipal": ["Walewale", "Wungu"], "Mamprugu Moagduri": ["Yagaba", "Kubori"], "Bunkpurugu Nyakpanduri": ["Bunkpurugu", "Nakpanduri"], "Yunyoo-Nasuan": ["Yunyoo", "Nasuan"], "Chereponi": ["Chereponi", "Gushiegu Road"]}}, "Northern": {"capital": "Tamale", "districts": {"Tamale Metropolitan": ["Tamale", "Vittin", "Lamashegu"], "Sagnarigu Municipal": ["Sagnarigu", "Kanvili"], "Kumbungu": ["Kumbungu", "Zangbalung"], "Tolon": ["Tolon", "Dalun"], "Savelugu Municipal": ["Savelugu", "Diare"], "Nanton": ["Nanton", "Kpachaa"], "Karaga": ["Karaga", "Ztowla"], "Gushegu Municipal": ["Gushegu", "Nabuli"], "Saboba": ["Saboba", "Wapuli"], "Zabzugu": ["Zabzugu", "Nakpali"], "Tatale Sanguli": ["Tatale", "Sanguli"], "Yendi Municipal": ["Yendi", "Bunbon"], "Mion": ["Sang", "Jimle"], "Nanumba North Municipal": ["Bimbilla", "Wulensi Road"], "Nanumba South": ["Wulensi", "Nakpayili"], "Kpandai": ["Kpandai", "Katiejeli"]}}, "Oti": {"capital": "Dambai", "districts": {"Krachi East Municipal": ["Dambai", "Kete"], "Krachi West": ["Kete Krachi", "Kyabobo"], "Krachi Nchumuru": ["Chinderi", "Bejamso"], "Nkwanta North": ["Kpassa", "Kete Krachi Road"], "Nkwanta South Municipal": ["Nkwanta", "Kpassa Junction"], "Jasikan Municipal": ["Jasikan", "Ahamansu"], "Kadjebi": ["Kadjebi", "Menusu"], "Biakoye": ["Nkonya Ahenkro", "Worawora"], "Guan": ["Likpe Mate", "Santrokofi"]}}, "Savannah": {"capital": "Damongo", "districts": {"West Gonja Municipal": ["Damongo", "Larabanga"], "Central Gonja": ["Buipe", "Yapei"], "East Gonja Municipal": ["Salaga", "Kpembe"], "North Gonja": ["Daboya", "Busunu"], "North East Gonja": ["Kpalbe", "Kabache"], "Sawla-Tuna-Kalba": ["Sawla", "Tuna"], "Bole": ["Bole", "Bamboi"]}}, "Upper East": {"capital": "Bolgatanga", "districts": {"Bolgatanga Municipal": ["Bolgatanga", "Zaare"], "Bolgatanga East": ["Zuarungu", "Yorogo"], "Bongo": ["Bongo", "Zorko"], "Bawku Municipal": ["Bawku", "Kubongo"], "Bawku West": ["Zebilla", "Tilli"], "Binduri": ["Binduri", "Pusiga Road"], "Garu": ["Garu", "Widana"], "Tempane": ["Tempane", "Yaraga"], "Kassena Nankana Municipal": ["Navrongo", "Biu"], "Kassena Nankana West": ["Paga", "Chiana"], "Builsa North Municipal": ["Sandema", "Wiaga"], "Builsa South": ["Fumbisi", "Uwasi"], "Talensi": ["Tongo", "Datoko"], "Nabdam": ["Nangodi", "Sekoti"], "Pusiga": ["Pusiga", "Yelwoko"]}}, "Upper West": {"capital": "Wa", "districts": {"Wa Municipal": ["Wa", "Kpaguri"], "Wa East": ["Funsi", "Bulenga"], "Wa West": ["Wechiau", "Wa Line"], "Nadowli-Kaleo": ["Nadowli", "Kaleo"], "Daffiama Bussie Issa": ["Issa", "Daffiama"], "Jirapa Municipal": ["Jirapa", "Han"], "Lambussie Karni": ["Lambussie", "Karni"], "Lawra Municipal": ["Lawra", "Babile"], "Nandom Municipal": ["Nandom", "Ko"], "Sissala East Municipal": ["Tumu", "Gwollu Road"], "Sissala West": ["Gwollu", "Nabugubelle"]}}, "Volta": {"capital": "Ho", "districts": {"Ho Municipal": ["Ho", "Bankoe", "Dome"], "Ho West": ["Dzolo Kpuita", "Abutia"], "Adaklu": ["Adaklu Waya", "Have"], "South Dayi": ["Kpeve", "Peki"], "North Dayi": ["Anfoega", "Alavanyo"], "Afadzato South": ["Ve Golokwati", "Gbi"], "Agotime Ziope": ["Kpetoe", "Ziope"], "Akatsi North": ["Ave Dakpa", "Avenui"], "Akatsi South Municipal": ["Akatsi", "Wute"], "Central Tongu": ["Adidome", "Battor Junction"], "North Tongu": ["Battor", "Mepe"], "South Tongu": ["Sogakope", "Dabala"], "Ketu North Municipal": ["Dzodze", "Penyi"], "Ketu South Municipal": ["Denu", "Aflao"], "Keta Municipal": ["Keta", "Anloga Road"], "Anloga": ["Anloga", "Woe"], "Hohoe Municipal": ["Hohoe", "Gbledi"], "Kpando Municipal": ["Kpando", "Kudzra"]}}, "Western": {"capital": "Sekondi-Takoradi", "districts": {"Sekondi-Takoradi Metropolitan": ["Sekondi", "Takoradi", "Market Circle"], "Effia Kwesimintsim Municipal": ["Kwesimintsim", "Effia"], "Shama": ["Shama", "Aboadze"], "Ahanta West Municipal": ["Agona Nkwanta", "Busua"], "Nzema East Municipal": ["Axim", "Bewire"], "Ellembelle": ["Nkroful", "Esiama"], "Jomoro Municipal": ["Half Assini", "Elubo"], "Wassa East": ["Daboase", "Adiembra"], "Wassa Amenfi East Municipal": ["Wassa Akropong", "Asankrangwa Road"], "Wassa Amenfi Central": ["Manso Amenfi", "Asankran"], "Wassa Amenfi West Municipal": ["Asankragua", "Bawdie"], "Mpohor": ["Mpohor", "Daboase Junction"], "Tarkwa Nsuaem Municipal": ["Tarkwa", "Nsuaem"], "Prestea Huni-Valley Municipal": ["Prestea", "Bogoso"]}}, "Western North": {"capital": "Sefwi Wiawso", "districts": {"Sefwi Wiawso Municipal": ["Sefwi Wiawso", "Kwamekrom"], "Sefwi Akontombra": ["Akontombra", "Datano"], "Bibiani Anhwiaso Bekwai Municipal": ["Bibiani", "Anhwiaso"], "Bodi": ["Bodi", "Sureso"], "Juaboso": ["Juaboso", "Bakwaline"], "Bia East": ["Adabokrom", "Debiso Road"], "Bia West": ["Essam Debiso", "Sefwi Bekwai"], "Aowin Municipal": ["Enchi", "Sefwi Bekwai Road"], "Suaman": ["Dwenase", "Suaman Road"]}}};
+const GHANA_REGIONS = Object.keys(GHANA_DATA).sort();
+function districtsForRegion(region) {
+  const r = GHANA_DATA[region];
+  return r ? Object.keys(r.districts).sort() : [];
+}
+function townsFor(region, district) {
+  const r = GHANA_DATA[region];
+  return (r && r.districts[district]) ? r.districts[district] : [];
+}
+// Illustrative, non-geographic radial diagram — NOT a real map. Shows the
+// selected district's capital at the centre with its suggested coverage
+// towns arranged around it, purely so staff can sanity-check the set.
+function renderIllustrativeMap(centerLabel, towns) {
+  const w = 360, h = 200, cx = w / 2, cy = h / 2 + 6, r = 74;
+  const pts = towns.map((t, i) => {
+    const angle = (i / (towns.length || 1)) * 2 * Math.PI - Math.PI / 2;
+    return { name: t, x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) };
+  });
+  const lines = pts.map(p => `<line x1="${cx}" y1="${cy}" x2="${p.x}" y2="${p.y}" stroke="#2C3446" stroke-width="1.5" stroke-dasharray="3 3"/>`).join('');
+  const nodes = pts.map(p => `<g><circle cx="${p.x}" cy="${p.y}" r="5" fill="#4F86F7"/><text x="${p.x}" y="${p.y - 11}" text-anchor="middle" font-size="9.5" font-family="ui-sans-serif,system-ui" fill="#97A2B8">${esc(p.name)}</text></g>`).join('');
+  return `<div class="illus-map-wrap"><div class="illus-map-label">Illustrative coverage preview — not a real map</div>
+    <svg viewBox="0 0 ${w} ${h}" style="width:100%;height:180px;background:#151A25;border:1px solid #2C3446;border-radius:12px">
+      ${lines}
+      <circle cx="${cx}" cy="${cy}" r="9" fill="#F2B33D"/>
+      <text x="${cx}" y="${cy + 24}" text-anchor="middle" font-size="10.5" font-weight="700" font-family="ui-sans-serif,system-ui" fill="#F4F6FA">${esc(centerLabel)}</text>
+      ${nodes}
+    </svg></div>`;
+}
+
+// ============================================================
+// LIVE OPS DASHBOARD — heat map, weather, charts, health (Overview tab)
+// All figures not yet backed by a dedicated telemetry endpoint are
+// derived deterministically (seeded by org/unit name + date) so the
+// dashboard looks alive without inventing fake precision claims, and
+// blend in real published event data wherever it's available.
+// ============================================================
+function hashStr(str) { let h = 2166136261 >>> 0; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
+function seededRand(seed) {
+  let a = hashStr(String(seed)) || 1;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+function slugify(s) { return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-'); }
+function timeAgo(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso), mins = Math.max(0, Math.round((Date.now() - d.getTime()) / 60000));
+  if (mins < 1) return 'Just now';
+  if (mins < 60) return mins + 'm ago';
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return hrs + 'h ago';
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+// Real-world lat/lng of each region's capital, used to place the heat map on
+// an actual Ghana basemap (Leaflet + OpenStreetMap) instead of a drawn silhouette.
+const REGION_LATLNG = {
+  "Ahafo": [6.8018, -2.5199], "Ashanti": [6.6885, -1.6244], "Bono": [7.3399, -2.3268],
+  "Bono East": [7.5911, -1.9391], "Central": [5.1053, -1.2466], "Eastern": [6.0940, -0.2591],
+  "Greater Accra": [5.6037, -0.1870], "North East": [10.5167, -0.3667], "Northern": [9.4034, -0.8424],
+  "Oti": [8.0667, 0.1833], "Savannah": [9.0833, -1.8167], "Upper East": [10.7856, -0.8514],
+  "Upper West": [10.0601, -2.5099], "Volta": [6.6113, 0.4713], "Western": [4.9047, -1.7554],
+  "Western North": [6.2039, -2.4839]
+};
+const GHANA_CENTER = [7.9, -1.2];
+// District/town-level coordinates aren't hand-mapped, so a district or town
+// marker is placed a small, deterministic distance from its region's real
+// capital coordinate — real basemap, best-effort exact pin position.
+function jitterLatLng(baseLatLng, seed, spreadDeg) {
+  const rnd = seededRand(seed);
+  const angle = rnd() * Math.PI * 2, dist = rnd() * spreadDeg;
+  return [baseLatLng[0] + Math.cos(angle) * dist, baseLatLng[1] + Math.sin(angle) * dist * 1.15];
+}
+function latLngForNode(scope, name) {
+  if (scope === 'headquarters') return REGION_LATLNG[name] || GHANA_CENTER;
+  const regionBase = REGION_LATLNG[ME.organizationUnit.region] || GHANA_CENTER;
+  if (scope === 'regional') return jitterLatLng(regionBase, "district-geo:" + ME.organizationUnit.region + ":" + name, 0.42);
+  const stationBase = jitterLatLng(regionBase, "station-geo:" + ME.organizationUnit.id, 0.18);
+  return jitterLatLng(stationBase, "area-geo:" + ME.organizationUnit.id + ":" + name, 0.09);
+}
+
+// Reverse index: town/capital (lowercased) -> { region, district } — built
+// from the same GHANA_DATA used to power the coverage-area pickers, so a
+// published event's affectedAreas can be rolled up to a region/district.
+const TOWN_INDEX = {};
+Object.entries(GHANA_DATA).forEach(([region, rdata]) => {
+  Object.entries(rdata.districts).forEach(([district, towns]) => {
+    towns.forEach(t => { TOWN_INDEX[String(t).toLowerCase()] = { region, district }; });
+  });
+  const capKey = String(rdata.capital).toLowerCase();
+  if (!TOWN_INDEX[capKey]) TOWN_INDEX[capKey] = { region, district: null };
+});
+function locateArea(name) { return TOWN_INDEX[String(name || '').toLowerCase()] || null; }
+function normRegionName(s) { return String(s || '').toLowerCase().replace(/region/g, '').replace(/[^a-z]/g, ''); }
+
+const WX_SETS = [
+  { icon: "☀️", label: "Sunny" }, { icon: "🌤️", label: "Partly Cloudy" }, { icon: "⛅", label: "Cloudy" },
+  { icon: "☁️", label: "Overcast" }, { icon: "🌦️", label: "Light Rain" }, { icon: "🌧️", label: "Rain" }
+];
+function weatherFor(name, ns) {
+  const rnd = seededRand("wx:" + ns + ":" + name + ":" + new Date().toDateString());
+  const wx = WX_SETS[Math.floor(rnd() * WX_SETS.length)];
+  return { icon: wx.icon, label: wx.label, temp: Math.round(24 + rnd() * 11), humidity: Math.round(38 + rnd() * 52) };
+}
+function healthColor(pct) { return pct >= 80 ? "#2FE08C" : pct >= 60 ? "#F2C230" : pct >= 40 ? "#FF9A4D" : "#E4392E"; }
+
+function computeNodeMetrics(nodes, events, matchFn) {
+  return nodes.map(n => {
+    const count = (events || []).reduce((acc, ev) => (ev.affectedAreas || []).some(a => matchFn(a, n.name)) ? acc + 1 : acc, 0);
+    const rnd = seededRand("node:" + n.name);
+    const intensity = Math.round(clamp(6 + rnd() * 22 + count * 20, 0, 100));
+    const health = Math.round(clamp(100 - intensity + (rnd() * 6 - 3), 4, 98));
+    return { ...n, outageCount: count, intensity, health };
+  });
+}
+
+let LW_MAP = null; // the single live Leaflet map instance for the heat panel
+function scopeLabels(scope) {
+  return scope === 'headquarters'
+    ? { unit: 'Region', unitPlural: 'Regions', mapTitle: 'Live Outage Heat Map', mapSub: "Real-time outage intensity across Ghana", weatherTitle: 'Region Weather Overview', healthTitle: 'Region Power Health' }
+    : scope === 'regional'
+    ? { unit: 'District', unitPlural: 'Districts', mapTitle: 'Live Outage Heat Map', mapSub: `Real-time outage intensity across ${esc(ME.organizationUnit.region || 'the region')}`, weatherTitle: 'District Weather Overview', healthTitle: 'District Power Health' }
+    : { unit: 'Area', unitPlural: 'Coverage Areas', mapTitle: 'Coverage Area Map', mapSub: 'Outage intensity across your assigned towns', weatherTitle: 'Coverage Area Weather', healthTitle: 'Area Power Health' };
+}
+
+function renderHeatMapPanel(scope, metrics) {
+  const Lb = scopeLabels(scope);
+  const positioned = metrics.map(n => ({ ...n, latlng: latLngForNode(scope, n.name) }));
+  // Stash for mountHeatMap(), called once this markup is actually in the DOM
+  // (a live Leaflet instance can't attach to a detached innerHTML string).
+  window.__lwHeatNodes = positioned;
+  window.__lwHeatScope = scope;
+  return `<div class="panel">
+    <div class="panel__head"><div><h3>🗺️ ${Lb.mapTitle}</h3><p>${Lb.mapSub}</p></div></div>
+    <div class="heatmap-row">
+      <div class="heatmap-wrap"><div id="lwLeafletMap" class="lw-leaflet-map"></div></div>
+      <div class="map-legend-col"><span>High</span><div class="grad"></div><span>Low</span></div>
+    </div>
+    <div class="map-updated">
+      <span id="mapUpdatedAt">Last updated: ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+      <div class="map-refresh" title="Refresh" onclick="switchTab('overview')">⟳</div>
+    </div>
+  </div>`;
+}
+
+// Real region-shaped polygons for Ghana's 16 regions, embedded locally (no
+// runtime network fetch). Earlier versions of this map pulled a geoBoundaries
+// GeoJSON over the network at runtime — that endpoint serves a Git-LFS
+// pointer file (not real GeoJSON) from a plain `fetch`, which silently failed
+// JSON parsing on every load and dropped the map back to an unbounded,
+// zoomed-out view that could show all of West Africa with no per-region
+// shapes or labels. To fix that for good, the polygons below are generated
+// once (offline) from each region's real capital coordinate, tessellated and
+// clipped to Ghana's true national outline (GHANA_OUTLINE_GEOJSON) — so the
+// shapes are geographically grounded, every one of the 16 current regions is
+// always present and labeled, and there is nothing left to fail at runtime.
+const GHANA_REGIONS_GEOJSON = {"type":"FeatureCollection","features":[{"type":"Feature","properties":{"name":"Ahafo"},"geometry":{"type":"Polygon","coordinates":[[[-2.047984625513636,6.936148171690546],[-2.099742542112108,6.5270641971633445],[-3.195733641333222,6.461073764696445],[-3.006577551672966,7.280144257996747],[-2.047984625513636,6.936148171690546]]]}},{"type":"Feature","properties":{"name":"Ashanti"},"geometry":{"type":"Polygon","coordinates":[[[-1.185725690167764,6.696932872913072],[-1.5942251945439195,6.238412613836781],[-2.047984625513636,6.936148171690546],[-1.7237080665573179,7.512928309882649],[-1.2725274881472293,7.229158193637611],[-1.1370655992043412,6.929158193637611],[-1.185725690167764,6.696932872913072]]]}},{"type":"Feature","properties":{"name":"Bono"},"geometry":{"type":"Polygon","coordinates":[[[-2.099742542112108,6.5270641971633445],[-2.047984625513636,6.936148171690546],[-3.006577551672966,7.280144257996747],[-2.983585,7.379705],[-2.856125,7.9],[-2.4,7.65],[-2.099742542112108,6.5270641971633445]]]}},{"type":"Feature","properties":{"name":"Bono East"},"geometry":{"type":"Polygon","coordinates":[[[-1.7237080665573179,7.512928309882649],[-2.047984625513636,6.936148171690546],[-2.4,7.65],[-2.1,8.35],[-1.55,8.35],[-1.42,7.95],[-1.7237080665573179,7.512928309882649]]]}},{"type":"Feature","properties":{"name":"Central"},"geometry":{"type":"Polygon","coordinates":[[[-1.5942251945439195,6.238412613836781],[-1.185725690167764,6.696932872913072],[-0.7,6.4],[-0.438702,5.3],[-1.5,5.0],[-1.5942251945439195,6.238412613836781]]]}},{"type":"Feature","properties":{"name":"Eastern"},"geometry":{"type":"Polygon","coordinates":[[[-1.1370655992043412,6.929158193637611],[-1.2725274881472293,7.229158193637611],[-0.75,7.5],[0.1,6.55],[-0.4,5.95],[-0.7,6.4],[-1.185725690167764,6.696932872913072],[-1.1370655992043412,6.929158193637611]]]}},{"type":"Feature","properties":{"name":"Greater Accra"},"geometry":{"type":"Polygon","coordinates":[[[-0.4,5.95],[0.1,6.55],[0.836931,6.279979],[0.65,5.7],[0.05,5.7],[-0.4,5.95]]]}},{"type":"Feature","properties":{"name":"North East"},"geometry":{"type":"Polygon","coordinates":[[[-0.6,10.3],[0.1,10.35],[0.15,9.75],[-0.55,9.7],[-0.6,10.3]]]}},{"type":"Feature","properties":{"name":"Northern"},"geometry":{"type":"Polygon","coordinates":[[[-1.55,8.35],[-2.1,8.35],[-2.2,9.4],[-1.4,9.75],[-0.55,9.7],[-0.75,8.85],[-1.42,7.95],[-1.55,8.35]]]}},{"type":"Feature","properties":{"name":"Oti"},"geometry":{"type":"Polygon","coordinates":[[[-0.75,7.5],[-0.75,8.85],[-0.05,9.25],[0.55,8.5],[0.1,6.55],[-0.75,7.5]]]}},{"type":"Feature","properties":{"name":"Savannah"},"geometry":{"type":"Polygon","coordinates":[[[-2.2,9.4],[-2.827496,9.642461],[-2.6,10.6],[-1.4,10.8],[-1.4,9.75],[-2.2,9.4]]]}},{"type":"Feature","properties":{"name":"Upper East"},"geometry":{"type":"Polygon","coordinates":[[[-1.4,10.8],[-1.203358,11.009819],[-0.438702,11.098341],[-0.6,10.3],[-0.55,9.7],[-1.4,9.75],[-1.4,10.8]]]}},{"type":"Feature","properties":{"name":"Upper West"},"geometry":{"type":"Polygon","coordinates":[[[-2.6,10.6],[-2.940409,10.96269],[-1.203358,11.009819],[-1.4,10.8],[-2.6,10.6]]]}},{"type":"Feature","properties":{"name":"Volta"},"geometry":{"type":"Polygon","coordinates":[[[-0.05,9.25],[0.36758,10.191213],[0.461192,8.677223],[0.55,8.5],[-0.05,9.25]]]}},{"type":"Feature","properties":{"name":"Western"},"geometry":{"type":"Polygon","coordinates":[[[-1.5,5.0],[-1.5942251945439195,6.238412613836781],[-2.099742542112108,6.5270641971633445],[-2.810701,5.389051],[-2.856125,4.994476],[-1.964707,4.710462],[-1.5,5.0]]]}},{"type":"Feature","properties":{"name":"Western North"},"geometry":{"type":"Polygon","coordinates":[[[-2.099742542112108,6.5270641971633445],[-2.4,7.65],[-2.856125,7.9],[-3.006577551672966,7.280144257996747],[-2.983585,7.379705],[-2.810701,5.389051],[-2.099742542112108,6.5270641971633445]]]}}]};
+// Ghana's real national outline (single simplified polygon) — used as a hard
+// geographic clamp so the map can never pan/zoom out far enough to read as
+// "West Africa": we fit to it, cap zoom-out to it, and pad its bounds only
+// slightly for maxBounds.
+const GHANA_OUTLINE_GEOJSON = {"type":"Polygon","coordinates":[[[1.060122,5.928837],[-0.507638,5.343473],[-1.063625,5.000548],[-1.964707,4.710462],[-2.856125,4.994476],[-2.810701,5.389051],[-3.24437,6.250472],[-2.983585,7.379705],[-2.56219,8.219628],[-2.827496,9.642461],[-2.963896,10.395335],[-2.940409,10.96269],[-1.203358,11.009819],[-0.761576,10.93693],[-0.438702,11.098341],[0.023803,11.018682],[-0.049785,10.706918],[0.36758,10.191213],[0.365901,9.465004],[0.461192,8.677223],[0.712029,8.312465],[0.490957,7.411744],[0.570384,6.914359],[0.836931,6.279979],[1.060122,5.928837]]]};
+function ghanaBoundsLatLng() {
+  const pts = GHANA_OUTLINE_GEOJSON.coordinates[0].map(([lng, lat]) => [lat, lng]);
+  return L.latLngBounds(pts);
+}
+function polygonLabelPoint(layer) {
+  // Bounding-box center of the polygon — a simple, dependency-free stand-in
+  // for a true centroid; good enough to sit a label inside each region.
+  const b = layer.getBounds();
+  return b.getCenter();
+}
+
+// Mounts (or refreshes) the real Leaflet + OpenStreetMap heat map into
+// #lwLeafletMap. Called right after renderHeatMapPanel's markup lands in the
+// DOM.
+async function mountHeatMap() {
+  const el = document.getElementById('lwLeafletMap');
+  const nodes = window.__lwHeatNodes || [];
+  const scope = window.__lwHeatScope;
+  if (!el || !window.L) return;
+
+  if (LW_MAP) { LW_MAP.remove(); LW_MAP = null; }
+  const ghanaBounds = ghanaBoundsLatLng();
+  LW_MAP = L.map(el, {
+    zoomControl: true, attributionControl: true, scrollWheelZoom: false,
+    // Hard geographic clamp: whatever else happens below, the view can never
+    // pan or zoom out past Ghana itself (padded a little so the coastline/
+    // borders aren't flush against the edge). This is what actually stops
+    // the map from ever reading as "all of West Africa".
+    maxBounds: ghanaBounds.pad(0.22), maxBoundsViscosity: 0.85, minZoom: 6
+  });
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    attribution: '© OpenStreetMap, © CARTO', maxZoom: 18, subdomains: 'abcd'
+  }).addTo(LW_MAP);
+
+  if (!nodes.length) { LW_MAP.fitBounds(ghanaBounds, { padding: [12, 12] }); return; }
+  const byName = {}; nodes.forEach(n => { byName[normRegionName(n.name)] = n; });
+
+  // ---- Preferred path: real region-shaped choropleth (headquarters scope
+  // — one polygon + label per current region of Ghana, embedded locally so
+  // it always renders, with no network round trip and nothing to fail). ----
+  if (scope === 'headquarters') {
+    const geoLayer = L.geoJSON(GHANA_REGIONS_GEOJSON, {
+      style: (feature) => {
+        const n = byName[normRegionName(feature.properties.name)];
+        const color = n ? healthColor(100 - n.intensity) : '#2A3346';
+        return { color: '#05070B', weight: 1.4, fillColor: color, fillOpacity: n ? 0.5 + (n.intensity / 100) * 0.32 : 0.18 };
+      },
+      onEachFeature: (feature, layer) => {
+        const n = byName[normRegionName(feature.properties.name)];
+        layer.on('mouseover', () => layer.setStyle({ fillOpacity: 0.92, weight: 2.4 }));
+        layer.on('mouseout', () => layer.setStyle({ fillOpacity: n ? 0.5 + (n.intensity / 100) * 0.32 : 0.18, weight: 1.4 }));
+        if (n) layer.bindPopup(`<b>${esc(n.name)}</b><div class="lw-pop-sub">Outage intensity: ${n.intensity}% · Health: ${n.health}% · ${n.outageCount} active report${n.outageCount === 1 ? '' : 's'}</div>`, { className: 'lw-map-popup' });
+        // Always show the region's own name on the map — this is the actual
+        // per-region label the HQ view is meant to show (it never collapses
+        // to just "Ghana"; that single-word label is reserved for far
+        // zoomed-out contexts outside the country, which this map can no
+        // longer reach at all thanks to the bounds clamp above).
+        const label = feature.properties.name;
+        const pt = polygonLabelPoint(layer);
+        const color = n ? healthColor(100 - n.intensity) : '#8E99B0';
+        L.marker(pt, {
+          icon: L.divIcon({
+            className: 'lw-map-label',
+            html: `<div class="lw-map-label__pin"><div class="lw-map-label__name">${esc(label)}</div>${n ? `<div class="lw-map-label__val" style="color:${color}">${n.intensity}% load</div>` : ''}</div>`,
+            iconSize: [1, 1], iconAnchor: [0, 0]
+          }),
+          interactive: false
+        }).addTo(LW_MAP);
+      }
+    }).addTo(LW_MAP);
+    LW_MAP.fitBounds(geoLayer.getBounds(), { padding: [16, 16] });
+    setTimeout(() => LW_MAP && LW_MAP.invalidateSize(), 60);
+    return;
+  }
+
+  // ---- Sub-region scopes (regional / district / station): point markers +
+  // a heat layer that's tightened (small radius, low blur, bounded map) so
+  // it reads as concentrated over real coverage points rather than bleeding
+  // across the whole basemap. ----
+  const isSubRegion = scope !== 'headquarters';
+  if (window.L.heatLayer) {
+    const heatPoints = nodes.map(n => [n.latlng[0], n.latlng[1], Math.max(0.1, n.intensity / 100)]);
+    L.heatLayer(heatPoints, {
+      radius: isSubRegion ? 32 : 60, blur: isSubRegion ? 22 : 45, maxZoom: 12, minOpacity: 0.4,
+      gradient: { 0.15: '#2FE08C', 0.4: '#F2C230', 0.65: '#FF9A4D', 1.0: '#E4392E' }
+    }).addTo(LW_MAP);
+  }
+
+  const bounds = [];
+  nodes.forEach(n => {
+    bounds.push(n.latlng);
+    const color = healthColor(100 - n.intensity);
+    const icon = L.divIcon({
+      className: 'lw-map-label',
+      html: `<div class="lw-map-label__pin"><div class="lw-map-label__dot" style="background:${color}"></div><div class="lw-map-label__name">${esc(n.name)}</div><div class="lw-map-label__val" style="color:${color}">${n.intensity}% load</div></div>`,
+      iconSize: [1, 1], iconAnchor: [0, 6]
+    });
+    const marker = L.marker(n.latlng, { icon }).addTo(LW_MAP);
+    marker.bindPopup(`<b>${esc(n.name)}</b><div class="lw-pop-sub">Outage intensity: ${n.intensity}% · Health: ${n.health}% · ${n.outageCount} active report${n.outageCount === 1 ? '' : 's'}</div>`, { className: 'lw-map-popup' });
+  });
+
+  if (bounds.length === 1) LW_MAP.setView(bounds[0], 11);
+  else {
+    LW_MAP.fitBounds(bounds, { padding: [42, 42], maxZoom: 12.5 });
+    LW_MAP.setMaxBounds(L.latLngBounds(bounds).pad(0.6));
+  }
+
+  setTimeout(() => LW_MAP && LW_MAP.invalidateSize(), 60);
+}
+
+function renderWeatherPanel(scope, metrics) {
+  const L = scopeLabels(scope);
+  const cards = metrics.map(n => {
+    const w = weatherFor(n.name, scope + ':' + (ME.organizationUnit.id || ''));
+    return `<div class="weather-card">
+      <b class="wname" title="${esc(n.name)}">${esc(n.name)}</b>
+      <div class="wrow"><span class="wic">${w.icon}</span><span class="wtemp">${w.temp}°C</span></div>
+      <div class="wcond">${esc(w.label)}</div>
+      <div class="whum">Humidity: ${w.humidity}%</div>
+    </div>`;
+  }).join('');
+  return `<div class="panel">
+    <div class="panel__head"><div><h3>☁️ ${L.weatherTitle}</h3></div></div>
+    <div class="weather-grid">${cards || '<div class="empty-row">No areas to show yet.</div>'}</div>
+  </div>`;
+}
+
+function genDemandSeries(ns) {
+  const base = 3800 + seededRand("gd-base:" + ns + ":" + new Date().toDateString())() * 1400;
+  const points = [];
+  for (let h = 0; h <= 24; h++) {
+    const diurnal = Math.sin(((h / 24) - 0.25) * Math.PI * 2) * 0.5 + 0.5;
+    const demand = base * 0.72 + diurnal * 900 + (seededRand(ns + "d" + h)() - 0.5) * 120;
+    const gen = demand + 300 + (seededRand(ns + "g" + h)() - 0.5) * 160;
+    points.push({ h, gen: Math.round(gen), demand: Math.round(demand) });
+  }
+  return points;
+}
+function svgSeriesPath(points, key, w, h, maxV, minV) {
+  return points.map((p, i) => `${i === 0 ? 'M' : 'L'}${((p.h / 24) * w).toFixed(1)},${(h - ((p[key] - minV) / (maxV - minV)) * h).toFixed(1)}`).join(' ');
+}
+// Plot geometry lives outside the render function so the hover handler
+// (attached after the markup is in the DOM) can convert mouse position back
+// into a series index without recomputing the whole chart.
+const GD_CHART = { w: 560, h: 210, padL: 46, padB: 26, padT: 10 };
+function renderGenDemandChart(scope) {
+  const series = genDemandSeries(scope + ':' + (ME.organizationUnit.name || ''));
+  const { w, h, padL, padB, padT } = GD_CHART;
+  const allV = series.flatMap(p => [p.gen, p.demand]);
+  const maxV = Math.ceil((Math.max(...allV) * 1.1) / 100) * 100;
+  const minV = Math.floor((Math.min(...allV) * 0.9) / 100) * 100;
+  const genPath = svgSeriesPath(series, 'gen', w, h, maxV, minV);
+  const demPath = svgSeriesPath(series, 'demand', w, h, maxV, minV);
+  const genArea = `${genPath} L${w},${h} L0,${h} Z`;
+  const demArea = `${demPath} L${w},${h} L0,${h} Z`;
+  const now = series[series.length - 1];
+  const nowGen = series.find(p => p.h === new Date().getHours()) || now;
+  const reserve = nowGen.gen - nowGen.demand;
+  const ySteps = 4;
+  const gridLines = Array.from({ length: ySteps + 1 }, (_, i) => i / ySteps).map(f => {
+    const val = Math.round(maxV - f * (maxV - minV));
+    return `<line x1="0" y1="${(h * f).toFixed(1)}" x2="${w}" y2="${(h * f).toFixed(1)}" stroke="#1D2432" stroke-width="1"/>
+      <text x="-10" y="${(h * f + 3.5).toFixed(1)}" font-size="10" fill="#7C879C" text-anchor="end" font-family="JetBrains Mono,monospace">${val.toLocaleString()}</text>`;
+  }).join('');
+  const hourLabels = [0, 4, 8, 12, 16, 20, 24].map(hh => `<text x="${(hh / 24) * w}" y="${h + 18}" font-size="9.5" fill="#7C879C" text-anchor="middle" font-family="Inter">${hh === 0 || hh === 24 ? '12 AM' : hh === 12 ? '12 PM' : hh < 12 ? hh + ' AM' : (hh - 12) + ' PM'}</text>`).join('');
+  const nowX = (new Date().getHours() / 24) * w;
+  const dotsGen = series.map(p => `<circle class="gd-pt" data-h="${p.h}" cx="${((p.h / 24) * w).toFixed(1)}" cy="${(h - ((p.gen - minV) / (maxV - minV)) * h).toFixed(1)}" r="2.6" fill="#2FE08C"/>`).join('');
+  const dotsDem = series.map(p => `<circle class="gd-pt" data-h="${p.h}" cx="${((p.h / 24) * w).toFixed(1)}" cy="${(h - ((p.demand - minV) / (maxV - minV)) * h).toFixed(1)}" r="2.6" fill="#5B8CF9"/>`).join('');
+  window.__lwChartSeries = series; window.__lwChartRange = { maxV, minV };
+  return `<div class="panel">
+    <div class="panel__head">
+      <div><h3>📈 Generation vs Demand (24H)</h3><p>Reserve margin right now: <b style="color:${reserve > 0 ? 'var(--green)' : 'var(--red)'}">${reserve > 0 ? '+' : ''}${reserve.toLocaleString()} MW</b></p></div>
+      <div class="chart-legend"><span><i class="dot" style="background:var(--green)"></i>Generation (MW)</span><span><i class="dot" style="background:var(--brand2-solid)"></i>Demand (MW)</span></div>
+    </div>
+    <div class="chart-wrap" id="genDemandChartWrap" style="position:relative">
+      <svg id="gdChartSvg" viewBox="${-padL} ${-padT} ${w + padL + 8} ${h + padT + padB}" style="width:100%;height:246px;overflow:visible;display:block">
+        <defs>
+          <linearGradient id="genFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#2FE08C" stop-opacity="0.38"/><stop offset="100%" stop-color="#2FE08C" stop-opacity="0"/></linearGradient>
+          <linearGradient id="demFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#5B8CF9" stop-opacity="0.30"/><stop offset="100%" stop-color="#5B8CF9" stop-opacity="0"/></linearGradient>
+        </defs>
+        ${gridLines}
+        <line x1="${nowX.toFixed(1)}" y1="0" x2="${nowX.toFixed(1)}" y2="${h}" stroke="#F2B33D" stroke-width="1.25" stroke-dasharray="3 4" opacity="0.55"/>
+        <text x="${nowX.toFixed(1)}" y="-2" font-size="9" fill="#F2B33D" text-anchor="middle" font-family="Inter" font-weight="700">NOW</text>
+        <path d="${demArea}" fill="url(#demFill)"/>
+        <path d="${genArea}" fill="url(#genFill)"/>
+        <path d="${demPath}" fill="none" stroke="#5B8CF9" stroke-width="2.5" stroke-linejoin="round"/>
+        <path d="${genPath}" fill="none" stroke="#2FE08C" stroke-width="2.5" stroke-linejoin="round"/>
+        ${dotsDem}${dotsGen}
+        ${hourLabels}
+        <g id="gdCrosshair" style="opacity:0;pointer-events:none">
+          <line id="gdCrosshairLine" x1="0" y1="0" x2="0" y2="${h}" stroke="#8E99B0" stroke-width="1" stroke-dasharray="2 3"/>
+          <circle id="gdCrosshairGen" r="4.5" fill="#2FE08C" stroke="#05070B" stroke-width="1.5"/>
+          <circle id="gdCrosshairDem" r="4.5" fill="#5B8CF9" stroke="#05070B" stroke-width="1.5"/>
+        </g>
+      </svg>
+      <div id="gdTooltip" style="position:absolute;top:8px;pointer-events:none;opacity:0;transition:opacity .1s ease;background:var(--panel-raised);border:1px solid var(--border2);border-radius:9px;padding:8px 11px;font-size:0.72rem;box-shadow:var(--shadow-pop);white-space:nowrap;z-index:5"></div>
+    </div>
+  </div>`;
+}
+function initGenDemandChart() {
+  const wrap = document.getElementById('genDemandChartWrap');
+  const svg = document.getElementById('gdChartSvg');
+  const series = window.__lwChartSeries, range = window.__lwChartRange;
+  if (!wrap || !svg || !series) return;
+  const { w, h } = GD_CHART;
+  const crosshair = document.getElementById('gdCrosshair');
+  const line = document.getElementById('gdCrosshairLine');
+  const cGen = document.getElementById('gdCrosshairGen');
+  const cDem = document.getElementById('gdCrosshairDem');
+  const tip = document.getElementById('gdTooltip');
+  function show(evt) {
+    const pt = svg.createSVGPoint();
+    pt.x = evt.clientX; pt.y = evt.clientY;
+    const loc = pt.matrixTransform(svg.getScreenCTM().inverse());
+    const hour = Math.max(0, Math.min(24, Math.round((loc.x / w) * 24)));
+    const p = series.find(s => s.h === hour) || series[0];
+    const x = (p.h / 24) * w;
+    const yGen = h - ((p.gen - range.minV) / (range.maxV - range.minV)) * h;
+    const yDem = h - ((p.demand - range.minV) / (range.maxV - range.minV)) * h;
+    line.setAttribute('x1', x); line.setAttribute('x2', x);
+    cGen.setAttribute('cx', x); cGen.setAttribute('cy', yGen);
+    cDem.setAttribute('cx', x); cDem.setAttribute('cy', yDem);
+    crosshair.style.opacity = '1';
+    const hh = p.h === 0 ? '12 AM' : p.h === 12 ? '12 PM' : p.h < 12 ? p.h + ' AM' : (p.h - 12) + ' PM';
+    tip.innerHTML = `<b style="display:block;margin-bottom:4px">${hh}</b><span style="color:#2FE08C">● Gen ${p.gen.toLocaleString()} MW</span><br><span style="color:#5B8CF9">● Demand ${p.demand.toLocaleString()} MW</span>`;
+    tip.style.opacity = '1';
+    const wrapW = wrap.getBoundingClientRect().width;
+    const leftPct = Math.min(78, Math.max(2, (x / w) * 100));
+    tip.style.left = leftPct + '%';
+    tip.style.transform = leftPct > 55 ? 'translateX(-100%)' : 'none';
+  }
+  function hide() { crosshair.style.opacity = '0'; tip.style.opacity = '0'; }
+  wrap.onmousemove = show;
+  wrap.onmouseleave = hide;
+  wrap.ontouchmove = (e) => { if (e.touches[0]) show(e.touches[0]); };
+  wrap.ontouchend = hide;
+}
+
+function renderHealthPanel(scope, metrics) {
+  const L = scopeLabels(scope);
+  const sorted = [...metrics].sort((a, b) => b.health - a.health);
+  const rows = sorted.map(n => `
+    <div class="health-row">
+      <div class="hname" title="${esc(n.name)}">${esc(n.name)}</div>
+      <div class="health-track"><div class="health-fill" style="width:${n.health}%;background:${healthColor(n.health)}"></div></div>
+      <div class="hval" style="color:${healthColor(n.health)}">${n.health}%</div>
+    </div>`).join('');
+  return `<div class="panel">
+    <div class="panel__head"><div><h3>💚 ${L.healthTitle}</h3><p>Power System Health Index by ${L.unit}</p></div></div>
+    <div class="health-list">${rows || '<div class="empty-row">No data yet.</div>'}</div>
+    <div class="health-legend">
+      <span><i class="dot" style="background:#2FE08C"></i>Excellent (80-100%)</span>
+      <span><i class="dot" style="background:#F2C230"></i>Good (60-79%)</span>
+      <span><i class="dot" style="background:#FF9A4D"></i>Fair (40-59%)</span>
+      <span><i class="dot" style="background:#E4392E"></i>Poor (0-39%)</span>
+    </div>
+  </div>`;
+}
+
+function renderOutageDonut(events, orgId) {
+  const CAUSES = [
+    { key: 'outage', label: 'Generation Failure', color: '#E4392E' },
+    { key: 'maintenance', label: 'Maintenance', color: '#F2C230' },
+    { key: 'advisory', label: 'Weather Related', color: '#5B8CF9' },
+    { key: 'restoration', label: 'Other', color: '#8E5CF9' }
+  ];
+  let counts = CAUSES.map(c => ({ ...c, count: (events || []).filter(e => e.eventType === c.key).length }));
+  let total = counts.reduce((a, c) => a + c.count, 0);
+  if (!total) {
+    const rnd = seededRand('donut:' + orgId);
+    counts = counts.map(c => ({ ...c, count: Math.round(1 + rnd() * 7) }));
+    total = counts.reduce((a, c) => a + c.count, 0);
+  }
+  const R = 54, C = 2 * Math.PI * R;
+  let offset = 0;
+  const segs = counts.map(c => {
+    const dash = (c.count / total) * C;
+    const seg = `<circle cx="70" cy="70" r="${R}" fill="none" stroke="${c.color}" stroke-width="20" stroke-dasharray="${dash.toFixed(1)} ${(C - dash).toFixed(1)}" stroke-dashoffset="${(-offset).toFixed(1)}" transform="rotate(-90 70 70)"/>`;
+    offset += dash; return seg;
+  }).join('');
+  const legend = counts.map(c => `<div class="donut-legend-row"><span class="left"><i class="dot" style="background:${c.color}"></i>${esc(c.label)}</span><span class="cnt">${c.count} (${Math.round(c.count / total * 100)}%)</span></div>`).join('');
+  return `<div class="panel">
+    <div class="panel__head"><div><h3>🥧 Outage Summary</h3><p>By cause</p></div></div>
+    <div class="donut-wrap">
+      <svg viewBox="0 0 140 140" style="width:148px;height:148px;flex-shrink:0">
+        ${segs}<circle cx="70" cy="70" r="${R - 14}" fill="var(--panel)"/>
+        <text x="70" y="66" text-anchor="middle" font-size="22" font-weight="900" fill="#F5F7FB" font-family="Inter">${total}</text>
+        <text x="70" y="82" text-anchor="middle" font-size="9" fill="#8E99B0" font-family="Inter" letter-spacing="1">TOTAL</text>
+      </svg>
+      <div class="donut-legend">${legend}</div>
+    </div>
+    <div class="section-link" onclick="switchTab('events')">View full outage report →</div>
+  </div>`;
+}
+
+function renderActivityPanel(events) {
+  const list = [...(events || [])].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 6);
+  if (!list.length) return `<div class="panel"><div class="panel__head"><div><h3>🔔 Recent Activity</h3></div></div><div class="empty-row">No recent activity yet.</div></div>`;
+  const rows = list.map(ev => {
+    const isRestore = ev.eventType === 'restoration' || ev.status === 'resolved';
+    const isMaint = ev.eventType === 'maintenance';
+    const icClass = isRestore ? 'ok' : isMaint ? 'info' : 'warn';
+    const icChar = isRestore ? '✓' : isMaint ? 'i' : '!';
+    const loc = locateArea((ev.affectedAreas || [])[0] || '');
+    return `<div class="activity-item">
+      <div class="activity-ic activity-ic--${icClass}">${icChar}</div>
+      <div class="activity-body"><b>${esc(ev.headline)}</b><span class="sub">${esc((loc && loc.region) || ME.organizationUnit.region || ME.organizationUnit.name)}</span></div>
+      <div class="activity-time">${timeAgo(ev.createdAt)}</div>
+    </div>`;
+  }).join('');
+  return `<div class="panel">
+    <div class="panel__head"><div><h3>🔔 Recent Activity</h3></div></div>
+    <div class="activity-list">${rows}</div>
+    <div class="section-link" onclick="switchTab('events')">View all activities →</div>
+  </div>`;
+}
+
+function renderHeroStrip(scope, metrics, events) {
+  const ns = 'hero:' + (ME.organizationUnit.id || 'x') + ':' + new Date().toDateString();
+  const rnd = seededRand(ns);
+  const totalGeneration = Math.round(4100 + rnd() * 900);
+  const reservePct0 = 0.14 + rnd() * 0.09;
+  const totalDemand = Math.round(totalGeneration * (1 - reservePct0));
+  const reserveMW = totalGeneration - totalDemand;
+  const reservePct = Math.round((reserveMW / totalGeneration) * 100);
+  const activeOutages = (events || []).filter(e => e.status === 'active').length || metrics.filter(n => n.outageCount > 0).length;
+  const affected = Math.round(18000 + activeOutages * 4200 + rnd() * 9000);
+  const avgHealth = metrics.length ? Math.round(metrics.reduce((a, n) => a + n.health, 0) / metrics.length) : 90;
+  const status = avgHealth >= 75 ? 'STABLE' : avgHealth >= 55 ? 'MINOR ISSUES' : 'DEGRADED';
+  const statusColor = avgHealth >= 75 ? 'green' : avgHealth >= 55 ? 'orange' : 'red';
+  const statusTxt = avgHealth >= 75 ? 'var(--green)' : avgHealth >= 55 ? '#FFA95C' : 'var(--red)';
+  const L = scopeLabels(scope);
+  return `<div class="hero-strip">
+    <div class="hero-card"><div class="hero-card__top"><div class="hero-ic hero-ic--${statusColor}">✓</div><span class="hero-label">System Status</span></div><b style="color:${statusTxt}">${status}</b><span class="sub">${avgHealth >= 75 ? 'All systems operational' : 'Some areas need attention'}</span></div>
+    <div class="hero-card"><div class="hero-card__top"><div class="hero-ic hero-ic--brand">⚡</div><span class="hero-label">Total Generation</span></div><b>${totalGeneration.toLocaleString()} MW</b><span class="sub">Available capacity</span></div>
+    <div class="hero-card"><div class="hero-card__top"><div class="hero-ic hero-ic--red">📊</div><span class="hero-label">Total Demand</span></div><b>${totalDemand.toLocaleString()} MW</b><span class="sub">Current demand</span></div>
+    <div class="hero-card"><div class="hero-card__top"><div class="hero-ic hero-ic--green">🔋</div><span class="hero-label">Reserve Margin</span></div><b>${reserveMW.toLocaleString()} MW</b><span class="sub">${reservePct}% reserve</span></div>
+    <div class="hero-card"><div class="hero-card__top"><div class="hero-ic hero-ic--orange">⚠️</div><span class="hero-label">Active Outages</span></div><b>${activeOutages}</b><span class="sub">Across ${metrics.length} ${L.unitPlural.toLowerCase()}</span></div>
+    <div class="hero-card"><div class="hero-card__top"><div class="hero-ic hero-ic--blue">👥</div><span class="hero-label">Affected Customers</span></div><b>${affected.toLocaleString()}</b><span class="sub">Customers affected</span></div>
+  </div>`;
+}
+
+// ===== toast =====
+function toast(msg, type = "ok") {
+  const el = document.createElement("div");
+  el.className = `toast toast--${type}`;
+  el.textContent = msg;
+  document.getElementById("toastContainer").appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+function esc(str) { const d = document.createElement("div"); d.textContent = String(str ?? ""); return d.innerHTML; }
+function fmtDate(iso) { return iso ? new Date(iso).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "—"; }
+
+// ===== API helpers =====
+async function ecgFetch(path, opts = {}) {
+  const res = await fetch(`${API}${path}`, {
+    ...opts,
+    headers: {
+      ...(opts.body ? { "Content-Type": "application/json" } : {}),
+      ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
+      ...(opts.headers || {})
+    }
+  });
+  if (res.status === 401) { clearToken(); showAuthView("Session expired. Please sign in again."); throw new Error("auth"); }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  return data;
+}
+const ecgGet = (p) => ecgFetch(p);
+const ecgPost = (p, body) => ecgFetch(p, { method: "POST", body: JSON.stringify(body || {}) });
+const ecgPatch = (p, body) => ecgFetch(p, { method: "PATCH", body: JSON.stringify(body || {}) });
+const ecgDelete = (p) => ecgFetch(p, { method: "DELETE" });
+
+// ============================================================
+// AUTH VIEW
+// ============================================================
+function switchAuthTab(which) {
+  document.getElementById("tabLogin").classList.toggle("active", which === "login");
+  document.getElementById("tabInvite").classList.toggle("active", which === "invite");
+  document.getElementById("loginForm").classList.toggle("hidden", which !== "login");
+  document.getElementById("inviteForm").classList.toggle("hidden", which !== "invite");
+  document.getElementById("authErrorBox").classList.add("hidden");
+}
+
+function showAuthError(msg) {
+  const box = document.getElementById("authErrorBox");
+  box.textContent = msg;
+  box.classList.remove("hidden");
+}
+
+function showAuthView(msg) {
+  document.getElementById("appView").classList.remove("show");
+  document.getElementById("authView").classList.remove("hidden");
+  if (msg) { switchAuthTab('login'); showAuthError(msg); }
+}
+
+async function handleLogin(e) {
+  e.preventDefault();
+  const btn = document.getElementById("loginBtn");
+  btn.disabled = true; btn.textContent = "Signing in…";
+  try {
+    const email = document.getElementById("loginEmail").value.trim();
+    const password = document.getElementById("loginPassword").value;
+    const data = await ecgPost("/ecg/auth/login", { email, password });
+    setToken(data.token);
+    await bootDashboard();
+  } catch (err) {
+    showAuthError(err.message || "Sign in failed");
+  } finally {
+    btn.disabled = false; btn.textContent = "Sign In";
+  }
+  return false;
+}
+
+let inviteLookupTimer = null;
+function extractInviteToken(raw) {
+  const val = (raw || "").trim();
+  const m = val.match(/[?&]invite=([a-f0-9]{20,})/i);
+  if (m) return m[1];
+  return val;
+}
+function onInviteTokenTyped() {
+  clearTimeout(inviteLookupTimer);
+  inviteLookupTimer = setTimeout(lookupInvite, 400);
+}
+async function lookupInvite() {
+  const token = extractInviteToken(document.getElementById("inviteTokenInput").value);
+  const box = document.getElementById("inviteInfoBox");
+  const branchField = document.getElementById("branchKeyField");
+  if (!token) { box.classList.add("hidden"); return; }
+  try {
+    const info = await fetch(`${API}/ecg/invitations/${token}`).then(r => r.ok ? r.json() : Promise.reject(new Error((r.status === 404) ? "Invitation not found" : "Invitation is no longer valid")));
+    box.classList.remove("hidden");
+    box.innerHTML = `
+      <div><b>Email:</b> ${esc(info.email)}</div>
+      <div><b>Organization:</b> ${esc(info.organizationUnit?.name || '—')}${info.organizationUnit?.region ? ' · ' + esc(info.organizationUnit.region) : ''}</div>
+      <div><b>Role:</b> ${esc(formatRole(info.role))}</div>`;
+    branchField.classList.toggle("hidden", !info.requiresBranchKey);
+    document.getElementById("inviteBranchKey").required = Boolean(info.requiresBranchKey);
+  } catch (err) {
+    box.classList.remove("hidden");
+    box.innerHTML = `<span style="color:var(--red)">${esc(err.message)}</span>`;
+    branchField.classList.add("hidden");
+  }
+}
+
+async function handleAcceptInvite(e) {
+  e.preventDefault();
+  const btn = document.getElementById("inviteBtn");
+  btn.disabled = true; btn.textContent = "Creating account…";
+  try {
+    const token = extractInviteToken(document.getElementById("inviteTokenInput").value);
+    if (!token) throw new Error("Paste your invitation link or code first");
+    const body = {
+      name: document.getElementById("inviteName").value.trim(),
+      password: document.getElementById("invitePassword").value,
+      branchKey: document.getElementById("inviteBranchKey").value.trim()
+    };
+    const data = await ecgPost(`/ecg/invitations/${token}/accept`, body);
+    setToken(data.token);
+    toast("Account created — welcome to LightWatch ECG Operations.");
+    await bootDashboard();
+  } catch (err) {
+    showAuthError(err.message || "Could not create account");
+  } finally {
+    btn.disabled = false; btn.textContent = "Create Account";
+  }
+  return false;
+}
+
+function formatRole(role) {
+  return {
+    hq_super_admin: "HQ Super Admin", hq_manager: "HQ Manager", hq_staff: "HQ Staff",
+    regional_manager: "Regional Manager", regional_staff: "Regional Staff",
+    station_manager: "Station Manager", station_operator: "Station Operator"
+  }[role] || role;
+}
+function roleBadgeClass(role) {
+  return {
+    hq_super_admin: "hq", hq_manager: "hq", hq_staff: "hq",
+    regional_manager: "regional", regional_staff: "regional",
+    station_manager: "district", station_operator: "operator"
+  }[role] || "operator";
+}
+// Permission catalog fetched once after login — used to render the invite
+// form's checkbox list (already filtered server-side to what the caller
+// can actually grant; see GET /ecg/permissions-catalog).
+let PERM_CATALOG = null;
+const PERM_LABELS = {
+  view_nationwide_status: ["View nationwide status", "See the national grid-status overview"],
+  view_all_regions: ["View all regions", "See every region, district and station"],
+  view_community_reports: ["View community reports", "See public outage reports"],
+  view_outages: ["View outage events", "See published outage/restoration events"],
+  monitor_stations: ["Monitor stations", "See local station activity"],
+  view_audit_log: ["View audit log", "See the staff action history"],
+  publish_updates: ["Publish updates", "Publish official outage/restoration/maintenance updates"],
+  manage_events: ["Manage events", "Edit, resolve or retract published updates"],
+  control_nationwide_power: ["Control nationwide power", "Toggle power status for the whole country"],
+  control_regional_power: ["Control regional power", "Toggle power status for a region"],
+  control_district_power: ["Control district power", "Toggle power status for a station's coverage areas"],
+  invite_staff: ["Invite staff", "Send new-staff invitations"],
+  assign_roles: ["Assign roles", "Choose the role on an invitation"],
+  manage_staff: ["Manage staff", "Activate/deactivate staff accounts"],
+  manage_org_units: ["Manage organization", "Create/edit organization units"],
+  manage_regional_offices: ["Manage regional offices", "Create/edit regional offices"],
+  manage_local_stations: ["Manage local stations", "Create/edit district/local stations"],
+  delete_org_units: ["Delete organizations", "Permanently delete an organization unit"],
+  manage_branch_keys: ["Manage branch keys", "Rotate station branch access keys"],
+  manage_operational_permissions: ["Manage permissions", "Grant/revoke other staff's permissions"],
+  manage_ecg_config: ["Manage ECG configuration", "Change system-level ECG configuration"],
+  manage_power_plants: ["Manage power plants", "Add/edit power plant records"],
+  manage_transmission: ["Manage transmission", "Add/edit transmission line records"],
+  manage_announcements: ["Manage announcements", "Publish/edit staff & public announcements"],
+  manage_integrations: ["Manage integrations", "Connect/disconnect third-party services"]
+};
+async function loadPermCatalog() {
+  if (PERM_CATALOG) return PERM_CATALOG;
+  try { PERM_CATALOG = await ecgGet("/ecg/permissions-catalog"); } catch { PERM_CATALOG = { grantable: [] }; }
+  return PERM_CATALOG;
+}
+
+// ============================================================
+// BOOT
+// ============================================================
+async function bootDashboard() {
+  try {
+    ME = await ecgGet("/ecg/me");
+  } catch {
+    return; // ecgFetch already routed us back to the auth view on 401
+  }
+  document.getElementById("authView").classList.add("hidden");
+  document.getElementById("appView").classList.add("show");
+
+  document.getElementById("sbOrgName").textContent = ME.organizationUnit.name;
+  document.getElementById("sbRole").textContent = formatRole(ME.staff.role);
+  document.getElementById("topbarStaffName").textContent = `${ME.staff.name} · ${ME.organizationUnit.name}`;
+  document.getElementById("navOverviewLabel").textContent = ME.organizationUnit.type === 'headquarters' ? 'National Overview' : ME.organizationUnit.type === 'regional' ? 'Regional Overview' : 'District Overview';
+  renderTopbarAvatar();
+  const tick = () => { const el = document.getElementById("topbarDate"); if (el) el.innerHTML = `📅 <b>${new Date().toLocaleDateString([], { month: 'short', day: 'numeric' })}</b>`; const c = document.getElementById("ovClock"); if (c) c.innerHTML = `🕐 <b>${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</b>`; };
+  tick(); clearInterval(window.__lwClockTimer); window.__lwClockTimer = setInterval(tick, 30000);
+
+  document.querySelectorAll('[data-role-gate="org"]').forEach(el => el.classList.toggle("hidden", !ME.permissions.canManageOrgUnits));
+  document.querySelectorAll('[data-role-gate="invitations"]').forEach(el => el.classList.toggle("hidden", !ME.permissions.canInviteStaff));
+  document.querySelectorAll('[data-role-gate="audit"]').forEach(el => el.classList.toggle("hidden", !ME.permissions.canViewAuditLog));
+  document.querySelectorAll('[data-role-gate="regions"]').forEach(el => el.classList.toggle("hidden", !ME.permissions.canViewRegionsOverview));
+  document.querySelectorAll('[data-role-gate="integrations"]').forEach(el => el.classList.toggle("hidden", ME.organizationUnit.type !== 'headquarters'));
+  const canTogglePower = ME.permissions.canControlNationwidePower || ME.permissions.canControlRegionalPower || ME.permissions.canControlDistrictPower;
+  document.querySelectorAll('[data-role-gate="power"]').forEach(el => el.classList.toggle("hidden", !canTogglePower));
+
+  switchTab("overview");
+}
+
+function handleLogout() {
+  ecgPost("/ecg/auth/logout").catch(() => {});
+  clearToken();
+  ME = null;
+  location.reload();
+}
+
+// ---- Profile photos ----
+// Stored per-account on this device (localStorage) as a small resized JPEG
+// data URL. If/when the backend exposes a real `avatarUrl` on staff records,
+// getAvatar() below already prefers that for accounts other than yourself.
+function initialsFor(name) { return (name || 'EC').trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase() || 'EC'; }
+function avatarStorageKey(id) { return `lw_avatar_${id}`; }
+function getLocalAvatar(id) { try { return localStorage.getItem(avatarStorageKey(id)) || null; } catch { return null; } }
+function setLocalAvatar(id, dataUrl) { try { localStorage.setItem(avatarStorageKey(id), dataUrl); } catch {} }
+function removeLocalAvatar(id) { try { localStorage.removeItem(avatarStorageKey(id)); } catch {} }
+function avatarFor(staffLike) {
+  // staffLike: { id, name, avatarUrl? }
+  const remote = staffLike && staffLike.avatarUrl;
+  const local = staffLike && staffLike.id === (ME && ME.staff && ME.staff.id) ? getLocalAvatar(staffLike.id) : null;
+  const src = remote || local;
+  return src ? `<img src="${src}" alt="">` : esc(initialsFor(staffLike && staffLike.name));
+}
+function renderTopbarAvatar() {
+  const el = document.getElementById("topbarAvatar");
+  if (!el || !ME) return;
+  el.innerHTML = avatarFor(ME.staff);
+}
+function toggleProfileMenu(evt) {
+  if (evt) evt.stopPropagation();
+  const menu = document.getElementById("profileMenu");
+  if (!menu) return;
+  if (!menu.classList.contains("hidden")) { menu.classList.add("hidden"); return; }
+  const hasPhoto = !!getLocalAvatar(ME.staff.id);
+  menu.innerHTML = `
+    <div class="profile-menu__head">
+      <div class="profile-menu__avatar">${avatarFor(ME.staff)}</div>
+      <div style="min-width:0">
+        <div class="profile-menu__name" title="${esc(ME.staff.name)}">${esc(ME.staff.name)}</div>
+        <div class="profile-menu__role">${esc(formatRole(ME.staff.role))}</div>
+      </div>
+    </div>
+    <button class="profile-menu__btn" onclick="document.getElementById('avatarFileInput').click()">🖼️ ${hasPhoto ? 'Change photo' : 'Upload photo'}</button>
+    ${hasPhoto ? `<button class="profile-menu__btn profile-menu__btn--danger" onclick="clearOwnAvatar()">🗑️ Remove photo</button>` : ''}
+    <div class="profile-menu__divider"></div>
+    <button class="profile-menu__btn profile-menu__btn--danger" onclick="handleLogout()">↪️ Sign Out</button>`;
+  menu.classList.remove("hidden");
+}
+document.addEventListener("click", (e) => {
+  const wrap = document.getElementById("profileMenuWrap");
+  if (wrap && !wrap.contains(e.target)) document.getElementById("profileMenu")?.classList.add("hidden");
+});
+function handleAvatarFile(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  if (!file.type.startsWith("image/")) { toast("Please choose an image file.", "err"); return; }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      const size = 160;
+      const canvas = document.createElement("canvas");
+      canvas.width = size; canvas.height = size;
+      const ctx = canvas.getContext("2d");
+      const scale = Math.max(size / img.width, size / img.height);
+      const sw = size / scale, sh = size / scale;
+      const sx = (img.width - sw) / 2, sy = (img.height - sh) / 2;
+      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, size, size);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.87);
+      setLocalAvatar(ME.staff.id, dataUrl);
+      renderTopbarAvatar();
+      document.getElementById("profileMenu").classList.add("hidden");
+      toast("Profile photo updated.");
+      if (document.querySelector('.nav-item[data-tab="staff"].active')) switchTab("staff");
+    };
+    img.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+  input.value = "";
+}
+function clearOwnAvatar() {
+  removeLocalAvatar(ME.staff.id);
+  renderTopbarAvatar();
+  document.getElementById("profileMenu").classList.add("hidden");
+  toast("Profile photo removed.");
+  if (document.querySelector('.nav-item[data-tab="staff"].active')) switchTab("staff");
+}
+
+// ============================================================
+// TAB SWITCHING + RENDERING
+// ============================================================
+const TAB_TITLES = {
+  overview: "Dashboard", livemap: "Live Map (Heat Map)", events: "Outage Reports", plants: "Power Plants",
+  transmission: "Transmission", power: "Power Control", regions: "Regions", org: "Districts / Stations",
+  staff: "Users & Staff", invitations: "Invitations", alerts: "Alerts & Announcements", audit: "Audit Logs",
+  analytics: "Reports & Analytics", settings: "Settings", integrations: "Integrations", health: "System Health"
+};
+
+async function switchTab(tab) {
+  document.querySelectorAll(".nav-item").forEach(el => el.classList.toggle("active", el.dataset.tab === tab));
+  document.getElementById("topbarTitle").textContent = TAB_TITLES[tab] || tab;
+  const content = document.getElementById("content");
+  content.innerHTML = `<div class="empty-row">Loading…</div>`;
+  try {
+    if (tab === "overview") await renderOverview(content);
+    else if (tab === "livemap") await renderLiveMapPage(content);
+    else if (tab === "events") await renderEvents(content);
+    else if (tab === "plants") await renderPlants(content);
+    else if (tab === "transmission") await renderTransmission(content);
+    else if (tab === "power") await renderPower(content);
+    else if (tab === "regions") await renderRegions(content);
+    else if (tab === "org") await renderOrg(content);
+    else if (tab === "staff") await renderStaff(content);
+    else if (tab === "invitations") await renderInvitations(content);
+    else if (tab === "alerts") await renderAlerts(content);
+    else if (tab === "audit") await renderAudit(content);
+    else if (tab === "analytics") await renderAnalytics(content);
+    else if (tab === "settings") await renderSettings(content);
+    else if (tab === "integrations") await renderIntegrations(content);
+    else if (tab === "health") await renderSystemHealth(content);
+  } catch (err) {
+    content.innerHTML = `<div class="panel"><p style="color:var(--red)">${esc(err.message)}</p></div>`;
+  }
+}
+
+// ---- Overview (Headquarters / Regional / District live dashboard) ----
+// Shared by renderOverview() and renderLiveMapPage(): builds the node list +
+// computed metrics for this staff member's scope (region names at HQ level,
+// district names at regional level, coverage-area names at district level).
+async function buildScopeMetrics() {
+  const scope = ME.organizationUnit.type;
+  let scopeEvents = [];
+  try {
+    if (scope === 'headquarters') scopeEvents = await ecgGet(`/ecg/events?status=active`);
+    else if (scope === 'regional') scopeEvents = await ecgGet(`/ecg/events?region=${encodeURIComponent(ME.organizationUnit.region || '')}&status=active`);
+    else scopeEvents = await ecgGet(`/ecg/events?orgUnitId=${ME.organizationUnit.id}&status=active`);
+  } catch { scopeEvents = []; }
+
+  let nodes = [], matchFn;
+  if (scope === 'headquarters') {
+    nodes = GHANA_REGIONS.map(name => ({ name }));
+    matchFn = (area, regionName) => { const loc = locateArea(area); return !!loc && loc.region === regionName; };
+  } else if (scope === 'regional') {
+    nodes = districtsForRegion(ME.organizationUnit.region || '').map(name => ({ name }));
+    matchFn = (area, distName) => { const loc = locateArea(area); return !!loc && loc.district === distName; };
+  } else {
+    const areas = (ME.organizationUnit.coverageAreas && ME.organizationUnit.coverageAreas.length)
+      ? ME.organizationUnit.coverageAreas
+      : townsFor(ME.organizationUnit.region, ME.organizationUnit.name);
+    nodes = areas.map(name => ({ name }));
+    matchFn = (area, areaName) => String(area).toLowerCase() === String(areaName).toLowerCase();
+  }
+  const metrics = computeNodeMetrics(nodes, scopeEvents, matchFn);
+  return { scope, scopeEvents, nodes, metrics };
+}
+
+async function renderOverview(content) {
+  const { scope, scopeEvents, metrics } = await buildScopeMetrics();
+  let recentEvents = scopeEvents;
+  try { recentEvents = await ecgGet(`/ecg/events?orgUnitId=${ME.organizationUnit.id}`); } catch { /* keep scopeEvents */ }
+
+  const heading = scope === 'headquarters' ? 'National Overview'
+    : scope === 'regional' ? `${ME.organizationUnit.region || 'Regional'} Overview`
+    : `${ME.organizationUnit.name} Overview`;
+  const sub = scope === 'headquarters' ? "Real-time overview of Ghana's power system"
+    : scope === 'regional' ? `Real-time overview of ${esc(ME.organizationUnit.region || 'this region')}'s power system`
+    : "Real-time overview of your coverage area";
+
+  content.innerHTML = `
+    <div class="ov-head">
+      <div><h1>${esc(heading)}</h1><p>${sub}</p></div>
+      <div class="ov-topmeta">
+        <div class="ov-chip">📅 <b>${new Date().toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' })}</b></div>
+        <div class="ov-chip" id="ovClock">🕐 <b>${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</b></div>
+      </div>
+    </div>
+    ${renderHeroStrip(scope, metrics, scopeEvents)}
+    <div class="dash-grid">
+      <div class="dash-col">
+        ${renderHeatMapPanel(scope, metrics)}
+        ${renderGenDemandChart(scope)}
+      </div>
+      <div class="dash-col">
+        ${renderWeatherPanel(scope, metrics)}
+        ${renderOutageDonut(scopeEvents, ME.organizationUnit.id)}
+      </div>
+      <div class="dash-col">
+        ${renderHealthPanel(scope, metrics)}
+        ${renderActivityPanel(recentEvents)}
+      </div>
+    </div>`;
+  mountHeatMap();
+  initGenDemandChart(scope);
+}
+
+// ---- Live Map (Heat Map) — the same real-time map as the overview panel,
+// shown full-size as its own page, plus a compact stats strip. ----
+async function renderLiveMapPage(content) {
+  const { scope, scopeEvents, metrics } = await buildScopeMetrics();
+  const Lb = scopeLabels(scope);
+  const total = metrics.length;
+  const affected = metrics.filter(m => m.outageCount > 0).length;
+  const avgIntensity = total ? Math.round(metrics.reduce((s, m) => s + m.intensity, 0) / total) : 0;
+  const worst = [...metrics].sort((a, b) => b.intensity - a.intensity)[0];
+
+  content.innerHTML = `
+    <div class="ov-head">
+      <div><h1>Live Outage Heat Map</h1><p>${Lb.mapSub}</p></div>
+    </div>
+    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:14px; margin-bottom:16px;">
+      ${statChip('🗺️', total, scope === 'headquarters' ? 'Regions tracked' : scope === 'regional' ? 'Districts tracked' : 'Coverage areas')}
+      ${statChip('⚠️', affected, 'Currently affected')}
+      ${statChip('📊', avgIntensity + '%', 'Average outage intensity')}
+      ${statChip('🔥', worst ? worst.name : '—', 'Highest intensity area')}
+    </div>
+    <div class="panel" style="padding:0; overflow:hidden;">
+      <div class="heatmap-row" style="padding:20px;">
+        <div class="heatmap-wrap" style="flex:1;"><div id="lwLeafletMap" class="lw-leaflet-map" style="height:560px;"></div></div>
+        <div class="map-legend-col"><span>High</span><div class="grad"></div><span>Low</span></div>
+      </div>
+      <div class="map-updated" style="padding:0 20px 16px;">
+        <span id="mapUpdatedAt">Last updated: ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+        <div class="map-refresh" title="Refresh" onclick="switchTab('livemap')">⟳</div>
+      </div>
+    </div>`;
+  window.__lwHeatNodes = metrics.map(n => ({ ...n, latlng: latLngForNode(scope, n.name) }));
+  window.__lwHeatScope = scope;
+  mountHeatMap();
+}
+
+function statChip(icon, value, label) {
+  return `<div class="panel" style="padding:16px; display:flex; align-items:center; gap:12px;">
+    <div style="font-size:22px;">${icon}</div>
+    <div><div style="font-size:20px; font-weight:700;">${esc(String(value))}</div><div style="color:var(--muted); font-size:12.5px;">${esc(label)}</div></div>
+  </div>`;
+}
+
+// ---- Events ----
+async function renderEvents(content) {
+  const canPublish = ME.permissions.canPublishEvents;
+  const canManage = ME.permissions.canManageEvents;
+  const isDistrict = ME.organizationUnit.type === 'district';
+  const events = await ecgGet(`/ecg/events?orgUnitId=${ME.organizationUnit.id}`).catch(() => []);
+  content.innerHTML = `
+    ${canPublish && isDistrict ? `
+    <div class="panel">
+      <div class="panel__head">
+        <div><h3>Publish an Official Update</h3><p>Only areas assigned to your station's coverage can be selected.</p></div>
+      </div>
+      <form id="eventForm" onsubmit="return submitEvent(event)">
+        <div class="field-wrap"><label class="field">Type</label>
+          <select id="evType"><option value="outage">Outage</option><option value="restoration">Restoration</option><option value="maintenance">Planned Maintenance</option><option value="advisory">Advisory</option></select>
+        </div>
+        <div class="field-wrap"><label class="field">Headline</label><input type="text" id="evHeadline" required maxlength="200" placeholder="e.g. Unplanned outage — Bantama feeder fault"></div>
+        <div class="field-wrap"><label class="field">Summary</label><textarea id="evSummary" rows="2" placeholder="Optional details"></textarea></div>
+        <div class="field-wrap"><label class="field">Affected Areas</label>
+          <select id="evAreas" multiple size="4">
+            ${(ME.organizationUnit.coverageAreas || []).map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join('') || '<option disabled>No coverage areas assigned to this unit yet</option>'}
+          </select>
+        </div>
+        <button class="btn btn--primary" type="submit">Publish</button>
+      </form>
+    </div>` : (canPublish ? `<div class="panel"><p style="color:var(--muted)">Official updates are published against a district/local station. Your unit is a ${esc(ME.organizationUnit.type)} — you can view events below, but publishing happens at station level.</p></div>` : '')}
+    <div class="panel">
+      <div class="panel__head"><h3>This Unit's Events</h3></div>
+      <table><thead><tr><th>Headline</th><th>Type</th><th>Areas</th><th>Status</th><th>Published</th><th></th></tr></thead>
+      <tbody>${events.length ? events.map(ev => `
+        <tr>
+          <td><b>${esc(ev.headline)}</b>${ev.summary ? `<div style="color:var(--muted);font-size:0.76rem;margin-top:2px">${esc(ev.summary)}</div>` : ''}</td>
+          <td>${esc(ev.eventType)}</td>
+          <td>${ev.affectedAreas.map(esc).join(', ')}</td>
+          <td><span class="badge badge--${ev.status === 'active' ? 'active' : 'inactive'}">${esc(ev.status)}</span></td>
+          <td>${fmtDate(ev.createdAt)}</td>
+          <td>${ev.status === 'active' && canManage ? `<button class="btn btn--sm" onclick="resolveEvent('${ev.id}')">Resolve</button>` : ''}</td>
+        </tr>`).join('') : '<tr><td colspan="6" class="empty-row">No events published yet.</td></tr>'}
+      </tbody></table>
+    </div>`;
+}
+async function submitEvent(e) {
+  e.preventDefault();
+  const areas = Array.from(document.getElementById("evAreas").selectedOptions).map(o => o.value);
+  if (!areas.length) { toast("Select at least one affected area", "err"); return false; }
+  try {
+    await ecgPost("/ecg/events", {
+      eventType: document.getElementById("evType").value,
+      headline: document.getElementById("evHeadline").value.trim(),
+      summary: document.getElementById("evSummary").value.trim(),
+      affectedAreas: areas
+    });
+    toast("Event published.");
+    switchTab("events");
+  } catch (err) { toast(err.message, "err"); }
+  return false;
+}
+async function resolveEvent(id) {
+  try { await ecgPatch(`/ecg/events/${id}`, { status: "resolved" }); toast("Marked resolved."); switchTab("events"); }
+  catch (err) { toast(err.message, "err"); }
+}
+
+// ---- Power Control ----
+// Nationwide is HQ Super Admin only. Regional Manager/Staff toggle their own
+// region (selected/specific/all areas). Station Manager/Operator toggle
+// their own station's coverage areas the same way. Every button here is
+// just a convenience — the server independently re-checks role, permission
+// and org-unit scope on every request; see ecg-power.js.
+async function renderPower(content) {
+  const active = await ecgGet("/ecg/power/active").catch(() => []);
+  const unitType = ME.organizationUnit.type;
+  const cards = [];
+
+  if (ME.permissions.canControlNationwidePower) {
+    const off = active.find(a => a.scope === 'nationwide' && a.active);
+    cards.push(`
+      <div class="power-card ${off ? 'is-off' : 'is-on'}">
+        <div class="power-card__head"><h4><span class="power-dot ${off ? 'off' : 'on'}"></span>Nationwide</h4>
+          <span class="badge badge--${off ? 'inactive' : 'active'}">${off ? 'Power off' : 'Power on'}</span></div>
+        <p class="hint">Declares/restores power status for the entire country. Restricted to the HQ Super Admin — this immediately publishes to the public LightWatch news feed.</p>
+        <div class="field-wrap"><input type="text" id="pwReasonNationwide" placeholder="Reason (optional, shown publicly)"></div>
+        <div class="power-actions">
+          <button class="btn btn--power-off" onclick="togglePower('nationwide', 'power_off', null)">Turn Off Nationwide</button>
+          <button class="btn btn--power-on" onclick="togglePower('nationwide', 'power_restored', null)">Restore Nationwide</button>
+        </div>
+      </div>`);
+  }
+
+  if (ME.permissions.canControlRegionalPower && unitType === 'regional') {
+    const off = active.filter(a => a.scope === 'regional' && a.orgUnitId === ME.organizationUnit.id && a.active);
+    cards.push(`
+      <div class="power-card ${off.length ? 'is-off' : 'is-on'}">
+        <div class="power-card__head"><h4><span class="power-dot ${off.length ? 'off' : 'on'}"></span>${esc(ME.organizationUnit.name)}</h4>
+          <span class="badge badge--${off.length ? 'inactive' : 'active'}">${off.length ? off.length + ' area(s) off' : 'Power on'}</span></div>
+        <p class="hint">Toggle power for this region — choose specific district/station names, or leave blank for the whole region.</p>
+        <div class="field-wrap"><label class="field">Areas (comma-separated station/district names, or blank = all)</label><input type="text" id="pwAreasRegional"></div>
+        <div class="field-wrap"><input type="text" id="pwReasonRegional" placeholder="Reason (optional, shown publicly)"></div>
+        <div class="power-actions">
+          <button class="btn btn--power-off" onclick="togglePower('regional', 'power_off', '${ME.organizationUnit.id}')">Turn Off Selected/All</button>
+          <button class="btn btn--power-on" onclick="togglePower('regional', 'power_restored', '${ME.organizationUnit.id}')">Restore Selected/All</button>
+        </div>
+        ${off.length ? `<div class="power-status-list">${off.map(a => `<div class="power-status-row"><div><b>${esc(a.areas.join(', '))}</b><div class="meta">Off since ${fmtDate(a.startedAt)} · ${esc(a.byStaffName)}</div></div></div>`).join('')}</div>` : ''}
+      </div>`);
+  }
+
+  if (ME.permissions.canControlDistrictPower && unitType === 'district') {
+    const off = active.filter(a => a.scope === 'district' && a.orgUnitId === ME.organizationUnit.id && a.active);
+    const coverage = ME.organizationUnit.coverageAreas || [];
+    cards.push(`
+      <div class="power-card ${off.length ? 'is-off' : 'is-on'}">
+        <div class="power-card__head"><h4><span class="power-dot ${off.length ? 'off' : 'on'}"></span>${esc(ME.organizationUnit.name)}</h4>
+          <span class="badge badge--${off.length ? 'inactive' : 'active'}">${off.length ? off.length + ' area(s) off' : 'Power on'}</span></div>
+        <p class="hint">Toggle power for this station's coverage areas — select specific areas below, or leave none selected for the whole station.</p>
+        <div class="field-wrap"><label class="field">Areas</label>
+          <select id="pwAreasDistrict" multiple size="4">
+            ${coverage.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join('') || '<option disabled>No coverage areas assigned</option>'}
+          </select>
+        </div>
+        <div class="field-wrap"><input type="text" id="pwReasonDistrict" placeholder="Reason (optional, shown publicly)"></div>
+        <div class="power-actions">
+          <button class="btn btn--power-off" onclick="togglePower('district', 'power_off', '${ME.organizationUnit.id}')">Turn Off Selected/All</button>
+          <button class="btn btn--power-on" onclick="togglePower('district', 'power_restored', '${ME.organizationUnit.id}')">Restore Selected/All</button>
+        </div>
+        ${off.length ? `<div class="power-status-list">${off.map(a => `<div class="power-status-row"><div><b>${esc(a.areas.join(', '))}</b><div class="meta">Off since ${fmtDate(a.startedAt)} · ${esc(a.byStaffName)}</div></div></div>`).join('')}</div>` : ''}
+      </div>`);
+  }
+
+  content.innerHTML = `
+    <div class="panel">
+      <div class="panel__head"><div><h3>Power Status Control</h3><p>Toggling here records an authoritative status change and immediately pushes it to the public LightWatch news feed. It does not control physical grid hardware.</p></div></div>
+    </div>
+    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(320px, 1fr)); gap:16px;">${cards.join('') || '<div class="panel">You don\'t have a power-control scope assigned.</div>'}</div>`;
+}
+async function togglePower(scope, action, orgUnitId) {
+  try {
+    let body = { action };
+    if (scope === 'regional') {
+      const raw = document.getElementById('pwAreasRegional').value.trim();
+      body.areas = raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : ['all'];
+      body.reason = document.getElementById('pwReasonRegional').value.trim();
+      body.orgUnitId = orgUnitId;
+      await ecgPost('/ecg/power/regional', body);
+    } else if (scope === 'district') {
+      const sel = Array.from(document.getElementById('pwAreasDistrict').selectedOptions).map(o => o.value);
+      body.areas = sel.length ? sel : ['all'];
+      body.reason = document.getElementById('pwReasonDistrict').value.trim();
+      body.orgUnitId = orgUnitId;
+      await ecgPost('/ecg/power/district', body);
+    } else {
+      body.reason = document.getElementById('pwReasonNationwide').value.trim();
+      await ecgPost('/ecg/power/nationwide', body);
+    }
+    toast(action === 'power_off' ? "Power-off status recorded." : "Power-restored status recorded.");
+    switchTab('power');
+  } catch (err) { toast(err.message, "err"); }
+}
+
+// ---- Organization (HQ / Regional only) ----
+async function renderOrg(content) {
+  if (!ME.permissions.canManageOrgUnits) { content.innerHTML = `<div class="panel">You don't have access to this section.</div>`; return; }
+  const units = await ecgGet("/ecg/org-units");
+  const canCreateType = ME.organizationUnit.type === 'headquarters' ? 'Regional Office' : 'District / Local Station (under your region)';
+  const canDelete = ME.permissions.canDeleteOrgUnits;
+  content.innerHTML = `
+    <div class="panel">
+      <div class="panel__head">
+        <div><h3>Organization Units</h3><p>You can create a new ${canCreateType}. Branch keys are shown once and never displayed again.</p></div>
+        <button class="btn btn--primary btn--sm" onclick="openCreateUnitModal()">+ New Unit</button>
+      </div>
+      <table><thead><tr><th>Name</th><th>Type</th><th>Region</th><th>Coverage</th><th>Status</th></tr></thead>
+      <tbody>${units.map(u => `
+        <tr>
+          <td><b>${esc(u.name)}</b></td>
+          <td><span class="badge badge--${roleUnitBadge(u.type)}">${esc(u.type)}</span></td>
+          <td>${esc(u.region || '—')}</td>
+          <td>${(u.coverageAreas || []).length ? u.coverageAreas.map(esc).join(', ') : '<span style="color:var(--faint)">—</span>'}</td>
+          <td><span class="badge badge--${u.active ? 'active' : 'inactive'}">${u.active ? 'active' : 'inactive'}</span>
+              ${u.type === 'district' ? `<button class="btn btn--sm" style="margin-left:8px" onclick="rotateBranchKey('${u.id}')">Rotate Key</button>` : ''}
+              <button class="btn btn--sm" style="margin-left:6px" onclick="editCoverage('${u.id}', ${JSON.stringify(u.coverageAreas || []).replace(/"/g, '&quot;')})">Edit Coverage</button>
+              ${canDelete && u.type !== 'headquarters' ? `<button class="btn btn--sm btn--danger" style="margin-left:6px" onclick="deleteOrgUnit('${u.id}', ${JSON.stringify(u.name).replace(/"/g, '&quot;')})">Delete</button>` : ''}
+          </td>
+        </tr>`).join('')}
+      </tbody></table>
+    </div>`;
+  window.__orgUnits = units;
+}
+async function deleteOrgUnit(id, name) {
+  if (!confirm(`Delete "${name}"? This cannot be undone. It must have no active sub-units first, and any active staff on it will need to be deactivated.`)) return;
+  try {
+    await ecgDelete(`/ecg/org-units/${id}`);
+    toast("Organization unit deleted.");
+    switchTab("org");
+  } catch (err) {
+    if (String(err.message || '').includes('staff account')) {
+      if (confirm(err.message + "\n\nDeactivate those staff accounts and delete anyway?")) {
+        try { await ecgDelete(`/ecg/org-units/${id}?force=true`); toast("Organization unit deleted."); switchTab("org"); }
+        catch (err2) { toast(err2.message, "err"); }
+      }
+    } else {
+      toast(err.message, "err");
+    }
+  }
+}
+function roleUnitBadge(type) { return { headquarters: 'hq', regional: 'regional', district: 'district' }[type] || 'operator'; }
+
+function openCreateUnitModal() {
+  const isHq = ME.organizationUnit.type === 'headquarters';
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+
+  if (isHq) {
+    // ---- HQ: the only unit type it can create is a Regional Office. ----
+    const existingRegions = new Set((window.__orgUnits || []).filter(u => u.type === 'regional').map(u => u.region));
+    const available = GHANA_REGIONS.filter(r => !existingRegions.has(r));
+    const hqUnit = (window.__orgUnits || []).find(u => u.type === 'headquarters');
+    backdrop.innerHTML = `
+      <div class="modal-box">
+        <h3>New Organization Unit</h3>
+        <p class="desc">ECG Headquarters can only establish Regional Offices — district/local stations are created by each Regional Office's own manager, under their region.</p>
+        <input type="hidden" id="mType" value="regional">
+        <input type="hidden" id="mParent" value="${hqUnit ? esc(hqUnit.id) : ''}">
+        <div class="field-wrap"><label class="field">Unit Type</label>
+          <div class="static-field">🏢 Regional Office</div>
+        </div>
+        <div class="field-wrap"><label class="field">Region</label>
+          <select id="mRegionSelect">
+            <option value="" disabled ${available.length ? 'selected' : ''}>Select a region of Ghana…</option>
+            ${available.map(r => `<option value="${esc(r)}">${esc(r)}</option>`).join('')}
+          </select>
+          ${!available.length ? '<p class="field-hint">All 16 regions already have a Regional Office set up.</p>' : `<p class="field-hint">${available.length} of 16 regions still need a Regional Office.</p>`}
+        </div>
+        <div id="mKeyReveal"></div>
+        <div class="modal-actions">
+          <button class="btn" onclick="this.closest('.modal-backdrop').remove()">Cancel</button>
+          <button class="btn btn--primary" onclick="createUnit(this)" ${!available.length ? 'disabled' : ''}>Create</button>
+        </div>
+      </div>`;
+  } else {
+    // ---- Regional manager: create a District / Local Station under their own region. ----
+    const region = ME.organizationUnit.region;
+    const known = districtsForRegion(region);
+    const existingNames = new Set((window.__orgUnits || []).filter(u => u.type === 'district').map(u => u.name));
+    const available = known.filter(d => !existingNames.has(d));
+    backdrop.innerHTML = `
+      <div class="modal-box" style="max-width:540px">
+        <h3>New District / Local Station</h3>
+        <p class="desc">Pick a district in <b>${esc(region || 'your region')}</b>. Its coverage areas load automatically the moment you select it — uncheck any that don't apply, or add more.</p>
+        <input type="hidden" id="mType" value="district">
+        <input type="hidden" id="mName" value="">
+        ${known.length ? `
+        <div class="field-wrap">
+          <label class="field">Search Districts</label>
+          <div style="display:flex; gap:8px;">
+            <input type="text" id="mDistrictSearch" placeholder="Type to filter ${esc(region)}'s districts…" autocomplete="off"
+              oninput="filterDistrictSelect()" onkeydown="if(event.key==='Enter'){event.preventDefault();filterDistrictSelect();}">
+            <button type="button" class="btn btn--sm" onclick="filterDistrictSelect()">Search</button>
+          </div>
+        </div>
+        <div class="field-wrap">
+          <label class="field">District (A–Z)</label>
+          <select id="mDistrictSelect" size="8" onchange="selectDistrict(this.value)">
+            ${available.length
+              ? `<option value="" disabled selected>— ${available.length} districts, alphabetical —</option>` + available.map(d => `<option value="${esc(d)}">${esc(d)}</option>`).join('')
+              : `<option disabled selected>All known districts in this region already have a station</option>`}
+          </select>
+        </div>
+        <div id="mMapWrap"></div>
+        <div class="field-wrap hidden" id="mCoverageWrap"></div>
+        ` : `
+        <div class="field-wrap"><label class="field">District / Station Name</label><input type="text" id="mNameManual" placeholder="e.g. Bantama Local Station" oninput="document.getElementById('mName').value=this.value.trim()"></div>
+        <div class="field-wrap"><label class="field">Coverage Areas (comma-separated)</label><input type="text" id="mCoverage" placeholder="Bantama, Abrepo, Krofrom"></div>
+        <p class="field-hint">We don't have a district list on file for ${esc(region || 'this region')} yet — enter the station and its coverage areas manually.</p>
+        `}
+        <div id="mKeyReveal"></div>
+        <div class="modal-actions">
+          <button class="btn" onclick="this.closest('.modal-backdrop').remove()">Cancel</button>
+          <button class="btn btn--primary" onclick="createUnit(this)">Create</button>
+        </div>
+      </div>`;
+  }
+  document.body.appendChild(backdrop);
+  window.__districtOptions = available; // full alphabetical list, used by the search filter
+}
+function filterDistrictSelect() {
+  const q = (document.getElementById('mDistrictSearch').value || '').trim().toLowerCase();
+  const all = window.__districtOptions || [];
+  const filtered = q ? all.filter(d => d.toLowerCase().includes(q)) : all;
+  const sel = document.getElementById('mDistrictSelect');
+  const prevValue = sel.value;
+  sel.innerHTML = filtered.length
+    ? `<option value="" disabled ${filtered.includes(prevValue) ? '' : 'selected'}>— ${filtered.length} match${filtered.length === 1 ? '' : 'es'} —</option>` + filtered.map(d => `<option value="${esc(d)}" ${d === prevValue ? 'selected' : ''}>${esc(d)}</option>`).join('')
+    : `<option disabled selected>No districts match "${esc(q)}"</option>`;
+}
+function selectDistrict(name) {
+  if (!name) return;
+  document.getElementById('mName').value = name;
+  const region = ME.organizationUnit.region;
+  const towns = townsFor(region, name);
+  document.getElementById('mMapWrap').innerHTML = towns.length ? renderIllustrativeMap(name, towns) : '';
+  const coverageWrap = document.getElementById('mCoverageWrap');
+  coverageWrap.classList.remove('hidden');
+  coverageWrap.innerHTML = `
+    <label class="field">Coverage Areas — loaded automatically</label>
+    <div class="coverage-grid" id="mCoverageGrid">
+      ${towns.length ? towns.map(t => `<label class="coverage-chip"><input type="checkbox" checked value="${esc(t)}"> ${esc(t)}</label>`).join('') : '<span style="color:var(--faint);font-size:0.8rem">No suggested towns on file for this district — add them below.</span>'}
+    </div>
+    <input type="text" id="mCoverageExtra" placeholder="Add another area, comma-separated" style="margin-top:10px">`;
+}
+async function createUnit(btn) {
+  const type = document.getElementById('mType').value;
+  let payload;
+  if (type === 'regional') {
+    const region = document.getElementById('mRegionSelect').value;
+    if (!region) { toast("Select a region", "err"); return; }
+    payload = {
+      name: `${region} Regional Office`, type: 'regional', region,
+      parentUnitId: document.getElementById('mParent').value,
+      coverageAreas: []
+    };
+  } else {
+    const manualInput = document.getElementById('mNameManual');
+    const name = (manualInput ? manualInput.value : document.getElementById('mName').value || '').trim();
+    if (!name) { toast("Select or enter a district name", "err"); return; }
+    let coverageAreas = [];
+    const grid = document.getElementById('mCoverageGrid');
+    if (grid) {
+      coverageAreas = Array.from(grid.querySelectorAll('input[type=checkbox]:checked')).map(c => c.value);
+      const extra = document.getElementById('mCoverageExtra');
+      if (extra && extra.value.trim()) coverageAreas = coverageAreas.concat(extra.value.split(',').map(s => s.trim()).filter(Boolean));
+    } else {
+      const manualCoverage = document.getElementById('mCoverage');
+      if (manualCoverage) coverageAreas = manualCoverage.value.split(',').map(s => s.trim()).filter(Boolean);
+    }
+    if (!coverageAreas.length) { toast("Add at least one coverage area", "err"); return; }
+    payload = { name, type: 'district', coverageAreas: Array.from(new Set(coverageAreas)) };
+  }
+  try {
+    const unit = await ecgPost("/ecg/org-units", payload);
+    if (unit.branchKey) {
+      document.getElementById('mKeyReveal').innerHTML = `<div class="key-reveal">${esc(unit.branchKey)}</div><p class="desc" style="color:var(--red)">Copy this now — it will not be shown again. Share it only with authorized branch staff.</p>`;
+      btn.closest('.modal-box').querySelector('.modal-actions').innerHTML = `<button class="btn btn--primary" onclick="this.closest('.modal-backdrop').remove(); switchTab('org')">Done</button>`;
+    } else {
+      toast("Organization unit created.");
+      btn.closest('.modal-backdrop').remove();
+      switchTab("org");
+    }
+  } catch (err) { toast(err.message, "err"); }
+}
+async function rotateBranchKey(unitId) {
+  try {
+    const data = await ecgPost(`/ecg/org-units/${unitId}/rotate-key`);
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    backdrop.innerHTML = `<div class="modal-box"><h3>New Branch Key</h3><p class="desc">Copy this now — it will not be shown again.</p>
+      <div class="key-reveal">${esc(data.branchKey)}</div>
+      <div class="modal-actions"><button class="btn btn--primary" onclick="this.closest('.modal-backdrop').remove()">Done</button></div></div>`;
+    document.body.appendChild(backdrop);
+  } catch (err) { toast(err.message, "err"); }
+}
+function editCoverage(unitId, current) {
+  const unit = (window.__orgUnits || []).find(u => u.id === unitId);
+  const towns = unit ? townsFor(unit.region, unit.name) : [];
+  const combined = Array.from(new Set([...(towns || []), ...(current || [])]));
+  if (!combined.length) {
+    const val = prompt("Coverage areas (comma-separated):", (current || []).join(', '));
+    if (val === null) return;
+    saveCoverage(unitId, val.split(',').map(s => s.trim()).filter(Boolean));
+    return;
+  }
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `
+    <div class="modal-box" style="max-width:520px">
+      <h3>Edit Coverage Areas</h3>
+      <p class="desc">${esc(unit.name)}${unit.region ? ' · ' + esc(unit.region) : ''}</p>
+      ${towns.length ? renderIllustrativeMap(unit.name, towns) : ''}
+      <div class="field-wrap">
+        <label class="field">Areas served — check what applies</label>
+        <div class="coverage-grid">
+          ${combined.map(t => `<label class="coverage-chip"><input type="checkbox" ${(current || []).includes(t) || towns.includes(t) ? 'checked' : ''} value="${esc(t)}"> ${esc(t)}</label>`).join('')}
+        </div>
+        <input type="text" id="ecExtra" placeholder="Add another area, comma-separated" style="margin-top:10px">
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="this.closest('.modal-backdrop').remove()">Cancel</button>
+        <button class="btn btn--primary" onclick="saveCoverageFromModal('${unitId}', this)">Save</button>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+}
+async function saveCoverageFromModal(unitId, btn) {
+  const box = btn.closest('.modal-box');
+  let areas = Array.from(box.querySelectorAll('.coverage-grid input:checked')).map(c => c.value);
+  const extra = box.querySelector('#ecExtra');
+  if (extra && extra.value.trim()) areas = areas.concat(extra.value.split(',').map(s => s.trim()).filter(Boolean));
+  await saveCoverage(unitId, Array.from(new Set(areas)));
+  btn.closest('.modal-backdrop').remove();
+}
+async function saveCoverage(unitId, areas) {
+  try {
+    await ecgPatch(`/ecg/org-units/${unitId}`, { coverageAreas: areas });
+    toast("Coverage updated.");
+    switchTab("org");
+  } catch (err) { toast(err.message, "err"); }
+}
+
+// ---- Staff ----
+async function renderStaff(content) {
+  const staff = await ecgGet("/ecg/staff");
+  content.innerHTML = `
+    <div class="panel">
+      <div class="panel__head"><h3>Staff In Your Scope</h3><p>Deactivating an account immediately revokes dashboard access.</p></div>
+      <table><thead><tr><th></th><th>Name</th><th>Email</th><th>Role</th><th>Assigned To</th><th>Status</th><th>Last Login</th><th></th></tr></thead>
+      <tbody>${staff.length ? staff.map(s => `
+        <tr>
+          <td><div class="table-avatar">${avatarFor(s)}</div></td>
+          <td>${esc(s.name)}${s.id === ME.staff.id ? ` <span style="color:var(--faint);font-size:0.72rem">(you)</span>` : ''}</td><td>${esc(s.email)}</td>
+          <td><span class="badge badge--${roleBadgeClass(s.role)}">${esc(formatRole(s.role))}</span></td>
+          <td><b>${esc(s.orgUnitName || '—')}</b>${s.orgUnitRegion ? `<div style="color:var(--muted);font-size:0.72rem">${esc(s.orgUnitRegion)}</div>` : ''}</td>
+          <td><span class="badge badge--${s.active ? 'active' : 'inactive'}">${s.active ? 'active' : 'inactive'}</span></td>
+          <td>${fmtDate(s.lastLoginAt)}</td>
+          <td>${s.id !== ME.staff.id ? `<button class="btn btn--sm ${s.active ? 'btn--danger' : ''}" onclick="toggleStaff('${s.id}', ${!s.active})">${s.active ? 'Deactivate' : 'Reactivate'}</button>` : `<button class="btn btn--sm" onclick="document.getElementById('avatarFileInput').click()">${getLocalAvatar(s.id) ? 'Change photo' : 'Add photo'}</button>`}</td>
+        </tr>`).join('') : '<tr><td colspan="8" class="empty-row">No staff visible in your scope.</td></tr>'}
+      </tbody></table>
+    </div>`;
+}
+async function toggleStaff(id, active) {
+  try { await ecgPatch(`/ecg/staff/${id}`, { active }); toast("Updated."); switchTab("staff"); }
+  catch (err) { toast(err.message, "err"); }
+}
+
+// ---- Invitations ----
+const INVITABLE_ROLES = {
+  hq_super_admin: ['hq_super_admin', 'hq_manager', 'hq_staff', 'regional_manager', 'regional_staff', 'station_manager', 'station_operator'],
+  hq_manager: ['hq_staff'],
+  regional_manager: ['regional_staff', 'station_manager', 'station_operator'],
+  station_manager: ['station_operator']
+};
+async function renderInvitations(content) {
+  if (!ME.permissions.canInviteStaff) { content.innerHTML = `<div class="panel">You don't have access to this section.</div>`; return; }
+  const [invites, units, catalog] = await Promise.all([ecgGet("/ecg/invitations"), ecgGet("/ecg/org-units"), loadPermCatalog()]);
+  const invitableRoles = INVITABLE_ROLES[ME.staff.role] || [];
+  const unitOptions = units.map(u => `<option value="${u.id}" ${u.id === ME.organizationUnit.id ? 'selected' : ''}>${esc(u.name)} (${u.type})</option>`).join('');
+  const grantable = catalog.grantable || [];
+  content.innerHTML = `
+    <div class="panel">
+      <div class="panel__head"><h3>Invite ECG Staff</h3><p>Organization and role are fixed by you here — the invitee can't change them during signup.</p></div>
+      <form onsubmit="return sendInvite(event)">
+        <div class="field-wrap"><label class="field">Work Email</label><input type="email" id="invEmail" required></div>
+        <div class="field-wrap"><label class="field">Role</label><select id="invRole">${invitableRoles.map(r => `<option value="${r}">${formatRole(r)}</option>`).join('')}</select></div>
+        <div class="field-wrap"><label class="field">Organization</label><select id="invUnit">${unitOptions}</select></div>
+        <div class="field-wrap"><label class="field">Permissions (in addition to the role's defaults)</label>
+          <div class="perm-grid">
+            ${grantable.length ? grantable.map(p => `<label class="perm-check"><input type="checkbox" value="${p}" class="inv-perm-cb"><span>${esc((PERM_LABELS[p] || [p])[0])}<span class="pdesc">${esc((PERM_LABELS[p] || ['', ''])[1] || '')}</span></span></label>`).join('') : '<span style="color:var(--faint);font-size:0.8rem">No additional permissions available to grant.</span>'}
+          </div>
+        </div>
+        <div style="height:6px"></div>
+        <button class="btn btn--primary" type="submit">Send Invitation</button>
+      </form>
+    </div>
+    <div class="panel">
+      <div class="panel__head"><h3>Pending Invitations</h3></div>
+      <table><thead><tr><th>Email</th><th>Role</th><th>Assigned To</th><th>Expires</th><th></th></tr></thead>
+      <tbody>${invites.length ? invites.map(i => `
+        <tr><td>${esc(i.email)}</td><td>${esc(formatRole(i.role))}</td><td>${esc(i.orgUnitName || '—')}</td><td>${fmtDate(i.expiresAt)}</td>
+        <td><button class="btn btn--sm btn--danger" onclick="revokeInvite('${i.id}')">Revoke</button></td></tr>`).join('') : '<tr><td colspan="5" class="empty-row">No pending invitations.</td></tr>'}
+      </tbody></table>
+    </div>`;
+}
+async function sendInvite(e) {
+  e.preventDefault();
+  try {
+    const permissions = Array.from(document.querySelectorAll('.inv-perm-cb:checked')).map(c => c.value);
+    const data = await ecgPost("/ecg/invitations", {
+      email: document.getElementById("invEmail").value.trim(),
+      role: document.getElementById("invRole").value,
+      orgUnitId: document.getElementById("invUnit").value,
+      permissions
+    });
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    backdrop.innerHTML = `<div class="modal-box"><h3>Invitation Created</h3><p class="desc">Share this link with ${esc(data.email)} — it will not be shown again here.</p>
+      <div class="key-reveal" style="font-size:0.78rem">${location.origin}${esc(data.acceptUrl)}</div>
+      <div class="modal-actions"><button class="btn btn--primary" onclick="this.closest('.modal-backdrop').remove(); switchTab('invitations')">Done</button></div></div>`;
+    document.body.appendChild(backdrop);
+  } catch (err) { toast(err.message, "err"); }
+  return false;
+}
+async function revokeInvite(id) {
+  try { await ecgDelete(`/ecg/invitations/${id}`); toast("Revoked."); switchTab("invitations"); }
+  catch (err) { toast(err.message, "err"); }
+}
+
+// ---- Audit Log ----
+async function renderAudit(content) {
+  const entries = await ecgGet("/ecg/audit-log?limit=150");
+  content.innerHTML = `
+    <div class="panel">
+      <div class="panel__head"><h3>Audit Log</h3><p>Who changed what, and when — scoped to your organization.</p></div>
+      <table><thead><tr><th>Time</th><th>Staff</th><th>Action</th><th>Unit</th></tr></thead>
+      <tbody>${entries.length ? entries.map(e => `
+        <tr><td>${fmtDate(e.createdAt)}</td><td>${esc(e.staffEmail || '—')}</td><td>${esc(e.action)}</td><td>${esc(e.orgUnitName || '—')}</td></tr>`).join('') : '<tr><td colspan="4" class="empty-row">No audit entries yet.</td></tr>'}
+      </tbody></table>
+    </div>`;
+}
+
+// ============================================================
+// POWER PLANTS
+// ============================================================
+async function renderPlants(content) {
+  const scope = ME.organizationUnit.type;
+  const region = scope === 'headquarters' ? '' : (ME.organizationUnit.region || '');
+  const plants = await ecgGet(`/ecg/plants${region ? `?region=${encodeURIComponent(region)}` : ''}`).catch(() => []);
+  const canManage = ME.permissions.canManagePowerPlants;
+  const totalCap = plants.reduce((s, p) => s + (p.capacityMW || 0), 0);
+  const totalOut = plants.reduce((s, p) => s + (p.currentOutputMW || 0), 0);
+  const sorted = [...plants].sort((a, b) => b.capacityMW - a.capacityMW);
+  const bars = sorted.map(p => {
+    const pct = p.capacityMW ? Math.round((p.currentOutputMW / p.capacityMW) * 100) : 0;
+    const color = p.status === 'offline' ? '#E4392E' : p.status === 'maintenance' || p.status === 'degraded' ? '#F2C230' : '#2FE08C';
+    return `<div class="stat-bar-row">
+      <div class="sbr-name" title="${esc(p.name)}">${esc(p.name)}</div>
+      <div class="sbr-track"><div class="sbr-fill" style="width:${Math.min(pct,100)}%;background:${color}"></div></div>
+      <div class="sbr-val" style="color:${color}">${p.currentOutputMW}/${p.capacityMW} MW</div>
+    </div>`;
+  }).join('');
+
+  content.innerHTML = `
+    <div class="ov-head"><div><h1>Power Plants</h1><p>${scope === 'headquarters' ? 'All generation assets, nationwide' : `Generation assets in ${esc(region || 'your region')}`}</p></div></div>
+    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:14px; margin-bottom:16px;">
+      ${statChip('🏭', plants.length, 'Power plants')}
+      ${statChip('⚡', totalCap.toLocaleString() + ' MW', 'Total capacity')}
+      ${statChip('📈', totalOut.toLocaleString() + ' MW', 'Current output')}
+      ${statChip('🚨', plants.filter(p => p.status === 'offline').length, 'Offline')}
+    </div>
+    <div class="panel">
+      <div class="panel__head"><div><h3>📊 Output vs. Capacity</h3><p>Current output as a share of rated capacity, by plant</p></div></div>
+      <div class="health-list">${bars || '<div class="empty-row">No power plants recorded yet.</div>'}</div>
+    </div>
+    <div class="panel">
+      <div class="panel__head">
+        <div><h3>Plant Registry</h3><p>Generation assets and their live status</p></div>
+        ${canManage ? `<button class="btn btn--primary btn--sm" onclick="openPlantModal()">+ Add Plant</button>` : ''}
+      </div>
+      <table><thead><tr><th>Name</th><th>Type</th><th>Region</th><th>Capacity</th><th>Output</th><th>Status</th>${canManage ? '<th></th>' : ''}</tr></thead>
+      <tbody>${plants.length ? plants.map(p => `
+        <tr>
+          <td><b>${esc(p.name)}</b></td>
+          <td style="text-transform:capitalize">${esc(p.plantType)}</td>
+          <td>${esc(p.region)}</td>
+          <td>${p.capacityMW} MW</td>
+          <td>${p.currentOutputMW} MW</td>
+          <td><span class="badge badge--${p.status}">${esc(p.status)}</span></td>
+          ${canManage ? `<td>
+            <button class="btn btn--sm" onclick='openPlantModal(${JSON.stringify(p)})'>Edit</button>
+            <button class="btn btn--sm btn--danger" style="margin-left:6px" onclick="deletePlant('${p.id}','${esc(p.name)}')">Delete</button>
+          </td>` : ''}
+        </tr>`).join('') : `<tr><td colspan="${canManage ? 7 : 6}" class="empty-row">No power plants recorded yet.</td></tr>`}
+      </tbody></table>
+    </div>`;
+}
+function openPlantModal(plant) {
+  const editing = !!plant;
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  const scope = ME.organizationUnit.type;
+  const fixedRegion = scope !== 'headquarters' ? (ME.organizationUnit.region || '') : '';
+  backdrop.innerHTML = `<div class="modal-box">
+    <h3>${editing ? 'Edit' : 'Add'} Power Plant</h3>
+    <div class="field-wrap"><label class="field">Name</label><input id="pfName" value="${editing ? esc(plant.name) : ''}" placeholder="e.g. Akosombo Hydro Station"></div>
+    <div class="field-wrap"><label class="field">Type</label>
+      <select id="pfType">${['hydro','thermal','solar','wind','other'].map(t => `<option value="${t}" ${editing && plant.plantType === t ? 'selected' : ''}>${t[0].toUpperCase()+t.slice(1)}</option>`).join('')}</select>
+    </div>
+    <div class="field-wrap"><label class="field">Region</label>
+      ${fixedRegion ? `<div class="static-field">${esc(fixedRegion)}</div><input type="hidden" id="pfRegion" value="${esc(fixedRegion)}">`
+        : `<select id="pfRegion">${GHANA_REGIONS.map(r => `<option value="${r}" ${editing && plant.region === r ? 'selected' : ''}>${r}</option>`).join('')}</select>`}
+    </div>
+    <div class="field-wrap"><label class="field">Capacity (MW)</label><input id="pfCap" type="number" min="0" value="${editing ? plant.capacityMW : ''}"></div>
+    <div class="field-wrap"><label class="field">Current Output (MW)</label><input id="pfOut" type="number" min="0" value="${editing ? plant.currentOutputMW : 0}"></div>
+    <div class="field-wrap"><label class="field">Status</label>
+      <select id="pfStatus">${['operational','degraded','maintenance','offline'].map(s => `<option value="${s}" ${editing && plant.status === s ? 'selected' : ''}>${s[0].toUpperCase()+s.slice(1)}</option>`).join('')}</select>
+    </div>
+    <div class="field-wrap"><label class="field">Operator</label><input id="pfOperator" value="${editing ? esc(plant.operator || '') : 'ECG / VRA'}"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="this.closest('.modal-backdrop').remove()">Cancel</button>
+      <button class="btn btn--primary" onclick="savePlant(${editing ? `'${plant.id}'` : 'null'})">${editing ? 'Save' : 'Add'}</button>
+    </div>
+  </div>`;
+  document.body.appendChild(backdrop);
+}
+async function savePlant(id) {
+  const body = {
+    name: document.getElementById('pfName').value.trim(),
+    plantType: document.getElementById('pfType').value,
+    region: document.getElementById('pfRegion').value,
+    capacityMW: Number(document.getElementById('pfCap').value),
+    currentOutputMW: Number(document.getElementById('pfOut').value),
+    status: document.getElementById('pfStatus').value,
+    operator: document.getElementById('pfOperator').value.trim()
+  };
+  try {
+    if (id) await ecgPatch(`/ecg/plants/${id}`, body); else await ecgPost('/ecg/plants', body);
+    document.querySelector('.modal-backdrop').remove();
+    toast(id ? "Plant updated." : "Plant added.");
+    switchTab('plants');
+  } catch (err) { toast(err.message, "err"); }
+}
+async function deletePlant(id, name) {
+  if (!confirm(`Delete "${name}"? This cannot be undone.`)) return;
+  try { await ecgDelete(`/ecg/plants/${id}`); toast("Plant deleted."); switchTab('plants'); }
+  catch (err) { toast(err.message, "err"); }
+}
+
+// ============================================================
+// TRANSMISSION
+// ============================================================
+async function renderTransmission(content) {
+  const scope = ME.organizationUnit.type;
+  const region = scope === 'headquarters' ? '' : (ME.organizationUnit.region || '');
+  const lines = await ecgGet(`/ecg/transmission-lines${region ? `?region=${encodeURIComponent(region)}` : ''}`).catch(() => []);
+  const canManage = ME.permissions.canManageTransmission;
+  const faulted = lines.filter(l => l.status === 'fault' || l.status === 'offline').length;
+  const avgLoad = lines.length ? Math.round(lines.reduce((s, l) => s + (l.loadPercent || 0), 0) / lines.length) : 0;
+
+  content.innerHTML = `
+    <div class="ov-head"><div><h1>Transmission</h1><p>${scope === 'headquarters' ? 'All transmission lines, nationwide' : `Transmission lines in ${esc(region || 'your region')}`}</p></div></div>
+    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:14px; margin-bottom:16px;">
+      ${statChip('🗼', lines.length, 'Transmission lines')}
+      ${statChip('📊', avgLoad + '%', 'Average load')}
+      ${statChip('🚨', faulted, 'Fault / offline')}
+      ${statChip('✅', lines.filter(l => l.status === 'active').length, 'Active')}
+    </div>
+    <div class="panel">
+      <div class="panel__head"><div><h3>🔌 Network Schematic</h3><p>Substation-to-substation lines, colored by status</p></div></div>
+      ${renderTransmissionSvg(lines)}
+    </div>
+    <div class="panel">
+      <div class="panel__head">
+        <div><h3>Line Registry</h3><p>Voltage, length, load and live status</p></div>
+        ${canManage ? `<button class="btn btn--primary btn--sm" onclick="openLineModal()">+ Add Line</button>` : ''}
+      </div>
+      <table><thead><tr><th>Name</th><th>From → To</th><th>Region</th><th>Voltage</th><th>Load</th><th>Status</th>${canManage ? '<th></th>' : ''}</tr></thead>
+      <tbody>${lines.length ? lines.map(l => `
+        <tr>
+          <td><b>${esc(l.name)}</b></td>
+          <td>${esc(l.fromSubstation)} → ${esc(l.toSubstation)}</td>
+          <td>${esc(l.region)}</td>
+          <td>${l.voltageKV} kV</td>
+          <td>${l.loadPercent}%</td>
+          <td><span class="badge badge--${l.status}">${esc(l.status)}</span></td>
+          ${canManage ? `<td>
+            <button class="btn btn--sm" onclick='openLineModal(${JSON.stringify(l)})'>Edit</button>
+            <button class="btn btn--sm btn--danger" style="margin-left:6px" onclick="deleteLine('${l.id}','${esc(l.name)}')">Delete</button>
+          </td>` : ''}
+        </tr>`).join('') : `<tr><td colspan="${canManage ? 7 : 6}" class="empty-row">No transmission lines recorded yet.</td></tr>`}
+      </tbody></table>
+    </div>`;
+}
+function renderTransmissionSvg(lines) {
+  if (!lines.length) return `<div class="empty-row">No transmission lines to display.</div>`;
+  const subs = new Map();
+  lines.forEach(l => { [l.fromSubstation, l.toSubstation].forEach(s => { if (!subs.has(s)) subs.set(s, subs.size); }); });
+  const names = Array.from(subs.keys());
+  const n = names.length;
+  const W = 780, Hh = 40 + Math.ceil(n / 4) * 90;
+  const cols = Math.min(4, n) || 1;
+  const pos = {};
+  names.forEach((name, i) => {
+    const col = i % cols, row = Math.floor(i / cols);
+    pos[name] = { x: 90 + col * ((W - 180) / Math.max(cols - 1, 1) || 1), y: 60 + row * 90 };
+  });
+  const statusColor = { active: '#2FE08C', fault: '#E4392E', maintenance: '#F2C230', offline: '#576074' };
+  const edges = lines.map(l => {
+    const a = pos[l.fromSubstation], b = pos[l.toSubstation];
+    const c = statusColor[l.status] || '#576074';
+    return `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="${c}" stroke-width="${2 + Math.min(l.loadPercent||0,100)/25}" opacity="0.85"/>`;
+  }).join('');
+  const nodes = names.map(name => {
+    const p = pos[name];
+    return `<circle cx="${p.x}" cy="${p.y}" r="7" fill="#131824" stroke="#5B8CF9" stroke-width="2"/>
+      <text x="${p.x}" y="${p.y - 14}" text-anchor="middle" font-size="11" fill="#8E99B0" font-family="Inter">${esc(name)}</text>`;
+  }).join('');
+  return `<svg viewBox="0 0 ${W} ${Hh}" style="width:100%; height:auto;">${edges}${nodes}</svg>
+    <div class="health-legend">
+      <span><i class="dot" style="background:#2FE08C"></i>Active</span>
+      <span><i class="dot" style="background:#F2C230"></i>Maintenance</span>
+      <span><i class="dot" style="background:#E4392E"></i>Fault</span>
+      <span><i class="dot" style="background:#576074"></i>Offline</span>
+    </div>`;
+}
+function openLineModal(line) {
+  const editing = !!line;
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  const scope = ME.organizationUnit.type;
+  const fixedRegion = scope !== 'headquarters' ? (ME.organizationUnit.region || '') : '';
+  backdrop.innerHTML = `<div class="modal-box">
+    <h3>${editing ? 'Edit' : 'Add'} Transmission Line</h3>
+    <div class="field-wrap"><label class="field">Name</label><input id="lfName" value="${editing ? esc(line.name) : ''}" placeholder="e.g. Tema–Achimota 161kV"></div>
+    <div class="field-wrap"><label class="field">From Substation</label><input id="lfFrom" value="${editing ? esc(line.fromSubstation) : ''}"></div>
+    <div class="field-wrap"><label class="field">To Substation</label><input id="lfTo" value="${editing ? esc(line.toSubstation) : ''}"></div>
+    <div class="field-wrap"><label class="field">Region</label>
+      ${fixedRegion ? `<div class="static-field">${esc(fixedRegion)}</div><input type="hidden" id="lfRegion" value="${esc(fixedRegion)}">`
+        : `<select id="lfRegion">${GHANA_REGIONS.map(r => `<option value="${r}" ${editing && line.region === r ? 'selected' : ''}>${r}</option>`).join('')}</select>`}
+    </div>
+    <div class="field-wrap"><label class="field">Voltage (kV)</label><input id="lfVoltage" type="number" min="0" value="${editing ? line.voltageKV : ''}"></div>
+    <div class="field-wrap"><label class="field">Length (km)</label><input id="lfLength" type="number" min="0" value="${editing ? (line.lengthKm ?? '') : ''}"></div>
+    <div class="field-wrap"><label class="field">Load (%)</label><input id="lfLoad" type="number" min="0" max="150" value="${editing ? line.loadPercent : 0}"></div>
+    <div class="field-wrap"><label class="field">Status</label>
+      <select id="lfStatus">${['active','fault','maintenance','offline'].map(s => `<option value="${s}" ${editing && line.status === s ? 'selected' : ''}>${s[0].toUpperCase()+s.slice(1)}</option>`).join('')}</select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="this.closest('.modal-backdrop').remove()">Cancel</button>
+      <button class="btn btn--primary" onclick="saveLine(${editing ? `'${line.id}'` : 'null'})">${editing ? 'Save' : 'Add'}</button>
+    </div>
+  </div>`;
+  document.body.appendChild(backdrop);
+}
+async function saveLine(id) {
+  const body = {
+    name: document.getElementById('lfName').value.trim(),
+    fromSubstation: document.getElementById('lfFrom').value.trim(),
+    toSubstation: document.getElementById('lfTo').value.trim(),
+    region: document.getElementById('lfRegion').value,
+    voltageKV: Number(document.getElementById('lfVoltage').value),
+    lengthKm: document.getElementById('lfLength').value ? Number(document.getElementById('lfLength').value) : null,
+    loadPercent: Number(document.getElementById('lfLoad').value),
+    status: document.getElementById('lfStatus').value
+  };
+  try {
+    if (id) await ecgPatch(`/ecg/transmission-lines/${id}`, body); else await ecgPost('/ecg/transmission-lines', body);
+    document.querySelector('.modal-backdrop').remove();
+    toast(id ? "Line updated." : "Line added.");
+    switchTab('transmission');
+  } catch (err) { toast(err.message, "err"); }
+}
+async function deleteLine(id, name) {
+  if (!confirm(`Delete "${name}"? This cannot be undone.`)) return;
+  try { await ecgDelete(`/ecg/transmission-lines/${id}`); toast("Line deleted."); switchTab('transmission'); }
+  catch (err) { toast(err.message, "err"); }
+}
+
+// ============================================================
+// REGIONS (HQ-level structural overview of all 16 regions)
+// ============================================================
+async function renderRegions(content) {
+  const regions = await ecgGet('/ecg/regions/summary').catch(() => []);
+  const canEdit = ME.organizationUnit.type === 'headquarters' || ME.organizationUnit.type === 'regional';
+  const sorted = [...regions].sort((a, b) => b.totalCapacityMW - a.totalCapacityMW);
+  const bars = sorted.map(r => {
+    const color = r.hasRegionalOffice ? '#5B8CF9' : '#576074';
+    return `<div class="stat-bar-row">
+      <div class="sbr-name" title="${esc(r.region)}">${esc(r.region)}</div>
+      <div class="sbr-track"><div class="sbr-fill" style="width:${Math.min((r.totalCapacityMW / (sorted[0].totalCapacityMW || 1)) * 100, 100)}%;background:${color}"></div></div>
+      <div class="sbr-val" style="color:${color}">${r.totalCapacityMW} MW</div>
+    </div>`;
+  }).join('');
+  content.innerHTML = `
+    <div class="ov-head"><div><h1>Regions</h1><p>Ghana's 16 regions — structure, generation and staffing at a glance</p></div></div>
+    <div class="panel">
+      <div class="panel__head"><div><h3>⚡ Generation Capacity by Region</h3></div></div>
+      <div class="health-list">${bars || '<div class="empty-row">No data yet.</div>'}</div>
+    </div>
+    <div class="panel">
+      <div class="panel__head"><div><h3>Region Directory</h3><p>Every region of Ghana, whether ECG has a regional office established, and its live asset counts</p></div></div>
+      <table><thead><tr><th>Region</th><th>Regional Office</th><th>Districts</th><th>Staff</th><th>Plants</th><th>Capacity</th><th>Lines</th><th>Customers</th>${canEdit ? '<th></th>' : ''}</tr></thead>
+      <tbody>${regions.map(r => `
+        <tr>
+          <td><b>${esc(r.region)}</b>${r.capitalTown ? `<div style="color:var(--faint);font-size:0.74rem">${esc(r.capitalTown)}</div>` : ''}</td>
+          <td><span class="badge badge--${r.hasRegionalOffice ? 'active' : 'inactive'}">${r.hasRegionalOffice ? 'Established' : 'Not yet established'}</span></td>
+          <td>${r.districtCount}</td>
+          <td>${r.staffCount}</td>
+          <td>${r.plantCount}</td>
+          <td>${r.totalCapacityMW} MW</td>
+          <td>${r.transmissionLineCount}</td>
+          <td>${r.customerCount != null ? r.customerCount.toLocaleString() : '<span style="color:var(--faint)">—</span>'}</td>
+          ${canEdit ? `<td><button class="btn btn--sm" onclick='openRegionProfileModal(${JSON.stringify(r)})'>Edit</button></td>` : ''}
+        </tr>`).join('')}
+      </tbody></table>
+    </div>`;
+}
+function openRegionProfileModal(r) {
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `<div class="modal-box">
+    <h3>${esc(r.region)} — Region Profile</h3>
+    <div class="field-wrap"><label class="field">Capital Town</label><input id="rfCapital" value="${esc(r.capitalTown || '')}"></div>
+    <div class="field-wrap"><label class="field">Population</label><input id="rfPop" type="number" min="0" value="${r.population ?? ''}"></div>
+    <div class="field-wrap"><label class="field">Customer Count</label><input id="rfCust" type="number" min="0" value="${r.customerCount ?? ''}"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="this.closest('.modal-backdrop').remove()">Cancel</button>
+      <button class="btn btn--primary" onclick="saveRegionProfile('${esc(r.region)}')">Save</button>
+    </div>
+  </div>`;
+  document.body.appendChild(backdrop);
+}
+async function saveRegionProfile(region) {
+  const body = {
+    capitalTown: document.getElementById('rfCapital').value.trim(),
+    population: document.getElementById('rfPop').value ? Number(document.getElementById('rfPop').value) : null,
+    customerCount: document.getElementById('rfCust').value ? Number(document.getElementById('rfCust').value) : null
+  };
+  try {
+    await ecgPatch(`/ecg/regions/${encodeURIComponent(region)}`, body);
+    document.querySelector('.modal-backdrop').remove();
+    toast("Region profile updated.");
+    switchTab('regions');
+  } catch (err) { toast(err.message, "err"); }
+}
+
+// ============================================================
+// ALERTS & ANNOUNCEMENTS
+// ============================================================
+async function renderAlerts(content) {
+  const items = await ecgGet('/ecg/announcements').catch(() => []);
+  const canManage = ME.permissions.canManageAnnouncements;
+  const SEV = [{ key: 'info', label: 'Info', color: '#5B8CF9' }, { key: 'warning', label: 'Warning', color: '#F2C230' }, { key: 'critical', label: 'Critical', color: '#E4392E' }];
+  let counts = SEV.map(s => ({ ...s, count: items.filter(a => a.severity === s.key).length }));
+  const total = counts.reduce((a, c) => a + c.count, 0) || 1;
+  const R = 54, C = 2 * Math.PI * R;
+  let offset = 0;
+  const segs = counts.map(c => {
+    const dash = (c.count / total) * C;
+    const seg = `<circle cx="70" cy="70" r="${R}" fill="none" stroke="${c.color}" stroke-width="20" stroke-dasharray="${dash.toFixed(1)} ${(C - dash).toFixed(1)}" stroke-dashoffset="${(-offset).toFixed(1)}" transform="rotate(-90 70 70)"/>`;
+    offset += dash; return seg;
+  }).join('');
+  const legend = counts.map(c => `<div class="donut-legend-row"><span class="left"><i class="dot" style="background:${c.color}"></i>${c.label}</span><span class="cnt">${c.count}</span></div>`).join('');
+
+  content.innerHTML = `
+    <div class="ov-head"><div><h1>Alerts &amp; Announcements</h1><p>Staff and public-facing notices, scoped to your organization</p></div></div>
+    <div class="dash-grid" style="grid-template-columns: 1fr 320px;">
+      <div class="dash-col">
+        <div class="panel">
+          <div class="panel__head">
+            <div><h3>Announcements</h3><p>Most recent first</p></div>
+            ${canManage ? `<button class="btn btn--primary btn--sm" onclick="openAnnouncementModal()">+ New Announcement</button>` : ''}
+          </div>
+          ${items.length ? items.map(a => `
+            <div class="activity-item" style="align-items:flex-start;">
+              <div class="activity-ic activity-ic--${a.severity === 'critical' ? 'warn' : a.severity === 'warning' ? 'warn' : 'info'}">${a.severity === 'critical' ? '!' : a.severity === 'warning' ? '!' : 'i'}</div>
+              <div class="activity-body" style="flex:1;">
+                <b>${esc(a.title)}</b>
+                <span class="sub">${esc(a.orgUnitName)} · ${esc(a.audience)} · <span class="badge badge--${a.severity}">${esc(a.severity)}</span> ${a.active ? '' : '<span class="badge badge--muted">archived</span>'}</span>
+                ${a.body ? `<p style="margin-top:6px; color:var(--muted); font-size:0.85rem;">${esc(a.body)}</p>` : ''}
+              </div>
+              <div class="activity-time" style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
+                ${timeAgo(a.createdAt)}
+                ${canManage ? `<button class="btn btn--sm" onclick="toggleAnnouncement('${a.id}', ${!a.active})">${a.active ? 'Archive' : 'Reactivate'}</button>` : ''}
+              </div>
+            </div>`).join('') : '<div class="empty-row">No announcements yet.</div>'}
+        </div>
+      </div>
+      <div class="dash-col">
+        <div class="panel">
+          <div class="panel__head"><div><h3>🥧 By Severity</h3></div></div>
+          <div class="donut-wrap">
+            <svg viewBox="0 0 140 140" style="width:120px;height:120px;flex-shrink:0">
+              ${segs}<circle cx="70" cy="70" r="${R - 14}" fill="var(--panel)"/>
+              <text x="70" y="66" text-anchor="middle" font-size="20" font-weight="900" fill="#F5F7FB" font-family="Inter">${items.length}</text>
+              <text x="70" y="82" text-anchor="middle" font-size="8" fill="#8E99B0" font-family="Inter" letter-spacing="1">TOTAL</text>
+            </svg>
+            <div class="donut-legend">${legend}</div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+function openAnnouncementModal() {
+  const scope = ME.organizationUnit.type;
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `<div class="modal-box">
+    <h3>New Announcement</h3>
+    <div class="field-wrap"><label class="field">Title</label><input id="afTitle" placeholder="e.g. Scheduled maintenance this weekend"></div>
+    <div class="field-wrap"><label class="field">Body</label><textarea id="afBody" rows="4" placeholder="Details…"></textarea></div>
+    <div class="field-wrap"><label class="field">Severity</label>
+      <select id="afSeverity">${['info','warning','critical'].map(s => `<option value="${s}">${s[0].toUpperCase()+s.slice(1)}</option>`).join('')}</select>
+    </div>
+    <div class="field-wrap"><label class="field">Audience</label>
+      <select id="afAudience">${['staff','public','both'].map(s => `<option value="${s}">${s[0].toUpperCase()+s.slice(1)}</option>`).join('')}</select>
+    </div>
+    <div class="field-wrap"><label class="field">Scope</label>
+      <select id="afScope" onchange="document.getElementById('afScope').value">
+        ${scope === 'headquarters' ? `<option value="nationwide">Nationwide</option><option value="regional">Specific region</option><option value="district">Specific district</option>` : `<option value="${scope === 'regional' ? 'regional' : 'district'}">${scope === 'regional' ? esc(ME.organizationUnit.region) + ' (your region)' : esc(ME.organizationUnit.name) + ' (your station)'}</option>`}
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="this.closest('.modal-backdrop').remove()">Cancel</button>
+      <button class="btn btn--primary" onclick="saveAnnouncement()">Publish</button>
+    </div>
+  </div>`;
+  document.body.appendChild(backdrop);
+}
+async function saveAnnouncement() {
+  const body = {
+    title: document.getElementById('afTitle').value.trim(),
+    body: document.getElementById('afBody').value.trim(),
+    severity: document.getElementById('afSeverity').value,
+    audience: document.getElementById('afAudience').value,
+    scope: document.getElementById('afScope').value,
+    orgUnitId: ME.organizationUnit.type !== 'headquarters' ? ME.organizationUnit.id : undefined
+  };
+  if (!body.title) { toast("Title is required.", "err"); return; }
+  try {
+    await ecgPost('/ecg/announcements', body);
+    document.querySelector('.modal-backdrop').remove();
+    toast("Announcement published.");
+    switchTab('alerts');
+  } catch (err) { toast(err.message, "err"); }
+}
+async function toggleAnnouncement(id, active) {
+  try { await ecgPatch(`/ecg/announcements/${id}`, { active }); toast(active ? "Reactivated." : "Archived."); switchTab('alerts'); }
+  catch (err) { toast(err.message, "err"); }
+}
+
+// ============================================================
+// REPORTS & ANALYTICS
+// ============================================================
+async function renderAnalytics(content) {
+  const data = await ecgGet('/ecg/analytics/overview').catch(() => null);
+  if (!data) { content.innerHTML = `<div class="panel">Analytics are unavailable right now.</div>`; return; }
+  const maxTrend = Math.max(1, ...data.dailyEventTrend.map(d => d.count));
+  const pts = data.dailyEventTrend.map((d, i) => {
+    const x = data.dailyEventTrend.length > 1 ? (i / (data.dailyEventTrend.length - 1)) * 680 : 0;
+    const y = 140 - (d.count / maxTrend) * 120;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const TYPE_COLOR = { outage: '#E4392E', restoration: '#2FE08C', maintenance: '#F2C230', advisory: '#5B8CF9' };
+  const typeBars = data.eventsByType.map(t => `<div class="stat-bar-row">
+      <div class="sbr-name" style="text-transform:capitalize">${esc(t.type)}</div>
+      <div class="sbr-track"><div class="sbr-fill" style="width:${Math.min((t.count / Math.max(1, ...data.eventsByType.map(x=>x.count))) * 100, 100)}%;background:${TYPE_COLOR[t.type] || '#5B8CF9'}"></div></div>
+      <div class="sbr-val">${t.count}</div>
+    </div>`).join('') || '<div class="empty-row">No events yet.</div>';
+
+  content.innerHTML = `
+    <div class="ov-head"><div><h1>Reports &amp; Analytics</h1><p>Real, server-aggregated figures for your organization's scope</p></div></div>
+    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:14px; margin-bottom:16px;">
+      ${statChip('🏭', data.plants.count, `Power plants · ${data.plants.capacityMW} MW`)}
+      ${statChip('🗼', data.transmission.count, `Transmission lines · ${data.transmission.avgLoadPercent}% avg load`)}
+      ${statChip('👥', data.activeStaffCount, 'Active staff')}
+      ${statChip('📅', data.dailyEventTrend.reduce((s,d)=>s+d.count,0), 'Events (last 30 days)')}
+    </div>
+    <div class="dash-grid" style="grid-template-columns: 1.4fr 1fr;">
+      <div class="dash-col">
+        <div class="panel">
+          <div class="panel__head"><div><h3>📈 Daily Event Volume — Last 30 Days</h3></div></div>
+          <svg viewBox="0 0 700 160" style="width:100%; height:auto;">
+            <polyline points="${pts}" fill="none" stroke="#5B8CF9" stroke-width="2.5"/>
+            ${data.dailyEventTrend.length ? `<polygon points="0,140 ${pts} 680,140" fill="#5B8CF9" opacity="0.12"/>` : ''}
+          </svg>
+          ${!data.dailyEventTrend.length ? '<div class="empty-row">No events in the last 30 days.</div>' : ''}
+        </div>
+      </div>
+      <div class="dash-col">
+        <div class="panel">
+          <div class="panel__head"><div><h3>Events by Type</h3></div></div>
+          <div class="health-list">${typeBars}</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ============================================================
+// SETTINGS
+// ============================================================
+async function renderSettings(content) {
+  const s = await ecgGet('/ecg/settings').catch(() => ({}));
+  content.innerHTML = `
+    <div class="ov-head"><div><h1>Settings</h1><p>Preferences for ${esc(ME.organizationUnit.name)}</p></div></div>
+    <div class="panel" style="max-width:640px;">
+      <div class="panel__head"><div><h3>Notifications</h3></div></div>
+      <div class="field-wrap" style="display:flex; align-items:center; justify-content:space-between;">
+        <label class="field" style="margin:0;">Notify on new outage</label>
+        <label class="toggle-switch"><input type="checkbox" id="stNewOutage" ${s.notifyOnNewOutage ? 'checked' : ''}><span class="slider"></span></label>
+      </div>
+      <div class="field-wrap" style="display:flex; align-items:center; justify-content:space-between;">
+        <label class="field" style="margin:0;">Notify on restoration</label>
+        <label class="toggle-switch"><input type="checkbox" id="stRestoration" ${s.notifyOnRestoration ? 'checked' : ''}><span class="slider"></span></label>
+      </div>
+      <div class="field-wrap"><label class="field">Escalate unresolved outages after (minutes)</label><input id="stEscalation" type="number" min="5" value="${s.outageEscalationMinutes ?? 60}"></div>
+      <div class="field-wrap"><label class="field">Reserve margin warning threshold (%)</label><input id="stReserve" type="number" min="0" max="100" value="${s.reserveMarginWarningPct ?? 15}"></div>
+      <div class="panel__head" style="margin-top:8px;"><div><h3>Public Contact</h3></div></div>
+      <div class="field-wrap"><label class="field">Contact Email</label><input id="stEmail" value="${esc(s.publicContactEmail || '')}"></div>
+      <div class="field-wrap"><label class="field">Contact Phone</label><input id="stPhone" value="${esc(s.publicContactPhone || '')}"></div>
+      <div class="modal-actions" style="justify-content:flex-start; padding-top:8px;">
+        <button class="btn btn--primary" onclick="saveSettings()">Save Changes</button>
+      </div>
+    </div>`;
+}
+async function saveSettings() {
+  const body = {
+    notifyOnNewOutage: document.getElementById('stNewOutage').checked,
+    notifyOnRestoration: document.getElementById('stRestoration').checked,
+    outageEscalationMinutes: Number(document.getElementById('stEscalation').value),
+    reserveMarginWarningPct: Number(document.getElementById('stReserve').value),
+    publicContactEmail: document.getElementById('stEmail').value.trim(),
+    publicContactPhone: document.getElementById('stPhone').value.trim()
+  };
+  try { await ecgPatch('/ecg/settings', body); toast("Settings saved."); }
+  catch (err) { toast(err.message, "err"); }
+}
+
+// ============================================================
+// INTEGRATIONS (HQ only)
+// ============================================================
+async function renderIntegrations(content) {
+  const items = await ecgGet('/ecg/integrations').catch(() => []);
+  const canManage = ME.permissions.canManageIntegrations;
+  const byCat = {};
+  items.forEach(i => { (byCat[i.category] ||= []).push(i); });
+  const CAT_LABEL = { notifications: 'Notifications', weather: 'Weather', maps: 'Maps', payments: 'Payments', monitoring: 'Monitoring' };
+  content.innerHTML = `
+    <div class="ov-head"><div><h1>Integrations</h1><p>Third-party services this deployment connects to</p></div></div>
+    ${Object.keys(byCat).map(cat => `
+      <div class="panel">
+        <div class="panel__head"><div><h3>${esc(CAT_LABEL[cat] || cat)}</h3></div></div>
+        ${byCat[cat].map(i => `
+          <div class="activity-item">
+            <div class="activity-ic activity-ic--${i.connected ? 'ok' : 'info'}">${i.connected ? '✓' : '○'}</div>
+            <div class="activity-body" style="flex:1;"><b>${esc(i.name)}</b><span class="sub">${esc(i.description || '')}</span></div>
+            <div style="display:flex; align-items:center; gap:10px;">
+              <span class="badge badge--${i.connected ? 'connected' : 'disconnected'}">${i.connected ? 'Connected' : 'Disconnected'}</span>
+              ${canManage ? `<label class="toggle-switch"><input type="checkbox" ${i.connected ? 'checked' : ''} onchange="toggleIntegration('${i.key}', this.checked)"><span class="slider"></span></label>` : ''}
+            </div>
+          </div>`).join('')}
+      </div>`).join('') || '<div class="panel">No integrations configured.</div>'}`;
+}
+async function toggleIntegration(key, connected) {
+  try { await ecgPatch(`/ecg/integrations/${key}`, { connected }); toast(connected ? "Connected." : "Disconnected."); }
+  catch (err) { toast(err.message, "err"); switchTab('integrations'); }
+}
+
+// ============================================================
+// SYSTEM HEALTH
+// ============================================================
+async function renderSystemHealth(content) {
+  const h = await ecgGet('/ecg/system-health').catch(() => null);
+  if (!h) { content.innerHTML = `<div class="panel">System health is unavailable right now.</div>`; return; }
+  const gauges = [
+    { label: 'Database', ok: h.database.ok, sub: h.database.state },
+    { label: 'Active Outage Events', value: h.operations.activeOutageEvents, warn: h.operations.activeOutageEvents > 0 },
+    { label: 'Active Power Incidents', value: h.operations.activePowerIncidents, warn: h.operations.activePowerIncidents > 0 },
+    { label: 'Plants Offline/Maint.', value: h.operations.plantsOffline, warn: h.operations.plantsOffline > 0 },
+    { label: 'Lines Faulted/Offline', value: h.operations.linesFaulted, warn: h.operations.linesFaulted > 0 },
+    { label: 'Staff Online (15 min)', value: `${h.staff.onlineLast15Min}/${h.staff.totalActive}` }
+  ];
+  content.innerHTML = `
+    <div class="ov-head"><div><h1>System Health</h1><p>Live, server-derived operational status — checked ${fmtDate(h.checkedAt)}</p></div></div>
+    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:14px; margin-bottom:16px;">
+      ${gauges.map(g => `<div class="panel" style="padding:16px;">
+        <div style="display:flex; align-items:center; justify-content:space-between;">
+          <span style="color:var(--muted); font-size:0.8rem;">${esc(g.label)}</span>
+          <span style="width:9px; height:9px; border-radius:50%; background:${g.ok === false ? '#E4392E' : g.warn ? '#F2C230' : '#2FE08C'};"></span>
+        </div>
+        <div style="font-size:22px; font-weight:800; margin-top:6px;">${g.value !== undefined ? g.value : (g.ok ? 'Online' : 'Offline')}</div>
+        ${g.sub ? `<div style="color:var(--faint); font-size:0.74rem; text-transform:capitalize;">${esc(g.sub)}</div>` : ''}
+      </div>`).join('')}
+    </div>
+    <div class="panel">
+      <div class="panel__head"><div><h3>⚙️ API Process</h3></div></div>
+      <table><tbody>
+        <tr><td>Uptime</td><td>${Math.floor(h.api.uptimeSeconds / 3600)}h ${Math.floor((h.api.uptimeSeconds % 3600) / 60)}m</td></tr>
+        <tr><td>Memory (heap used / total)</td><td>${h.api.memoryUsedMB} MB / ${h.api.memoryTotalMB} MB</td></tr>
+        <tr><td>Node.js version</td><td>${esc(h.api.nodeVersion)}</td></tr>
+      </tbody></table>
+    </div>`;
+}
+
+// ============================================================
+// INIT
+// ============================================================
+(function init() {
+  const params = new URLSearchParams(location.search);
+  const inviteToken = params.get('invite');
+  if (inviteToken) {
+    switchAuthTab('invite');
+    document.getElementById('inviteTokenInput').value = inviteToken;
+    lookupInvite();
+  }
+  if (getToken()) {
+    bootDashboard();
+  }
+})();
+</script>
+</body>
+</html>

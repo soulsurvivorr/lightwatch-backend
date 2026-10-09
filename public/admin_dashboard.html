@@ -1,0 +1,3127 @@
+<!doctype html>
+<html lang="en">
+ <head><script>window["__codeletBootstrap__"]=JSON.parse('{"A":"A","B":"20260714-05-1435aa9"}');</script><script src="/_sdk/f432b76fb310b513.telemetry_sdk.js" integrity="sha512-9FJQ55EKmmqhyyik8BhrMVfm0+iYYfb8uOlRsjtkxJMEI97qOVEI4PnHohDjQAtvAep0IOEpdQ64eki0sz62ug=="></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <link rel="icon" href="/images/dev-logo.png?v=20261009" type="image/png">
+  <title>LightWatch Admin</title>
+  <style>
+  :root {
+    --brand: #F2B33D; --brand-dim: #3A2C12; --brand-ink: #241a05;
+    --brand2: #4F86F7; --brand2-dim: #16233F;
+    --amber: #F2B33D; --red: #FF5C66; --red-dim: #3A1418; --green: #35D07F; --green-dim: #143122;
+
+    --bg: #07090D; --bg-mid: #0B0E15;
+    --panel: #10141D; --panel2: #151A25; --panel-raised: #181E2B;
+    --border: #232A38; --border2: #2E374A;
+    --txt: #F3F5F9; --muted: #9AA4B8; --faint: #5C6578;
+
+    --font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --display: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --r-sm: 8px; --r-md: 12px; --r-lg: 18px; --r-xl: 26px;
+    --sidebar-w: 248px; --bottom-nav-h: 64px;
+
+    --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+    --ease-smooth: cubic-bezier(0.4, 0, 0.2, 1);
+    --ease-out: cubic-bezier(0, 0, 0.2, 1);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { color-scheme: dark; }
+  body {
+    background:
+      radial-gradient(900px 520px at 8% -10%, rgba(242,179,61,0.09), transparent 60%),
+      radial-gradient(900px 560px at 96% 0%, rgba(79,134,247,0.10), transparent 55%),
+      var(--bg);
+    background-attachment: fixed;
+    color: var(--txt); font-family: var(--font); font-size: 14px; min-height: calc(100 * min(var(--vh, 1vh), 1vh));
+    -webkit-font-smoothing: antialiased;
+  }
+  h1,h2,h3 { font-family: var(--display); letter-spacing:-0.01em; }
+  ::selection { background: rgba(242,179,61,0.30); }
+  ::-webkit-scrollbar { width:8px; height:8px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+  ::-webkit-scrollbar-thumb { background:var(--border2); border-radius:99px; border: 2px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--faint); border: 2px solid transparent; background-clip: padding-box; }
+  a { color: inherit; }
+
+  /* ============ TOAST ============ */
+  #toastContainer {
+    position: fixed; bottom: 24px; right: 24px; z-index: 999;
+    display: flex; flex-direction: column; gap: 10px; pointer-events: none;
+  }
+  .toast {
+    background: var(--panel-raised); border: 1px solid var(--border2);
+    border-radius: var(--r-lg); padding: 13px 18px;
+    font-size: 0.82rem; font-weight: 600; color: var(--txt);
+    box-shadow: 0 12px 32px rgba(0,0,0,0.45);
+    display: flex; align-items: center; gap: 10px; pointer-events: all;
+    animation: toastIn 0.4s var(--ease-spring) both;
+    max-width: 320px;
+  }
+  .toast.toast--hide { animation: toastOut 0.35s var(--ease-smooth) both; }
+  .toast__icon { font-size: 1rem; flex-shrink: 0; }
+  .toast--ok { border-left: 3px solid var(--green); }
+  .toast--err { border-left: 3px solid var(--red); }
+  .toast--info { border-left: 3px solid var(--brand2); }
+  @keyframes toastIn {
+    from { opacity: 0; transform: translateX(24px) scale(0.95); }
+    to { opacity: 1; transform: translateX(0) scale(1); }
+  }
+  @keyframes toastOut {
+    from { opacity: 1; transform: translateX(0) scale(1); }
+    to { opacity: 0; transform: translateX(24px) scale(0.9); }
+  }
+
+  /* ============ CONFIRM MODAL ============ */
+  .modal-backdrop {
+    position: fixed; inset: 0; z-index: 200;
+    background: rgba(7,9,13,0.78); backdrop-filter: blur(6px);
+    display: flex; align-items: center; justify-content: center; padding: 24px;
+    animation: fadeIn 0.2s var(--ease-smooth) both;
+  }
+  .modal-backdrop.modal--hide { animation: fadeOut 0.2s var(--ease-smooth) both; }
+  .modal-box {
+    background: linear-gradient(165deg, var(--panel-raised), var(--panel));
+    border: 1px solid var(--border2); border-radius: var(--r-xl); padding: 28px 26px;
+    max-width: 380px; width: 100%;
+    box-shadow: 0 32px 64px rgba(0,0,0,0.6), 0 1px 0 rgba(255,255,255,0.03) inset;
+    animation: modalIn 0.35s var(--ease-spring) both;
+  }
+  .modal-backdrop.modal--hide .modal-box { animation: modalOut 0.25s var(--ease-smooth) both; }
+  @keyframes modalIn {
+    from { opacity: 0; transform: scale(0.9) translateY(16px); }
+    to { opacity: 1; transform: scale(1) translateY(0); }
+  }
+  @keyframes modalOut {
+    from { opacity: 1; transform: scale(1); }
+    to { opacity: 0; transform: scale(0.95) translateY(8px); }
+  }
+  @keyframes fadeOut { from { opacity:1; } to { opacity:0; } }
+  .modal-icon { font-size: 2.2rem; margin-bottom: 12px; }
+  .modal-title { font-family: var(--display); font-size: 1.05rem; font-weight: 700; margin-bottom: 8px; }
+  .modal-desc { color: var(--muted); font-size: 0.83rem; line-height: 1.55; margin-bottom: 22px; }
+  .modal-actions { display: flex; gap: 10px; }
+  .modal-btn { flex: 1; padding: 11px; border-radius: var(--r-md); font-size: 0.85rem; font-weight: 700; cursor: pointer; border: none; transition: filter 0.15s, transform 0.15s; }
+  .modal-btn:hover { filter: brightness(1.1); transform: translateY(-1px); }
+  .modal-btn--cancel { background: var(--panel2); border: 1px solid var(--border2); color: var(--muted); }
+  .modal-btn--danger { background: linear-gradient(135deg, var(--red), #c8343c); color: #fff; }
+  .modal-btn--confirm { background: linear-gradient(135deg, var(--brand), #d99a26); color: var(--brand-ink); }
+
+  /* ============ PROMPT MODAL (form fields) ============ */
+  .modal-form { display: flex; flex-direction: column; gap: 14px; margin-bottom: 22px; text-align: left; }
+  .modal-input-label {
+    display: flex; flex-direction: column; gap: 7px;
+    font-size: 0.78rem; font-weight: 700; color: var(--muted);
+    letter-spacing: 0.01em;
+  }
+  .modal-input {
+    background: var(--panel2); border: 1px solid var(--border); border-radius: var(--r-md);
+    padding: 11px 13px; color: var(--txt); font-size: 0.92rem; font-family: var(--font);
+    transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+  }
+  .modal-input::placeholder { color: var(--faint); }
+  .modal-input:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px rgba(242,179,61,0.15); }
+  .modal-input[type="time"] { color-scheme: dark; }
+  .modal-input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(1) brightness(1.7); cursor: pointer; opacity: 0.85; }
+  .modal-input[type="time"]::-webkit-calendar-picker-indicator:hover { opacity: 1; }
+
+  /* Warm "sun" accent for ON-time fields, cool "moon" accent for OFF-time
+     fields — gives the timer prompt a bit of life instead of two identical
+     grey boxes. */
+  .modal-input-label--on { color: var(--brand); }
+  .modal-input-label--on .modal-input {
+    border-color: var(--brand-dim);
+    background: linear-gradient(160deg, rgba(242,179,61,0.10), var(--panel2));
+  }
+  .modal-input-label--on .modal-input:focus {
+    border-color: var(--brand); box-shadow: 0 0 0 3px rgba(242,179,61,0.2);
+  }
+  .modal-input-label--off { color: var(--brand2); }
+  .modal-input-label--off .modal-input {
+    border-color: var(--brand2-dim);
+    background: linear-gradient(160deg, rgba(79,134,247,0.10), var(--panel2));
+  }
+  .modal-input-label--off .modal-input:focus {
+    border-color: var(--brand2); box-shadow: 0 0 0 3px rgba(79,134,247,0.2);
+  }
+  .modal-input-label--off .modal-input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(64%) sepia(56%) saturate(1873%) hue-rotate(202deg) brightness(1.05); }
+
+  /* ============ LOGIN ============ */
+  #loginScreen { min-height: calc(100 * min(var(--vh, 1vh), 1vh)); display:flex; align-items:center; justify-content:center; padding:24px; }
+  .login-card {
+    position:relative; width:100%; max-width:390px;
+    background: linear-gradient(180deg, var(--panel-raised), var(--panel));
+    border:1px solid var(--border); border-radius:var(--r-xl);
+    padding:40px 32px; box-shadow: 0 40px 80px rgba(2,6,16,0.65), 0 1px 0 rgba(255,255,255,0.03) inset;
+    overflow:hidden;
+    animation: cardIn 0.6s var(--ease-spring) both;
+  }
+  @keyframes cardIn {
+    from { opacity: 0; transform: translateY(32px) scale(0.97); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  .login-card::before {
+    content:""; position:absolute; top:0; left:0; right:0; height:3px;
+    background:linear-gradient(90deg, var(--brand), var(--brand2));
+  }
+  .login-card::after {
+    content: ""; position: absolute; top: -60px; right: -60px;
+    width: 200px; height: 200px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(242,179,61,0.06), transparent 70%);
+    pointer-events: none;
+  }
+  .login-brand { display:flex; align-items:center; gap:14px; margin-bottom:28px; }
+  .login-brand__logo-wrap {
+    width: 46px; height: 46px; border-radius: 14px; border: 1px solid var(--border2);
+    background: linear-gradient(135deg, var(--brand-dim), var(--panel));
+    display: flex; align-items: center; justify-content: center; font-size: 1.4rem;
+    flex-shrink: 0; box-shadow: 0 4px 14px rgba(242,179,61,0.18);
+  }
+  .login-brand__name { display:flex; flex-direction:column; line-height:1.2; }
+  .login-brand__name strong { font-family:var(--display); font-size:1.08rem; }
+  .login-brand__name span { font-size:0.7rem; color:var(--faint); font-weight:700; letter-spacing:0.08em; text-transform: uppercase; margin-top:2px; }
+  .login-card h1 { font-size:1.45rem; font-weight:800; margin-bottom:7px; }
+  .login-card p.sub { color:var(--faint); font-size:0.83rem; margin-bottom:26px; line-height:1.55; }
+  .login-input-wrap { position: relative; margin-bottom: 14px; }
+  .login-input-icon { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); font-size: 0.95rem; opacity: 0.5; pointer-events: none; }
+  .login-card input {
+    width:100%; background:var(--bg); border:1px solid var(--border2); border-radius:var(--r-md);
+    padding:13px 14px 13px 40px; color:var(--txt); font-size:0.92rem; font-family: var(--font);
+    transition: border-color 0.2s var(--ease-smooth), box-shadow 0.2s var(--ease-smooth), background 0.2s;
+  }
+  .login-card input:focus { outline:none; border-color:var(--brand); box-shadow:0 0 0 3px rgba(242,179,61,0.16); background: var(--panel); }
+  .login-btn {
+    width:100%; padding:14px; border-radius:var(--r-md); border:none;
+    background:linear-gradient(135deg, var(--brand), #d99a26); color:var(--brand-ink); font-weight:800; font-size:0.94rem; cursor:pointer; font-family: var(--font);
+    transition: transform 0.2s var(--ease-spring), box-shadow 0.2s var(--ease-smooth), filter 0.15s;
+    position: relative; overflow: hidden;
+  }
+  .login-btn::after {
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(135deg, rgba(255,255,255,0.15), transparent);
+    opacity: 0; transition: opacity 0.2s;
+  }
+  .login-btn:hover::after { opacity: 1; }
+  .login-btn:hover { filter:brightness(1.06); transform:translateY(-2px); box-shadow:0 14px 30px rgba(242,179,61,0.28); }
+  .login-btn:active { transform:translateY(0); box-shadow: none; }
+  .login-btn:disabled { opacity:0.6; cursor:not-allowed; transform:none; box-shadow:none; }
+  #loginError { color:var(--red); font-size:0.8rem; margin-top:13px; min-height:1em; text-align:center; animation: shake 0.4s; }
+  @keyframes shake {
+    0%,100%{transform:translateX(0)} 20%{transform:translateX(-5px)} 60%{transform:translateX(5px)}
+  }
+  .login-footer { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--border); text-align: center; }
+  .login-footer p { font-size: 0.72rem; color: var(--faint); line-height: 1.6; }
+  .login-footer strong { color: var(--brand); }
+
+  /* ============ APP SHELL ============ */
+  #dashboard { display:none; min-height: 100vh; }
+  .app-shell { display:flex; height: 100vh; overflow: hidden; }
+
+  .sidebar {
+    width:var(--sidebar-w); flex-shrink:0; border-right:1px solid var(--border);
+    background: linear-gradient(180deg, rgba(16,20,29,0.95), rgba(11,14,21,0.9));
+    backdrop-filter: blur(12px);
+    display:flex; flex-direction:column; padding:22px 14px;
+    height: 100vh;
+    overflow-y: auto;
+    position: relative;
+  }
+  .sidebar__brand { display:flex; align-items:center; gap:11px; padding:4px 8px 20px; }
+  .sidebar__brand-icon {
+    width: 34px; height: 34px; border-radius: 10px; border: 1px solid var(--border2);
+    background: linear-gradient(135deg, var(--brand-dim), var(--panel));
+    display: flex; align-items: center; justify-content: center; font-size: 1rem;
+    flex-shrink: 0; box-shadow: 0 3px 10px rgba(242,179,61,0.14);
+  }
+  .sidebar__brand strong { font-family:var(--display); font-size:0.96rem; display:block; letter-spacing: -0.01em; }
+  .sidebar__brand span { font-size:0.64rem; color:var(--faint); font-weight:700; letter-spacing: 0.06em; text-transform: uppercase; }
+  .sidebar__section-label { font-size: 0.6rem; color: var(--faint); font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; padding: 14px 12px 6px; }
+  .sidebar__nav { display:flex; flex-direction:column; gap:2px; flex:1; }
+  .nav-btn {
+    display:flex; align-items:center; gap:10px; background:transparent; border:none; text-align:left;
+    color:var(--muted); padding:10px 12px; border-radius:var(--r-md); font-size:0.84rem; font-weight:600;
+    cursor:pointer; transition: background 0.2s var(--ease-smooth), color 0.2s, transform 0.15s var(--ease-spring);
+    position: relative;
+  }
+  .nav-btn__icon { width:17px; height:17px; flex-shrink:0; transition: transform 0.3s var(--ease-spring); }
+  .nav-btn__badge {
+    margin-left: auto; background: var(--brand2-dim); color: #9DB8FF;
+    font-size: 0.62rem; font-weight: 800; padding: 2px 7px; border-radius: 999px;
+    transition: background 0.2s, color 0.2s;
+    display: none;
+  }
+  .nav-btn__badge.visible { display: block; }
+  .nav-btn:hover { background:rgba(255,255,255,0.04); color:var(--txt); }
+  .nav-btn:hover .nav-btn__icon { transform: scale(1.15); }
+  .nav-btn.active {
+    background: linear-gradient(90deg, rgba(242,179,61,0.18), rgba(242,179,61,0.04));
+    color:var(--brand);
+    border: 1px solid rgba(242,179,61,0.2);
+  }
+  .nav-btn.active .nav-btn__badge { background: var(--brand-dim); color: var(--brand); }
+  .nav-btn.active::before {
+    content: ""; position: absolute; left: 0; top: 20%; bottom: 20%;
+    width: 3px; border-radius: 0 3px 3px 0; background: var(--brand);
+  }
+
+  .sidebar__footer { display:flex; flex-direction:column; gap:8px; padding-top:14px; border-top:1px solid var(--border); }
+  .sidebar__status-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 4px; }
+  .live-pill { display:flex; align-items:center; gap:7px; font-size:0.76rem; color:var(--green); font-weight:700; }
+  .live-dot { width:7px; height:7px; border-radius:50%; background:var(--green); box-shadow:0 0 8px rgba(53,208,127,0.85); animation:pulse-dot 2s ease-out infinite; }
+  @keyframes pulse-dot { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.4;transform:scale(0.8)} }
+  .idle-timer-pill { font-size: 0.68rem; color: var(--faint); font-weight: 600; background: var(--panel2); padding: 3px 8px; border-radius: 999px; border: 1px solid var(--border); }
+  .logout-btn {
+    background:transparent; border:1px solid var(--border2); color:var(--muted); padding:9px 14px; border-radius:var(--r-md);
+    cursor:pointer; font-size:0.82rem; font-weight:600; font-family: var(--font);
+    transition: border-color 0.2s, color 0.2s, background 0.2s, transform 0.15s var(--ease-spring);
+    display: flex; align-items: center; gap: 7px; justify-content: center;
+  }
+  .logout-btn:hover { border-color:var(--red); color:var(--red); background: rgba(255,92,102,0.06); transform: translateY(-1px); }
+
+  .main-col { flex:1; min-width:0; display:flex; flex-direction:column; height: 100vh; overflow-y: auto; }
+  .topbar-mobile {
+    display:none; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px;
+    border-bottom:1px solid var(--border); background:rgba(10,15,28,0.85); backdrop-filter:blur(14px);
+    position:sticky; top:0; z-index:20;
+  }
+  .topbar-mobile .brand { display:flex; align-items:center; gap:9px; font-weight:700; }
+  .topbar-mobile .brand-icon { width: 28px; height: 28px; border-radius: 9px; border: 1px solid var(--border2); background: linear-gradient(135deg, var(--brand-dim), var(--panel)); display: flex; align-items: center; justify-content: center; font-size: 0.85rem; }
+  .topbar-mobile .brand strong { font-size:0.9rem; font-family:var(--display); }
+
+  main { max-width:1260px; width:100%; margin:0 auto; padding:28px 28px 48px; flex:1; }
+  .page-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:22px; flex-wrap:wrap; }
+  .page-head__left { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .page-head h2 { font-size:1.35rem; font-weight:800; }
+  .page-head__hint { font-size:0.78rem; color:var(--faint); }
+  .page-head__actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  /* ============ SUMMARY ============ */
+  .summary-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:28px; }
+  .s-card {
+    background: linear-gradient(165deg, var(--panel-raised), var(--panel));
+    border:1px solid var(--border); border-radius:var(--r-lg); padding:20px 22px;
+    position:relative; overflow:hidden;
+    transition: transform 0.25s var(--ease-spring), border-color 0.2s, box-shadow 0.25s var(--ease-smooth);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    animation: cardSlideIn 0.5s var(--ease-spring) both;
+  }
+  .s-card:nth-child(1) { animation-delay: 0.05s; }
+  .s-card:nth-child(2) { animation-delay: 0.1s; }
+  .s-card:nth-child(3) { animation-delay: 0.15s; }
+  .s-card:nth-child(4) { animation-delay: 0.2s; }
+  @keyframes cardSlideIn {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .s-card:hover { transform:translateY(-3px); border-color:var(--brand); box-shadow: 0 12px 30px rgba(2,6,16,0.3); }
+  .s-card__top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+  .s-card__icon { width: 36px; height: 36px; border-radius: var(--r-md); display: flex; align-items: center; justify-content: center; font-size: 1.05rem; flex-shrink: 0; }
+  .s-card__icon--gold { background: var(--brand-dim); }
+  .s-card__icon--blue { background: var(--brand2-dim); }
+  .s-card__icon--green { background: var(--green-dim); }
+  .s-card__icon--red { background: var(--red-dim); }
+  .s-card__label { font-size:0.68rem; color:var(--faint); text-transform:uppercase; letter-spacing:0.08em; font-weight:700; }
+  .s-card__value { font-family:var(--display); font-size:2rem; font-weight:800; line-height:1; letter-spacing:-0.02em; margin: 4px 0 8px; }
+  .s-card__delta { font-size:0.73rem; color:var(--faint); display: flex; align-items: center; gap: 5px; }
+  .s-card__delta .up { color:var(--green); font-weight:700; }
+  .s-card__delta .down { color:var(--red); font-weight:700; }
+  .s-card__delta .neutral { color:var(--brand); font-weight:700; }
+
+  /* ============ QUICK STATS ROW ============ */
+  .quick-stats { display: flex; gap: 10px; margin-bottom: 22px; flex-wrap: wrap; }
+  .q-stat { background: var(--panel2); border: 1px solid var(--border); border-radius: var(--r-md); padding: 9px 16px; display: flex; align-items: center; gap: 9px; font-size: 0.78rem; color: var(--muted); font-weight: 600; }
+  .q-stat__dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+
+  /* ============ PANEL / TAB ============ */
+  .panel { display:none; }
+  .panel.active { display:block; animation: panelIn 0.3s var(--ease-smooth) both; }
+  @keyframes panelIn {
+    from { opacity:0; transform: translateY(10px); }
+    to { opacity:1; transform: translateY(0); }
+  }
+
+  /* ============ ACTIVITY LOG ============ */
+  .activity-log { display:flex; flex-direction:column; background:var(--panel); border:1px solid var(--border); border-radius:var(--r-lg); overflow:hidden; }
+  .log-item {
+    display:grid; grid-template-columns: 88px 1fr auto; gap:12px; align-items:center; padding:13px 18px;
+    border-bottom:1px solid var(--border); font-size:0.82rem;
+    transition: background 0.2s var(--ease-smooth);
+    animation: logItemIn 0.4s var(--ease-spring) both;
+  }
+  .log-item:last-child { border-bottom:none; }
+  .log-item:hover { background:rgba(242,179,61,0.04); }
+  @keyframes logItemIn {
+    from { opacity: 0; transform: translateX(-12px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+  .log-item__time { color:var(--faint); font-size:0.73rem; font-variant-numeric: tabular-nums; }
+  .log-item__content { color:var(--txt); }
+  .log-item__content strong { color:var(--brand); }
+  .log-item__badge { font-size:0.7rem; padding:3px 10px; border-radius:999px; white-space:nowrap; font-weight:700; letter-spacing: 0.02em; }
+  .badge-chat { background:var(--brand2-dim); color:#9DB8FF; }
+  .badge-signup { background:var(--green-dim); color:var(--green); }
+  .badge-signin { background:var(--brand2-dim); color:#9DB8FF; }
+  .badge-locationset { background:var(--brand-dim); color:var(--brand); }
+
+  /* ============ TABLES ============ */
+  table { width:100%; border-collapse:collapse; background:var(--panel); border:1px solid var(--border); border-radius:var(--r-lg); overflow:hidden; }
+  thead { background:var(--panel2); }
+  th,td { text-align:left; padding:12px 16px; font-size:0.82rem; border-bottom:1px solid var(--border); }
+  th { color:var(--txt); font-size:0.66rem; text-transform:uppercase; letter-spacing:0.1em; font-weight:800; border-bottom: 2px solid var(--border2); }
+  tbody tr { transition: background 0.15s var(--ease-smooth); }
+  tbody tr:last-child td { border-bottom:none; }
+  tbody tr:hover { background:rgba(242,179,61,0.03); }
+  td.faint { color:var(--faint); }
+  td.gold { color:var(--brand); font-weight:600; }
+  .handle-pill { display:inline-flex; align-items:center; gap:6px; font-weight:700; font-size:0.8rem; color:var(--handle-color, var(--brand)); }
+  .handle-pill::before { content:""; width:7px; height:7px; border-radius:50%; background:var(--handle-color, var(--brand)); flex-shrink:0; }
+
+  /* ============ TOOLBAR ============ */
+  .toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px; flex-wrap:wrap; }
+  .toolbar__left { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .status-msg { font-size:0.8rem; color:var(--faint); }
+  .btn-ghost { background:transparent; border:1px solid var(--border2); color:var(--muted); padding:7px 13px; border-radius:var(--r-md); cursor:pointer; font-size:0.8rem; font-weight:600; font-family: var(--font); transition: border-color 0.2s, color 0.2s, background 0.2s, transform 0.15s var(--ease-spring); }
+  .btn-ghost:hover { border-color:var(--brand2); color:var(--brand2); transform: translateY(-1px); }
+  .btn-ghost:disabled { opacity:0.5; cursor:not-allowed; transform: none !important; }
+  .btn-ghost--danger { border-color: rgba(255,92,102,0.4); color: #ff9b9e; }
+  .btn-ghost--danger:hover { border-color: var(--red); color: #ffd7d8; background: rgba(255,92,102,0.08); }
+  .row-del-btn { background:transparent; border:1px solid var(--border2); color:var(--muted); padding:4px 10px; border-radius:var(--r-sm); cursor:pointer; font-size:0.72rem; font-family: var(--font); transition: border-color 0.2s, color 0.2s, transform 0.15s var(--ease-spring); }
+  .row-del-btn:hover { border-color:var(--red); color:var(--red); transform: translateY(-1px); }
+  .select-col { width:34px; }
+  .select-checkbox { width:16px; height:16px; accent-color: var(--brand); cursor:pointer; }
+  .search-input { background:var(--panel2); border:1px solid var(--border); border-radius:var(--r-md); padding:9px 13px 9px 36px; color:var(--txt); font-size:0.82rem; font-family: var(--font); width:220px; transition: border-color 0.2s, box-shadow 0.2s; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%235C6578' stroke-width='2'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.35-4.35'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: 11px center; }
+  .search-input:focus { outline:none; border-color:var(--brand); box-shadow: 0 0 0 2px rgba(242,179,61,0.12); }
+  .range-select { background:var(--panel2); border:1px solid var(--border); border-radius:var(--r-md); padding:8px 12px; color:var(--txt); font-size:0.8rem; cursor:pointer; font-family: var(--font); transition: border-color 0.2s; }
+  .range-select:focus { outline:none; border-color:var(--brand); }
+  .empty-state { text-align:center; padding:48px 20px; color:var(--faint); font-size:0.85rem; }
+  .empty-state__icon { font-size: 2rem; margin-bottom: 10px; opacity: 0.5; }
+
+  /* ============ LOCATIONS ============ */
+  .loc-filter-tabs { display:flex; gap:6px; margin-bottom:16px; flex-wrap:wrap; }
+  .loc-filter-tab {
+    background:var(--panel2); border:1px solid var(--border); color:var(--muted); font-size:0.78rem; font-weight:700;
+    padding:7px 16px; border-radius:999px; cursor:pointer; font-family: var(--font);
+    transition: border-color 0.2s, color 0.2s, background 0.2s, transform 0.2s var(--ease-spring), box-shadow 0.2s;
+  }
+  .loc-filter-tab:hover { border-color:var(--border2); color:var(--txt); transform: translateY(-1px); }
+  .loc-filter-tab.is-active { background:linear-gradient(135deg, var(--brand), #d99a26); border-color:transparent; color:var(--brand-ink); box-shadow: 0 4px 14px rgba(242,179,61,0.22); }
+
+  /* ======= Locations panel: split list/map layout (current markup —
+     .location-list-item etc. had no rules at all before this block,
+     which is why the panel rendered as unstyled text). ======= */
+  .locations-panel__split { display:grid; grid-template-columns: minmax(320px, 420px) 1fr; gap:18px; align-items:start; }
+  .locations-panel__list { display:flex; flex-direction:column; gap:10px; max-height:600px; overflow-y:auto; padding-right:4px; }
+  .locations-panel__map {
+    position:sticky; top:0; border:1px solid var(--border); border-radius:var(--r-xl);
+    background:linear-gradient(165deg, var(--panel-raised), var(--panel));
+    padding:16px; box-shadow:0 18px 40px rgba(2,6,16,0.35);
+  }
+  @media (max-width: 980px) {
+    .locations-panel__split { grid-template-columns: 1fr; }
+    .locations-panel__map { position:static; }
+    .locations-panel__list { max-height:none; }
+  }
+
+  .location-list-item {
+    position:relative; border:1px solid var(--border); border-left:3px solid var(--border2); border-radius:var(--r-lg);
+    padding:14px 16px; background:linear-gradient(165deg, var(--panel-raised), var(--panel));
+    transition: transform 0.25s var(--ease-spring), border-color 0.2s, box-shadow 0.25s var(--ease-smooth);
+    animation: cardSlideIn 0.4s var(--ease-spring) both;
+  }
+  .location-list-item:hover { transform:translateY(-2px); border-color:var(--border2); box-shadow:0 14px 32px rgba(2,6,16,0.4); }
+  .location-item__heading { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
+  .location-item__title { font-family:var(--display); font-weight:700; font-size:0.94rem; letter-spacing:-0.01em; color:var(--txt); }
+  .location-item__meta { font-size:0.72rem; color:var(--faint); margin-top:4px; line-height:1.5; }
+  .location-status-badge {
+    font-size:0.68rem; font-weight:800; padding:4px 11px; border-radius:999px; white-space:nowrap;
+    text-transform:uppercase; letter-spacing:0.04em; flex-shrink:0; margin-top:1px;
+  }
+  .location-status-badge--on { background:var(--green-dim); color:var(--green); }
+  .location-status-badge--off { background:var(--red-dim); color:#FF8087; }
+  .location-status-badge--unknown { background:var(--panel2); color:var(--faint); border:1px solid var(--border2); }
+
+  /* Leaflet marker dots + popup, restyled to match the dark theme
+     instead of Leaflet's default light chrome. */
+  .admin-loc-marker-icon { background:none; border:none; display:flex; align-items:center; gap:6px; white-space:nowrap; }
+  .admin-loc-marker__dot {
+    display:block; width:12px; height:12px; border-radius:50%; flex-shrink:0;
+    border:2px solid rgba(255,255,255,0.85);
+    background:var(--marker-fill, #9CA3AF);
+    box-shadow: 0 0 0 2px rgba(255,255,255,0.08), 0 0 10px 4px var(--marker-glow, rgba(156,163,175,0.5));
+  }
+  .admin-loc-marker__label {
+    font-family:var(--font); font-size:0.72rem; font-weight:700; color:#f2f5f8;
+    text-shadow:0 1px 3px rgba(0,0,0,0.85), 0 0 8px rgba(0,0,0,0.6);
+  }
+  .leaflet-popup-content-wrapper, .leaflet-popup-tip { background:var(--panel-raised); color:var(--txt); box-shadow:0 12px 32px rgba(0,0,0,0.5); }
+  .leaflet-popup-content { font-family:var(--font); font-size:0.8rem; line-height:1.5; margin:10px 12px; }
+  .leaflet-container a.leaflet-popup-close-button { color:var(--muted); }
+  .leaflet-control-zoom a { background:var(--panel-raised) !important; color:var(--txt) !important; border-color:var(--border2) !important; }
+  .leaflet-control-zoom a:hover { background:var(--panel2) !important; }
+
+  .locations-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:14px; }
+  .loc-card {
+    position:relative; border:1px solid var(--border); border-left:3px solid var(--border2); border-radius:var(--r-lg);
+    padding:0; display:flex; flex-direction:column;
+    transition: transform 0.25s var(--ease-spring), border-color 0.2s, box-shadow 0.25s var(--ease-smooth);
+    background: linear-gradient(165deg, var(--panel-raised), var(--panel));
+    overflow: hidden;
+    animation: cardSlideIn 0.4s var(--ease-spring) both;
+  }
+  .loc-card:hover { transform:translateY(-3px); border-color:var(--border2); box-shadow:0 18px 40px rgba(2,6,16,0.4); }
+  .loc-card--on { border-left-color:var(--green); background:linear-gradient(165deg, rgba(53,208,127,0.06), var(--panel) 55%); }
+  .loc-card--off { border-left-color:var(--red); background:linear-gradient(165deg, rgba(255,92,102,0.06), var(--panel) 55%); }
+  .loc-card--unknown { border-left-color:var(--border2); }
+  .loc-card__body { padding: 17px 19px 15px 17px; display: flex; flex-direction: column; gap: 13px; flex: 1; }
+  .loc-card__top { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
+  .loc-card__name { display:flex; align-items:center; gap:9px; font-family:var(--display); font-weight:700; font-size:0.98rem; letter-spacing:-0.01em; }
+  .loc-card__dot { width:9px; height:9px; border-radius:50%; flex-shrink:0; }
+  .loc-card__dot--on { background:var(--green); box-shadow:0 0 9px rgba(53,208,127,0.8); animation:loc-dot-pulse 2.4s ease-in-out infinite; }
+  .loc-card__dot--off { background:var(--red); box-shadow:0 0 9px rgba(255,92,102,0.65); }
+  .loc-card__dot--unknown { background:var(--faint); }
+  @keyframes loc-dot-pulse { 0%,100%{opacity:1;box-shadow:0 0 9px rgba(53,208,127,0.8)} 50%{opacity:0.45;box-shadow:0 0 4px rgba(53,208,127,0.3)} }
+  .loc-card__meta { font-size:0.71rem; color:var(--faint); margin-top:3px; line-height: 1.5; }
+  .status-chip { font-size:0.68rem; font-weight:800; padding:4px 11px; border-radius:999px; white-space:nowrap; text-transform:uppercase; letter-spacing:0.04em; flex-shrink: 0; }
+  .status-chip--on { background:var(--green-dim); color:var(--green); }
+  .status-chip--off { background:var(--red-dim); color:#FF8087; }
+  .status-chip--unknown { background:var(--panel2); color:var(--faint); border:1px solid var(--border2); }
+
+  /* ======= NEW: Toggle Switch Location Control ======= */
+  .loc-card__schedule { font-size:0.72rem; color:var(--brand); font-weight:700; margin-top:6px; }
+  .loc-card__footer { border-top: 1px solid var(--border); padding: 14px 17px; display: flex; align-items: center; gap: 12px; }
+  .loc-toggle-group { display: flex; align-items: center; gap: 10px; flex: 1; }
+  .loc-toggle-label { font-size: 0.75rem; font-weight: 700; color: var(--muted); }
+  .loc-toggle-switch {
+    position: relative; width: 52px; height: 26px; flex-shrink: 0; cursor: pointer;
+  }
+  .loc-toggle-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+  .loc-toggle-track {
+    position: absolute; inset: 0; border-radius: 999px;
+    background: var(--red-dim); border: 1px solid rgba(255,92,102,0.35);
+    transition: background 0.35s var(--ease-smooth), border-color 0.35s var(--ease-smooth), box-shadow 0.35s var(--ease-smooth);
+  }
+  .loc-toggle-switch input:checked ~ .loc-toggle-track {
+    background: var(--green-dim); border-color: rgba(53,208,127,0.45);
+    box-shadow: 0 0 12px rgba(53,208,127,0.2);
+  }
+  .loc-toggle-thumb {
+    position: absolute; top: 3px; left: 3px;
+    width: 18px; height: 18px; border-radius: 50%;
+    background: #FF8087; box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+    transition: transform 0.35s var(--ease-spring), background 0.35s var(--ease-smooth), box-shadow 0.35s;
+  }
+  .loc-toggle-switch input:checked ~ .loc-toggle-thumb {
+    transform: translateX(26px);
+    background: var(--green); box-shadow: 0 2px 10px rgba(53,208,127,0.45);
+  }
+  .loc-toggle-switch:hover .loc-toggle-thumb { box-shadow: 0 2px 12px rgba(0,0,0,0.5); }
+  .loc-toggle-state-label { font-size: 0.73rem; font-weight: 800; min-width: 28px; }
+  .loc-toggle-state-label--on { color: var(--green); }
+  .loc-toggle-state-label--off { color: #FF8087; }
+  .loc-toggle-state-label--unknown { color: var(--faint); }
+  .loc-card__action-btn {
+    background: var(--panel2); border: 1px solid var(--border2); color: var(--faint);
+    width: 30px; height: 30px; border-radius: var(--r-sm); cursor: pointer; font-size: 0.75rem;
+    display: flex; align-items: center; justify-content: center;
+    transition: border-color 0.2s, color 0.2s, background 0.2s, transform 0.2s var(--ease-spring);
+    flex-shrink: 0;
+  }
+  .loc-card__action-btn:hover { border-color: var(--red); color: var(--red); background: var(--red-dim); transform: scale(1.1); }
+  .loc-card--pushed { animation: locFlash 1.2s var(--ease-smooth); }
+  @keyframes locFlash {
+    0% { box-shadow: 0 0 0 2px var(--brand); }
+    40% { box-shadow: 0 0 0 6px rgba(242,179,61,0.2); }
+    100% { box-shadow: 0 0 0 0 transparent; }
+  }
+  .add-location-row { display:flex; gap:8px; margin-bottom:18px; flex-wrap:wrap; }
+  .add-location-row input { background:var(--panel2); border:1px solid var(--border); border-radius:var(--r-md); padding:10px 13px; color:var(--txt); font-size:0.85rem; font-family: var(--font); flex:1; min-width:200px; transition: border-color 0.2s; }
+  .add-location-row input:focus { outline:none; border-color:var(--brand); }
+  .add-location-row select { background:var(--panel2); border:1px solid var(--border); border-radius:var(--r-md); padding:10px 13px; color:var(--txt); font-size:0.85rem; font-family: var(--font); flex:0 0 auto; min-width:150px; transition: border-color 0.2s; }
+  .add-location-row select:focus { outline:none; border-color:var(--brand); }
+  .add-location-row button { padding:10px 18px; border-radius:var(--r-md); border:none; background:linear-gradient(135deg, var(--brand2), #3767d6); color:#fff; font-weight:700; font-size:0.82rem; font-family: var(--font); cursor:pointer; transition: filter 0.15s, transform 0.2s var(--ease-spring); white-space: nowrap; }
+  .add-location-row button:hover { filter:brightness(1.1); transform: translateY(-1px); }
+
+  /* Wraps the city text input + the shared locate-me button so the
+     button can sit pinned inside the field (js/utils/location-picker.js
+     drives both — see admin's addLocationBtn handler). */
+  .add-location-row__city { position:relative; flex:1 1 220px; min-width:220px; }
+  .add-location-row__city input { width:100%; box-sizing:border-box; padding-right:40px; }
+  .add-location-row__locate {
+    position:absolute; right:5px; top:50%; transform:translateY(-50%);
+    width:28px; height:28px; border-radius:50%; border:none;
+    background:var(--panel-raised); color:var(--brand2);
+    display:inline-flex; align-items:center; justify-content:center; cursor:pointer;
+  }
+  .add-location-row__locate svg { width:15px; height:15px; transition:transform 0.15s ease; }
+  .add-location-row__locate:hover:not(:disabled) { filter:brightness(1.2); }
+  .add-location-row__locate:disabled { cursor:not-allowed; opacity:0.7; }
+  .add-location-row__locate.is-loading svg { animation: addLocLocateSpin 0.9s linear infinite; }
+  @keyframes addLocLocateSpin { to { transform: rotate(360deg); } }
+  .add-location-row__hint { flex-basis:100%; font-size:0.72rem; color:var(--faint); margin:-10px 0 4px; }
+
+  /* Search-as-you-type dropdown — markup/classes come from the shared
+     js/utils/location-picker.js widget, styled here to match admin's
+     own dark panel look (index.html's location.css has its own copy of
+     these same class names for the user-facing map/signup forms). */
+  .loc-search__results { position:relative; margin-top:6px; max-height:220px; overflow-y:auto; border:1px solid var(--border); border-radius:var(--r-md); background:var(--panel2); }
+  .loc-search__result { width:100%; display:flex; align-items:center; gap:10px; padding:9px 12px; border:none; background:none; color:var(--txt); font-family:var(--font); font-size:0.82rem; text-align:left; cursor:pointer; }
+  .loc-search__result:hover { background:var(--panel-raised); }
+  .loc-search__result-icon { flex-shrink:0; width:18px; height:18px; color:var(--brand2); }
+  .loc-search__result-icon svg { width:100%; height:100%; }
+  .loc-search__result-sub { display:block; font-size:0.7rem; color:var(--faint); margin-top:1px; }
+
+  /* ======= Bulk select/turn-off toolbar above the locations list ======= */
+  .loc-bulk-toolbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:14px; padding:10px 14px; border:1px solid var(--border); border-radius:var(--r-md); background:var(--panel2); }
+  .loc-bulk-toolbar__select { display:flex; align-items:center; gap:7px; font-size:0.78rem; font-weight:700; color:var(--muted); cursor:pointer; user-select:none; }
+  .loc-bulk-toolbar__select input { accent-color:var(--brand2); width:15px; height:15px; cursor:pointer; }
+  .loc-bulk-toolbar__count { font-size:0.75rem; color:var(--faint); margin-right:auto; }
+  .loc-card__select { accent-color:var(--brand2); width:16px; height:16px; cursor:pointer; flex-shrink:0; }
+
+  /* ============ BROADCAST ============ */
+  .broadcast-card {
+    background: linear-gradient(165deg, var(--panel-raised), var(--panel));
+    border:1px solid var(--border); border-radius:var(--r-lg); padding:18px 20px; margin-bottom:20px;
+    display:flex; flex-direction:column; gap:11px;
+    transition: border-color 0.2s;
+  }
+  .broadcast-card:focus-within { border-color: var(--border2); }
+  .broadcast-card__head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; flex-wrap:wrap; }
+  .broadcast-card__title { font-size:0.94rem; font-weight:700; }
+  .broadcast-card__hint { font-size:0.72rem; color:var(--faint); line-height: 1.5; }
+  .broadcast-row { display:flex; gap:8px; align-items:flex-start; }
+  .broadcast-row input, .broadcast-row textarea, .broadcast-row select {
+    flex:1; min-width:200px; background:var(--panel2); border:1px solid var(--border); border-radius:var(--r-md);
+    padding:10px 13px; color:var(--txt); font-size:0.85rem; font-family:var(--font); resize:vertical;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  .broadcast-row select { flex:0 0 auto; min-width:180px; cursor:pointer; }
+  .broadcast-row input:focus, .broadcast-row textarea:focus, .broadcast-row select:focus { outline:none; border-color:var(--brand); box-shadow: 0 0 0 2px rgba(242,179,61,0.1); }
+  .broadcast-row button {
+    padding:10px 20px; border-radius:var(--r-md); border:none; align-self:flex-start;
+    background:linear-gradient(135deg, var(--brand), #d99a26); color:var(--brand-ink); font-weight:800; font-size:0.82rem; font-family: var(--font); cursor:pointer;
+    white-space:nowrap; transition: filter 0.2s, transform 0.2s var(--ease-spring), box-shadow 0.2s;
+  }
+  .broadcast-row button:hover { filter:brightness(1.06); transform:translateY(-2px); box-shadow: 0 8px 20px rgba(242,179,61,0.25); }
+  .broadcast-row button:disabled { opacity:0.6; cursor:not-allowed; transform:none; box-shadow: none; }
+  .broadcast-status { font-size:0.78rem; color:var(--faint); min-height:1em; transition: color 0.3s; }
+  .broadcast-status--ok { color:var(--green); }
+  .broadcast-status--err { color:var(--red); }
+
+  /* ============ ANALYTICS ============ */
+  .analytics-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:14px; }
+  .a-card {
+    background: linear-gradient(165deg, var(--panel-raised), var(--panel));
+    border:1px solid var(--border); border-radius:var(--r-lg); padding:22px 24px;
+    transition: border-color 0.2s, transform 0.2s var(--ease-spring);
+  }
+  .a-card:hover { transform: translateY(-1px); border-color: var(--border2); }
+  .a-card--full { grid-column: 1 / -1; }
+  .a-card__head { display:flex; align-items:baseline; justify-content:space-between; gap:10px; margin-bottom:18px; }
+  .a-card__title { font-size:0.95rem; font-weight:700; letter-spacing:-0.01em; }
+  .a-card__hint { font-size:0.72rem; color:var(--faint); }
+
+  .bar-list { display:flex; flex-direction:column; gap:12px; }
+  .bar-row { display:grid; grid-template-columns: 110px 1fr 48px; align-items:center; gap:12px; }
+  .bar-row__label { font-size:0.8rem; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .bar-row__track { height:9px; border-radius:999px; background:var(--panel2); overflow:hidden; border:1px solid var(--border); }
+  .bar-row__fill { height:100%; border-radius:999px; background:linear-gradient(90deg,var(--brand2),var(--brand)); transition:width 0.7s var(--ease-out); }
+  .bar-row__fill--amber { background:linear-gradient(90deg,var(--amber),#c98a1f); }
+  .bar-row__fill--red { background:linear-gradient(90deg,var(--red),#b8333c); }
+  .bar-row__value { text-align:right; font-size:0.8rem; color:var(--txt); font-weight:700; font-variant-numeric:tabular-nums; }
+
+  .day-chart { display:flex; align-items:flex-end; gap:6px; height:140px; }
+  .day-chart__col { flex:1; min-width:0; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; height:100%; }
+  .day-chart__bar-wrap { width:100%; max-width:28px; height:108px; display:flex; flex-direction:column-reverse; border-radius:7px 7px 3px 3px; overflow:hidden; background:var(--panel2); border:1px solid var(--border); transition: border-color 0.2s; }
+  .day-chart__col:hover .day-chart__bar-wrap { border-color: var(--border2); }
+  .day-chart__seg { width:100%; transition:height 0.6s var(--ease-out); }
+  .day-chart__seg--returning { background:linear-gradient(180deg,var(--brand),var(--brand2)); }
+  .day-chart__seg--new { background:linear-gradient(180deg,var(--amber),#c98a1f); }
+  .day-chart__seg--reports { background:linear-gradient(180deg,var(--brand2),#3d54b0); }
+  .day-chart__label { font-size:0.58rem; color:var(--faint); margin-top:7px; white-space:nowrap; }
+
+  .legend { display:flex; gap:16px; font-size:0.75rem; color:var(--muted); margin-top:14px; flex-wrap:wrap; }
+  .legend__item { display:flex; align-items:center; gap:6px; }
+  .legend__dot { width:9px; height:9px; border-radius:50%; }
+  .legend__dot--returning { background:linear-gradient(135deg,var(--brand),var(--brand2)); }
+  .legend__dot--new { background:linear-gradient(135deg,var(--amber),#c98a1f); }
+  .legend__dot--reports { background:linear-gradient(135deg,var(--brand2),#3d54b0); }
+  .a-empty { text-align:center; padding:28px 12px; color:var(--faint); font-size:0.8rem; }
+
+  /* ============ HEALTH PANEL ============ */
+  .health-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 20px; }
+  .health-card {
+    background: linear-gradient(165deg, var(--panel-raised), var(--panel));
+    border: 1px solid var(--border); border-radius: var(--r-lg); padding: 18px 20px;
+    display: flex; flex-direction: column; gap: 10px;
+    transition: transform 0.2s var(--ease-spring), border-color 0.2s;
+  }
+  .health-card:hover { transform: translateY(-2px); border-color: var(--border2); }
+  .health-card__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .health-card__title { font-size: 0.82rem; font-weight: 700; color: var(--muted); }
+  .health-card__indicator { width: 10px; height: 10px; border-radius: 50%; }
+  .health-card__indicator--ok { background: var(--green); box-shadow: 0 0 8px rgba(53,208,127,0.6); animation: pulse-dot 2.5s ease-in-out infinite; }
+  .health-card__indicator--warn { background: var(--amber); box-shadow: 0 0 8px rgba(242,179,61,0.6); animation: pulse-dot 1.5s ease-in-out infinite; }
+  .health-card__indicator--err { background: var(--red); box-shadow: 0 0 8px rgba(255,92,102,0.6); }
+  .health-card__value { font-family: var(--display); font-size: 1.6rem; font-weight: 800; letter-spacing: -0.02em; }
+  .health-card__label { font-size: 0.72rem; color: var(--faint); }
+  .uptime-bar { height: 6px; border-radius: 999px; background: var(--panel2); overflow: hidden; border: 1px solid var(--border); }
+  .uptime-bar__fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--green), #28a861); transition: width 1s var(--ease-out); }
+
+  /* ============ BOTTOM NAV ============ */
+  .bottom-nav {
+    display:none; position:fixed; left:50%; transform:translateX(-50%); bottom:calc(12px + env(safe-area-inset-bottom));
+    z-index:30; background:rgba(16,20,29,0.94); backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
+    border:1px solid var(--border2); border-radius:999px; padding:6px; gap:2px;
+    box-shadow: 0 16px 40px rgba(0,0,0,0.5), 0 1px 0 rgba(255,255,255,0.04) inset;
+    max-width:calc(100vw - 24px); overflow-x:auto;
+  }
+  .bottom-nav__btn {
+    background:transparent; border:none; color:var(--faint); padding:8px 13px; border-radius:999px;
+    font-size:0.7rem; font-weight:700; cursor:pointer; white-space:nowrap; display:flex; flex-direction:column; align-items:center; gap:3px; font-family: var(--font);
+    transition: color 0.2s, background 0.2s, transform 0.2s var(--ease-spring);
+  }
+  .bottom-nav__btn svg { width:16px; height:16px; transition: transform 0.2s var(--ease-spring); }
+  .bottom-nav__btn:hover { color: var(--muted); }
+  .bottom-nav__btn:hover svg { transform: scale(1.15); }
+  .bottom-nav__btn.active { background:linear-gradient(135deg, var(--brand), #d99a26); color:var(--brand-ink); box-shadow: 0 4px 14px rgba(242,179,61,0.25); }
+
+  /* ============ RESPONSIVE ============ */
+  html, body { overflow-x:hidden; max-width:100vw; }
+  img, svg { max-width:100%; }
+
+  @media(max-width:1080px) {
+    .analytics-grid { grid-template-columns:1fr; }
+    .health-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  @media(max-width:960px) {
+    .sidebar { display:none; }
+    .topbar-mobile { display:flex; }
+    main { padding:18px 14px calc(90px + env(safe-area-inset-bottom)); }
+    .bottom-nav { display:flex; }
+    .summary-grid { grid-template-columns:1fr 1fr; gap:11px; }
+    .locations-grid { grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); }
+  }
+
+  @media(max-width:640px) {
+    .log-item { grid-template-columns:1fr; gap:5px; }
+    table,thead,tbody,th,td,tr { display:block; }
+    thead { display:none; }
+    tbody tr { background:var(--panel); border:1px solid var(--border); border-radius:var(--r-md); margin-bottom:8px; padding:11px 13px; }
+    td { border-bottom:none; padding:4px 2px; display:flex; justify-content:space-between; gap:8px; align-items:center; flex-wrap:wrap; }
+    td::before { content:attr(data-label); color:var(--faint); font-size:0.66rem; text-transform:uppercase; }
+    .bar-row { grid-template-columns: 80px 1fr 38px; gap:8px; }
+    .bar-row__label { font-size:0.74rem; }
+    .search-input, .range-select { width:100%; }
+    .toolbar { flex-direction:column; align-items:stretch; }
+    .toolbar__left { justify-content:space-between; }
+    .locations-grid { grid-template-columns:1fr; }
+    .add-location-row { flex-direction:column; align-items:stretch; }
+    .add-location-row input { min-width:0; }
+    .add-location-row button { width:100%; }
+    main { padding-left:12px; padding-right:12px; }
+    .page-head { gap:8px; }
+    .page-head h2 { font-size:1.15rem; }
+    .broadcast-row { flex-direction:column; align-items:stretch; }
+    .broadcast-row input, .broadcast-row textarea { min-width:0; }
+    .broadcast-row button { width:100%; }
+    .health-grid { grid-template-columns: 1fr 1fr; }
+    .quick-stats { gap: 8px; }
+    #toastContainer { bottom: 80px; right: 12px; left: 12px; }
+    .toast { max-width: 100%; }
+  }
+
+  @media(max-width:480px) {
+    .summary-grid { grid-template-columns:1fr; }
+    .s-card { padding:16px 18px; }
+    .s-card__value { font-size:1.6rem; }
+    .login-card { padding:30px 22px; }
+    .day-chart { height:110px; }
+    .day-chart__bar-wrap { height:84px; }
+    .health-grid { grid-template-columns: 1fr; }
+  }
+</style>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+  <!-- Same city search/geolocate widget signup.js and location.js (the
+       user-facing Locations map) already use — reused here so admin's
+       Add Location field works identically instead of being a bare
+       text box with no map-matching. -->
+  <script src="./js/utils/location-picker.js"></script>
+  <script src="https://cdn.tailwindcss.com/3.4.17" type="text/javascript"></script>
+  <script src="https://cdn.jsdelivr.net/npm/lucide@0.263.0/dist/umd/lucide.min.js" type="text/javascript"></script>
+  <script src="/_sdk/0179d719c431a79e.data_sdk.js" type="text/javascript" integrity="sha512-OsRvJkI5GkC3MJQcgotQYotpzrMSX415GiKKgvYdxQEEkzD/fdchShO2FMSy0PJr/tiINMXOk5Vl2zAgg6bUiA=="></script>
+  <script src="/_sdk/9432170dbd2ae0df.resizing_sdk.js" type="text/javascript" integrity="sha512-FeT+58sb1f9ejWPWFjCbJvTT+SDwGV+ngrHUnlO7TWEOoqwOLj6p256kO3vOL7DIWl1cIgrobiof8v2bOigwPg=="></script>
+ </head>
+ <body data-template-id="__page-root"><!-- TOAST CONTAINER -->
+  <div id="toastContainer"></div><!-- LOGIN -->
+  <div id="loginScreen">
+   <div class="login-card">
+    <div class="login-brand">
+     <div class="login-brand__logo-wrap">
+      💡
+     </div>
+     <div class="login-brand__name"><strong data-template-id="login-brand-name" class="canva-text">LightWatch GH</strong> <span data-template-id="login-brand-sub" class="canva-text">Admin Console</span>
+     </div>
+    </div>
+    <div id="loginStepPassword">
+     <h1 data-template-id="login-title" class="canva-text">Welcome back</h1>
+     <p class="sub" data-template-id="login-subtitle">Secure admin access. Authorized personnel only.</p>
+     <div class="login-input-wrap"><span class="login-input-icon">🔒</span> <input type="password" id="adminPasswordInput" placeholder="Enter admin password" autocomplete="current-password">
+     </div><button class="login-btn" id="adminLoginBtn" type="button" data-template-id="login-btn">Sign in to dashboard</button>
+     <div id="loginError"></div>
+    </div>
+    <div class="login-footer">
+     <p>Protected by <strong>LightWatch Security</strong> · Session expires after 10 min of inactivity</p>
+    </div>
+   </div>
+  </div><!-- DASHBOARD -->
+  <div id="dashboard">
+   <div class="app-shell">
+    <aside class="sidebar">
+     <div class="sidebar__brand">
+      <div class="sidebar__brand-icon">
+       💡
+      </div>
+      <div><strong data-template-id="sidebar-brand-name" class="canva-text">LightWatch GH</strong> <span data-template-id="sidebar-brand-sub" class="canva-text">Admin</span>
+      </div>
+     </div>
+     <div class="sidebar__section-label">
+      Main
+     </div>
+     <nav class="sidebar__nav" id="sidebarNav"><button class="nav-btn active" data-tab="activity" type="button">
+       <svg class="nav-btn__icon" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M3 12h4l3 8 4-16 3 8h4" />
+       </svg> Live Activity <span class="nav-btn__badge" id="navBadgeActivity"></span> </button> <button class="nav-btn" data-tab="analytics" type="button">
+       <svg class="nav-btn__icon" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M3 3v18h18" /><path d="M7 15l4-6 4 4 5-8" />
+       </svg> Analytics </button> <button class="nav-btn" data-tab="locations" type="button">
+       <svg class="nav-btn__icon" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 21s7-6.5 7-12a7 7 0 1 0-14 0c0 5.5 7 12 7 12z" /><circle cx="12" cy="9" r="2.5" />
+       </svg> Locations <span class="nav-btn__badge" id="navBadgeLocations"></span> </button>
+      <div class="sidebar__section-label" style="margin-top:8px;">
+       Data
+      </div><button class="nav-btn" data-tab="reports" type="button">
+       <svg class="nav-btn__icon" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M4 19h16" /><path d="M4 15l4-4 3 3 5-6 4 4" />
+       </svg> Reports <span class="nav-btn__badge" id="navBadgeReports"></span> </button> <button class="nav-btn" data-tab="users" type="button">
+       <svg class="nav-btn__icon" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="9" cy="8" r="3.2" /><path d="M2.5 20c1-4 3.6-6 6.5-6s5.5 2 6.5 6" /><circle cx="18" cy="8.5" r="2.4" /><path d="M15.6 14.3c2.3.3 4.2 2.1 5 5.7" />
+       </svg> Users </button> <button class="nav-btn" data-tab="chats" type="button">
+       <svg class="nav-btn__icon" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M4 5h16v11H8l-4 4V5z" />
+       </svg> Community Reports </button> <button class="nav-btn" data-tab="news" type="button">
+       <svg class="nav-btn__icon" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M4 4h16v13a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V4z" /><path d="M8 8h8M8 12h8M8 16h4" />
+       </svg> Official News </button>
+      <div class="sidebar__section-label" style="margin-top:8px;">
+       System
+      </div><button class="nav-btn" data-tab="health" type="button">
+       <svg class="nav-btn__icon" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+       </svg> System Health </button>
+     </nav>
+     <div class="sidebar__footer">
+      <div class="sidebar__status-row"><span class="live-pill"><span class="live-dot"></span>Live</span> <span class="idle-timer-pill" id="idleTimerDisplay">10:00</span>
+      </div><button class="logout-btn" id="logoutBtn" type="button">
+       <svg width="13" height="13" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" />
+       </svg> Log out </button>
+     </div>
+    </aside>
+    <div class="main-col">
+     <header class="topbar-mobile">
+      <div class="brand">
+       <div class="brand-icon">
+        💡
+       </div><strong id="mobilePageTitle">Live Activity</strong>
+      </div><button class="logout-btn" id="logoutBtnMobile" type="button" style="padding:7px 12px; font-size:0.76rem;">Log out</button>
+     </header>
+     <main><!-- Summary -->
+      <div class="summary-grid">
+       <div class="s-card">
+        <div class="s-card__top">
+         <div>
+          <div class="s-card__label" data-template-id="sc-label-users">
+           Total Users
+          </div>
+         </div>
+         <div class="s-card__icon s-card__icon--gold">
+          👥
+         </div>
+        </div>
+        <div class="s-card__value" id="sTotal">
+         —
+        </div>
+        <div class="s-card__delta">
+         <span class="up" id="sNew24h">—</span> new in last 24h
+        </div>
+       </div>
+       <div class="s-card">
+        <div class="s-card__top">
+         <div>
+          <div class="s-card__label" data-template-id="sc-label-chats">
+           Community Reports
+          </div>
+         </div>
+         <div class="s-card__icon s-card__icon--blue">
+          💬
+         </div>
+        </div>
+        <div class="s-card__value" id="sChats">
+         —
+        </div>
+        <div class="s-card__delta">
+         <span class="neutral" id="sChats24h">—</span> in last 24h
+        </div>
+       </div>
+       <div class="s-card">
+        <div class="s-card__top">
+         <div>
+          <div class="s-card__label" data-template-id="sc-label-locations">
+           Active Locations
+          </div>
+         </div>
+         <div class="s-card__icon s-card__icon--green">
+          📍
+         </div>
+        </div>
+        <div class="s-card__value" id="sLocations">
+         —
+        </div>
+        <div class="s-card__delta" data-template-id="sc-delta-locations">
+         Tracked across all channels
+        </div>
+       </div>
+       <div class="s-card">
+        <div class="s-card__top">
+         <div>
+          <div class="s-card__label" data-template-id="sc-label-activity">
+           Last Activity
+          </div>
+         </div>
+         <div class="s-card__icon s-card__icon--red">
+          ⚡
+         </div>
+        </div>
+        <div class="s-card__value" style="font-size:1.05rem;" id="sLastActivity">
+         —
+        </div>
+        <div class="s-card__delta" data-template-id="sc-delta-activity">
+         Most recent event
+        </div>
+       </div>
+      </div><!-- Quick stats row -->
+      <div class="quick-stats" id="quickStatsRow">
+       <div class="q-stat">
+        <span class="q-stat__dot" style="background:var(--green)"></span><span id="qsOnCount">—</span> locations ON
+       </div>
+       <div class="q-stat">
+        <span class="q-stat__dot" style="background:var(--red)"></span><span id="qsOffCount">—</span> locations OFF
+       </div>
+       <div class="q-stat">
+        <span class="q-stat__dot" style="background:var(--faint)"></span><span id="qsUnknownCount">—</span> unknown
+       </div>
+       <div class="q-stat">
+        🔄 Auto-refresh: <span id="qsRefreshCountdown" style="color:var(--brand);font-weight:700;margin-left:4px;">15s</span>
+       </div>
+      </div><!-- Activity panel -->
+      <div class="panel active" id="activityPanel">
+       <div class="page-head">
+        <div class="page-head__left">
+         <h2 data-template-id="activity-title" class="canva-text">Live Activity</h2><span class="page-head__hint" data-template-id="activity-hint">Auto-refreshes every 15s</span>
+        </div>
+        <div class="page-head__actions"><span class="status-msg" id="activityStatus">Loading…</span> <button class="btn-ghost" id="refreshActivity" type="button">↻ Refresh</button> <button class="btn-ghost btn-ghost--danger" id="clearReportsBtnActivity" type="button">🗑 Clear reports</button>
+        </div>
+       </div>
+       <div class="activity-log" id="activityLog">
+        <div class="empty-state">
+         <div class="empty-state__icon">
+          ⚡
+         </div>Loading activity…
+        </div>
+       </div>
+      </div><!-- Analytics panel -->
+      <div class="panel" id="analyticsPanel">
+       <div class="page-head">
+        <div class="page-head__left">
+         <h2 data-template-id="analytics-title" class="canva-text">Analytics</h2>
+        </div>
+        <div class="page-head__actions"><span class="status-msg" id="analyticsStatus">Loading…</span> <button class="btn-ghost" id="refreshAnalytics" type="button">↻ Refresh</button> <select class="range-select" id="analyticsRange"> <option value="7">Last 7 days</option> <option value="14" selected>Last 14 days</option> <option value="30">Last 30 days</option> </select>
+        </div>
+       </div>
+       <div class="analytics-grid">
+        <div class="a-card">
+         <div class="a-card__head"><span class="a-card__title" data-template-id="analytics-top-locations-title">Most Searched Locations</span> <span class="a-card__hint">Top 10</span>
+         </div>
+         <div class="bar-list" id="topLocationsList">
+          <div class="a-empty">
+           No search activity recorded yet.
+          </div>
+         </div>
+        </div>
+        <div class="a-card">
+         <div class="a-card__head"><span class="a-card__title" data-template-id="analytics-dropoff-title">Where People Drop Off</span> <span class="a-card__hint">Last screen before leaving</span>
+         </div>
+         <div class="bar-list" id="dropOffList">
+          <div class="a-empty">
+           No exit events recorded yet.
+          </div>
+         </div>
+        </div>
+        <div class="a-card a-card--full">
+         <div class="a-card__head"><span class="a-card__title" data-template-id="analytics-reports-day-title">Reports Submitted per Day</span> <span class="a-card__hint" id="reportsPerDayHint">—</span>
+         </div>
+         <div class="day-chart" id="reportsPerDayChart"></div>
+         <div class="legend">
+          <span class="legend__item"><span class="legend__dot legend__dot--reports"></span>Reports submitted</span>
+         </div>
+        </div>
+        <div class="a-card a-card--full">
+         <div class="a-card__head"><span class="a-card__title" data-template-id="analytics-dau-title">Daily Active Users</span> <span class="a-card__hint" id="dailyUsersHint">—</span>
+         </div>
+         <div class="day-chart" id="dailyUsersChart"></div>
+         <div class="legend"><span class="legend__item"><span class="legend__dot legend__dot--returning"></span>Returning</span> <span class="legend__item"><span class="legend__dot legend__dot--new"></span>New</span>
+         </div>
+        </div>
+        <div class="a-card a-card--full">
+         <div class="a-card__head"><span class="a-card__title" data-template-id="analytics-screentime-title">Average Time per Screen</span> <span class="a-card__hint">Seconds</span>
+         </div>
+         <div class="bar-list" id="screenTimeList">
+          <div class="a-empty">
+           No screen-time data recorded yet.
+          </div>
+         </div>
+        </div>
+       </div>
+      </div><!-- Locations panel -->
+      <div class="panel" id="locationsPanel">
+       <div class="page-head">
+        <div class="page-head__left">
+         <h2 data-template-id="locations-title" class="canva-text">Locations</h2><span class="page-head__hint" data-template-id="locations-hint">Toggle the switch to push a live status to users' home screens</span>
+        </div>
+        <div class="page-head__actions"><span class="status-msg" id="locationsStatus">Loading…</span> <button class="btn-ghost" id="refreshLocations" type="button">↻ Refresh</button>
+        </div>
+       </div>
+       <div class="toolbar">
+        <div class="toolbar__left">
+         <div class="loc-filter-tabs" id="locFilterTabs" style="margin-bottom:0"><button type="button" class="loc-filter-tab is-active" data-loc-filter="all">All</button> <button type="button" class="loc-filter-tab" data-loc-filter="on">🟢 ON</button> <button type="button" class="loc-filter-tab" data-loc-filter="off">🔴 OFF</button> <button type="button" class="loc-filter-tab" data-loc-filter="unknown">⚪ Unknown</button>
+         </div>
+        </div><input class="search-input" type="text" id="locationSearch" placeholder="Search locations…">
+       </div>
+       <div class="add-location-row">
+        <select id="newLocationRegion" aria-label="Region">
+          <option value="">Region…</option>
+          <option value="Greater Accra">Greater Accra</option>
+          <option value="Ashanti">Ashanti</option>
+          <option value="Central">Central</option>
+          <option value="Western">Western</option>
+          <option value="Western North">Western North</option>
+          <option value="Eastern">Eastern</option>
+          <option value="Volta">Volta</option>
+          <option value="Oti">Oti</option>
+          <option value="Northern">Northern</option>
+          <option value="North East">North East</option>
+          <option value="Savannah">Savannah</option>
+          <option value="Upper East">Upper East</option>
+          <option value="Upper West">Upper West</option>
+          <option value="Bono">Bono</option>
+          <option value="Bono East">Bono East</option>
+          <option value="Ahafo">Ahafo</option>
+        </select>
+        <div class="add-location-row__city">
+          <input type="text" id="newLocationInput" placeholder="Search for a town or area…" autocomplete="off">
+          <button type="button" id="newLocationLocateBtn" class="add-location-row__locate" aria-label="Use my current location">
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M12 2v3m0 14v3M2 12h3m14 0h3M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          </button>
+          <div id="newLocationResults" class="loc-search__results" hidden></div>
+        </div>
+        <button id="addLocationBtn" type="button">+ Add Location</button>
+        <span class="add-location-row__hint" id="newLocationHint">Pick a region, then search — or pin an exact spot with the locate button.</span>
+       </div>
+       <div class="loc-bulk-toolbar" id="locBulkToolbar" hidden>
+        <label class="loc-bulk-toolbar__select"><input type="checkbox" id="locSelectAll" /> Select all</label>
+        <button class="btn-ghost" id="locDeselectAllBtn" type="button" style="font-size:0.8rem; padding:7px 11px;">Deselect all</button>
+        <span class="loc-bulk-toolbar__count" id="locSelectedCount"></span>
+        <button class="btn-ghost" id="locBulkOffBtn" type="button" disabled>Turn OFF selected</button>
+        <button class="btn-ghost" id="locBulkOnBtn" type="button" disabled>Turn ON selected</button>
+        <button class="btn-ghost btn-ghost--danger" id="locBulkAllOffBtn" type="button">Turn all OFF</button>
+       </div>
+       <div class="broadcast-card" id="locPushCard">
+        <div class="broadcast-card__head"><span class="broadcast-card__title">📢 Push Message to Locations</span> <span class="broadcast-card__hint">Sends to each area's Community Reports feed AND as a push notification, the same way a news post does. Target the checked locations below, or every tracked location, one by one.</span>
+        </div>
+        <div class="broadcast-row"><input type="text" id="locPushTitleInput" placeholder="Title (optional — defaults to &quot;LightWatch Admin&quot;)" maxlength="60">
+        </div>
+        <div class="broadcast-row"><textarea id="locPushBodyInput" placeholder="Write your message…" maxlength="220" rows="2"></textarea>
+        </div>
+        <div class="broadcast-row"><button class="btn-ghost" id="locPushSelectedBtn" type="button" disabled>Send to selected areas</button> <button class="btn-ghost" id="locPushAllBtn" type="button">Send to all, one by one</button>
+        </div>
+        <div id="locPushStatus" class="broadcast-status"></div>
+       </div>
+       <div class="locations-panel__split">
+         <div class="locations-panel__list">
+           <div id="locationsList"></div>
+           <div id="locationsEmpty" class="empty-state" style="display:none; margin-top:12px;">
+             <div class="empty-state__icon">📍</div>
+             No locations yet — add one above.
+           </div>
+         </div>
+         <div class="locations-panel__map">
+           <div class="page-head__hint" style="margin-bottom:10px;">Location heat map with status pins</div>
+           <div id="locationsMap" style="width:100%; height:100%; min-height:380px; border-radius:16px; overflow:hidden;"></div>
+         </div>
+       </div>
+      </div><!-- Reports panel -->
+      <div class="panel" id="reportsPanel">
+       <div class="page-head">
+        <div class="page-head__left">
+         <h2 data-template-id="reports-title" class="canva-text">Reports Management</h2>
+        </div>
+        <div class="page-head__actions"><span class="status-msg" id="reportsStatus">Loading…</span> <button class="btn-ghost" id="refreshReports" type="button">↻ Refresh</button> <button class="btn-ghost" id="deleteReportsBtn" type="button" disabled>Delete selected</button> <button class="btn-ghost btn-ghost--danger" id="clearReportsBtnPanel" type="button">🗑 Clear all</button>
+        </div>
+       </div>
+       <table id="reportsTable" style="display:none;">
+        <thead>
+         <tr>
+          <th class="select-col"><input type="checkbox" id="reportsSelectAll" class="select-checkbox" aria-label="Select all reports"></th>
+          <th>Type</th>
+          <th>Location</th>
+          <th>Details</th>
+          <th>Reported</th>
+          <th>Actions</th>
+         </tr>
+        </thead>
+        <tbody id="reportsTbody"></tbody>
+       </table>
+       <div id="reportsEmpty" class="empty-state" style="display:none;">
+        <div class="empty-state__icon">
+         📋
+        </div>No reports available.
+       </div>
+      </div><!-- Users panel -->
+      <div class="panel" id="usersPanel">
+       <div class="page-head">
+        <div class="page-head__left">
+         <h2 data-template-id="users-title" class="canva-text">Users</h2>
+        </div>
+        <div class="page-head__actions"><span class="status-msg" id="usersStatus">Loading…</span> <button class="btn-ghost" id="deleteUsersBtn" type="button" disabled>Delete selected</button> <input class="search-input" type="text" id="userSearch" placeholder="Search by name or contact…">
+        </div>
+       </div>
+       <table id="usersTable" style="display:none;">
+        <thead>
+         <tr>
+          <th class="select-col"><input type="checkbox" id="usersSelectAll" class="select-checkbox" aria-label="Select all users"></th>
+          <th>Name</th>
+          <th>Email / Phone</th>
+          <th>Region</th>
+          <th>City</th>
+          <th>Last seen</th>
+          <th>Joined</th>
+          <th>Actions</th>
+         </tr>
+        </thead>
+        <tbody id="usersTbody"></tbody>
+       </table>
+       <div id="usersEmpty" class="empty-state" style="display:none;">
+        <div class="empty-state__icon">
+         👥
+        </div>No users registered yet.
+       </div>
+      </div><!-- Chats panel -->
+      <div class="panel" id="chatsPanel">
+       <div class="page-head">
+        <div class="page-head__left">
+         <h2 data-template-id="chats-title" class="canva-text">Community Reports</h2>
+        </div>
+       </div>
+       <div class="broadcast-card">
+        <div class="broadcast-card__head"><span class="broadcast-card__title" data-template-id="broadcast-title">📢 Publish an Admin Post</span> <span class="broadcast-card__hint" data-template-id="broadcast-hint">Publishes an official post to the community feed and notifies devices that have notifications enabled.</span>
+        </div>
+        <div class="broadcast-row"><input type="text" id="broadcastTitleInput" placeholder="Post title (optional — defaults to &quot;LightWatch Admin&quot;)" maxlength="60">
+         <select id="broadcastLocationSelect">
+          <option value="">📍 Everyone (all locations)</option>
+         </select>
+        </div>
+        <div class="broadcast-row"><textarea id="broadcastBodyInput" placeholder="Write your post…" maxlength="220" rows="2"></textarea> <button id="broadcastSendBtn" type="button">Publish</button>
+        </div>
+        <div id="broadcastStatus" class="broadcast-status"></div>
+       </div>
+       <div class="toolbar">
+        <div class="toolbar__left"><span class="status-msg" id="chatsStatus">Loading…</span> <button class="btn-ghost" id="deleteChatsBtn" type="button" disabled>Delete selected</button>
+        </div><input class="search-input" type="text" id="chatSearch" placeholder="Search community reports or location…">
+       </div>
+       <table id="chatsTable" style="display:none;">
+        <thead>
+         <tr>
+          <th class="select-col"><input type="checkbox" id="chatsSelectAll" class="select-checkbox" aria-label="Select all community reports"></th>
+          <th>Handle</th>
+          <th>Message</th>
+          <th>Location</th>
+          <th>Sent</th>
+          <th>Actions</th>
+         </tr>
+        </thead>
+        <tbody id="chatsTbody"></tbody>
+       </table>
+       <div id="chatsEmpty" class="empty-state" style="display:none;">
+        <div class="empty-state__icon">
+         💬
+        </div>No community reports yet.
+       </div>
+      </div><!-- Official News panel -->
+      <div class="panel" id="newsPanel">
+       <div class="page-head">
+        <div class="page-head__left">
+         <h2 class="canva-text">Official News</h2>
+        </div>
+       </div>
+       <div class="broadcast-card">
+        <div class="broadcast-card__head"><span class="broadcast-card__title">📢 Publish an Article</span> <span class="broadcast-card__hint">Write your own announcement, or share a link (a tweet, a post, another outlet's story) with your own title/summary — it shows up in the News tab exactly like a fetched article.</span>
+        </div>
+        <div class="broadcast-row"><input type="text" id="newsTitleInput" placeholder="Headline" maxlength="200">
+        </div>
+        <div class="broadcast-row"><textarea id="newsSummaryInput" placeholder="Summary (optional — shown in the feed and expanded view)" maxlength="500" rows="2"></textarea>
+        </div>
+        <div class="broadcast-row"><input type="url" id="newsUrlInput" placeholder="Link — article URL, or the tweet/post link you're sharing" maxlength="500">
+        </div>
+        <div class="broadcast-row"><input type="url" id="newsImageInput" placeholder="Image URL (optional)" maxlength="500">
+         <input type="file" id="newsImageFileInput" accept="image/*" style="display:none;">
+         <button class="btn-ghost" id="newsImageUploadBtn" type="button">📁 Upload from device</button>
+         <select id="newsCategorySelect">
+          <option value="general">General</option>
+          <option value="outage">Outage / Fault</option>
+          <option value="restoration">Power Restored</option>
+          <option value="maintenance">Planned Maintenance</option>
+          <option value="tariff">Tariff Update</option>
+         </select>
+        </div>
+        <div class="broadcast-row" id="newsImagePreviewRow" style="display:none; align-items:center;">
+         <img id="newsImagePreview" alt="Selected image preview" style="height:52px; width:auto; max-width:120px; object-fit:cover; border-radius:8px; border:1px solid var(--border);">
+         <span style="font-size:0.75rem; color:var(--faint);">Using uploaded image</span>
+         <button class="btn-ghost" id="newsImageClearBtn" type="button">✕ Remove</button>
+        </div>
+        <div class="broadcast-row"><input type="text" id="newsSourceInput" placeholder="Source label (optional — defaults to &quot;LightWatch Admin&quot;)" maxlength="60">
+         <label style="display:flex; align-items:center; gap:6px; font-size:0.8rem; color:var(--faint); white-space:nowrap; padding:0 6px;">
+          <input type="checkbox" id="newsOfficialCheckbox" checked style="width:auto;"> Mark as Official
+         </label>
+         <button id="newsPublishBtn" type="button">Publish</button>
+        </div>
+        <div id="newsPublishStatus" class="broadcast-status"></div>
+       </div>
+       <div class="toolbar">
+        <div class="toolbar__left"><span class="status-msg" id="newsStatus">Loading…</span> <button class="btn-ghost" id="deleteNewsBtn" type="button" disabled>Delete selected</button>
+        </div><input class="search-input" type="text" id="newsSearch" placeholder="Search headlines or source…">
+       </div>
+       <table id="newsTable" style="display:none;">
+        <thead>
+         <tr>
+          <th class="select-col"><input type="checkbox" id="newsSelectAll" class="select-checkbox" aria-label="Select all articles"></th>
+          <th>Headline</th>
+          <th>Source</th>
+          <th>Category</th>
+          <th>Published</th>
+          <th>Actions</th>
+         </tr>
+        </thead>
+        <tbody id="newsTbody"></tbody>
+       </table>
+       <div id="newsEmpty" class="empty-state" style="display:none;">
+        <div class="empty-state__icon">
+         📰
+        </div>No articles yet.
+       </div>
+      </div><!-- System Health panel -->
+      <div class="panel" id="healthPanel">
+       <div class="page-head">
+        <div class="page-head__left">
+         <h2 data-template-id="health-title" class="canva-text">System Health</h2><span class="page-head__hint" data-template-id="health-hint">Real-time backend &amp; service monitoring</span>
+        </div>
+        <div class="page-head__actions"><span class="status-msg" id="healthStatus">Checking…</span> <button class="btn-ghost" id="refreshHealth" type="button">↻ Refresh</button>
+        </div>
+       </div>
+       <div class="health-grid">
+        <div class="health-card">
+         <div class="health-card__head"><span class="health-card__title">Network Round-Trip</span> <span class="health-card__indicator health-card__indicator--ok" id="hApiIndicator"></span>
+         </div>
+         <div class="health-card__value" id="hApiLatency">
+          —
+         </div>
+         <div class="health-card__label">
+          This browser → server → back (includes your connection)
+         </div>
+        </div>
+        <div class="health-card">
+         <div class="health-card__head"><span class="health-card__title">Database</span> <span class="health-card__indicator health-card__indicator--ok" id="hDbIndicator"></span>
+         </div>
+         <div class="health-card__value" id="hDbLatency">
+          —
+         </div>
+         <div class="health-card__label">
+          Ping latency
+         </div>
+        </div>
+        <div class="health-card">
+         <div class="health-card__head"><span class="health-card__title">CPU Usage</span> <span class="health-card__indicator health-card__indicator--ok" id="hCpuIndicator"></span>
+         </div>
+         <div class="health-card__value" id="hCpuUsage">
+          —
+         </div>
+         <div class="health-card__label">
+          Process CPU utilization
+         </div>
+        </div>
+        <div class="health-card">
+         <div class="health-card__head"><span class="health-card__title">RAM Usage</span> <span class="health-card__indicator health-card__indicator--ok" id="hRamIndicator"></span>
+         </div>
+         <div class="health-card__value" id="hRamUsage">
+          —
+         </div>
+         <div class="health-card__label">
+          Heap used / total
+         </div>
+        </div>
+        <div class="health-card">
+         <div class="health-card__head"><span class="health-card__title">Server Processing</span> <span class="health-card__indicator health-card__indicator--ok" id="hAvgApiIndicator"></span>
+         </div>
+         <div class="health-card__value" id="hAvgApiLatency">
+          —
+         </div>
+         <div class="health-card__label">
+          Measured on the server — recent requests average
+         </div>
+        </div>
+        <div class="health-card" style="grid-column: span 2;">
+         <div class="health-card__head"><span class="health-card__title">Build Settings</span></div>
+         <div class="health-card__label" style="margin-top:10px;">
+          <div class="health-settings__item"><span class="health-settings__label">Maintenance mode</span><span class="health-settings__value" id="hSettingMaintenance">—</span></div>
+          <div class="health-settings__item"><span class="health-settings__label">Admin accounts</span><span class="health-settings__value" id="hSettingAdminAccounts">—</span></div>
+          <div class="health-settings__item"><span class="health-settings__label">Notification settings</span><span class="health-settings__value" id="hSettingNotifications">—</span></div>
+          <div class="health-settings__item"><span class="health-settings__label">News fetch interval</span><span class="health-settings__value" id="hSettingNewsFetch">—</span></div>
+          <div class="health-settings__item"><span class="health-settings__label">API keys configured</span><span class="health-settings__value" id="hSettingApiKeys">—</span></div>
+          <div class="health-settings__item"><span class="health-settings__label">Backup database</span><span class="health-settings__value" id="hSettingBackupDb">—</span></div>
+         </div>
+        </div>
+        <div class="health-card">
+         <div class="health-card__head"><span class="health-card__title">Uptime</span> <span class="health-card__indicator health-card__indicator--ok"></span>
+         </div>
+         <div class="health-card__value" id="hUptime">
+          —
+         </div>
+         <div class="health-card__label">
+          Session uptime
+         </div>
+         <div class="uptime-bar">
+          <div class="uptime-bar__fill" id="hUptimeBar" style="width:100%"></div>
+         </div>
+        </div>
+        <div class="health-card">
+         <div class="health-card__head"><span class="health-card__title">Total Data Events</span> <span class="health-card__indicator health-card__indicator--ok"></span>
+         </div>
+         <div class="health-card__value" id="hTotalEvents">
+          —
+         </div>
+         <div class="health-card__label">
+          Users + chats + reports
+         </div>
+        </div>
+        <div class="health-card">
+         <div class="health-card__head"><span class="health-card__title">Admin Session</span> <span class="health-card__indicator health-card__indicator--ok"></span>
+         </div>
+         <div class="health-card__value" id="hSessionAge">
+          —
+         </div>
+         <div class="health-card__label">
+          Time since sign-in
+         </div>
+        </div>
+       </div>
+       <div class="a-card" style="margin-top:14px;">
+        <div class="a-card__head"><span class="a-card__title" data-template-id="health-log-title">Recent System Events</span> <span class="a-card__hint">Last 20 actions this session</span>
+        </div>
+        <div id="systemEventLog" style="display:flex;flex-direction:column;gap:0;"></div>
+       </div>
+      </div>
+     </main>
+    </div>
+   </div><!-- Bottom pill nav (mobile) -->
+   <nav class="bottom-nav" id="bottomNav"><button class="bottom-nav__btn active" data-tab="activity" type="button">
+     <svg viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M3 12h4l3 8 4-16 3 8h4" />
+     </svg> Activity </button> <button class="bottom-nav__btn" data-tab="analytics" type="button">
+     <svg viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M3 3v18h18" /><path d="M7 15l4-6 4 4 5-8" />
+     </svg> Analytics </button> <button class="bottom-nav__btn" data-tab="locations" type="button">
+     <svg viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M12 21s7-6.5 7-12a7 7 0 1 0-14 0c0 5.5 7 12 7 12z" /><circle cx="12" cy="9" r="2.5" />
+     </svg> Locations </button> <button class="bottom-nav__btn" data-tab="reports" type="button">
+     <svg viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M4 19h16" /><path d="M4 15l4-4 3 3 5-6 4 4" />
+     </svg> Reports </button> <button class="bottom-nav__btn" data-tab="users" type="button">
+     <svg viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <circle cx="9" cy="8" r="3.2" /><path d="M2.5 20c1-4 3.6-6 6.5-6s5.5 2 6.5 6" /><circle cx="18" cy="8.5" r="2.4" /><path d="M15.6 14.3c2.3.3 4.2 2.1 5 5.7" />
+     </svg> Users </button> <button class="bottom-nav__btn" data-tab="chats" type="button">
+     <svg viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M4 5h16v11H8l-4 4V5z" />
+     </svg> Community Reports </button> <button class="bottom-nav__btn" data-tab="news" type="button">
+     <svg viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M4 4h16v13a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V4z" /><path d="M8 8h8M8 12h8M8 16h4" />
+     </svg> News </button>
+   </nav>
+  </div>
+  <script>
+  // vh fix for mobile
+  function setVh() { document.documentElement.style.setProperty('--vh', `${window.innerHeight * 0.01}px`); }
+  setVh(); window.addEventListener('resize', setVh);
+
+  const API = (typeof window.API_URL === "string" && window.API_URL)
+    || (window.location.protocol === "file:"
+      ? "https://lightwatch-backend-lightwatch-backend.up.railway.app"
+      : window.location.origin);
+  const TK = "lw_admin_tk";
+  function getToken() { return sessionStorage.getItem(TK); }
+  function setToken(t) { sessionStorage.setItem(TK, t); }
+  function clearToken() { sessionStorage.removeItem(TK); }
+
+  // ===== TOAST SYSTEM =====
+  function showToast(msg, type = "info", duration = 3500) {
+    const icons = { ok: "✅", err: "❌", info: "ℹ️" };
+    const container = document.getElementById("toastContainer");
+    const el = document.createElement("div");
+    el.className = `toast toast--${type}`;
+    el.innerHTML = `<span class="toast__icon">${icons[type] || "ℹ️"}</span><span>${msg}</span>`;
+    container.appendChild(el);
+    const remove = () => {
+      el.classList.add("toast--hide");
+      el.addEventListener("animationend", () => el.remove(), { once: true });
+    };
+    setTimeout(remove, duration);
+    el.addEventListener("click", remove);
+  }
+
+  // ===== CONFIRM MODAL =====
+  function showConfirm({ icon = "⚠️", title, desc, confirmText = "Confirm", danger = true }) {
+    return new Promise(resolve => {
+      const backdrop = document.createElement("div");
+      backdrop.className = "modal-backdrop";
+      backdrop.innerHTML = `
+        <div class="modal-box">
+          <div class="modal-icon">${icon}</div>
+          <div class="modal-title">${title}</div>
+          <div class="modal-desc">${desc}</div>
+          <div class="modal-actions">
+            <button class="modal-btn modal-btn--cancel" id="modalCancel">Cancel</button>
+            <button class="modal-btn ${danger ? 'modal-btn--danger' : 'modal-btn--confirm'}" id="modalConfirm">${confirmText}</button>
+          </div>
+        </div>`;
+      document.body.appendChild(backdrop);
+      const close = (result) => {
+        backdrop.classList.add("modal--hide");
+        backdrop.addEventListener("animationend", () => backdrop.remove(), { once: true });
+        resolve(result);
+      };
+      backdrop.querySelector("#modalCancel").onclick = () => close(false);
+      backdrop.querySelector("#modalConfirm").onclick = () => close(true);
+      backdrop.addEventListener("click", e => { if (e.target === backdrop) close(false); });
+    });
+  }
+
+  function showPrompt({ title, description, fields = [{ name: 'value', label: 'Value', placeholder: '', value: '' }], confirmText = 'Save', cancelText = 'Cancel', icon = '✏️' }) {
+    return new Promise(resolve => {
+      const backdrop = document.createElement('div');
+      backdrop.className = 'modal-backdrop';
+      const inputsHtml = fields.map(field => `
+          <label class="modal-input-label${field.accent ? ` modal-input-label--${field.accent}` : ''}">${field.label}
+            <input id="modalInput_${field.name}" class="modal-input" type="${field.type || 'text'}" placeholder="${field.placeholder || ''}" value="${field.value || ''}" />
+          </label>
+        `).join('');
+      backdrop.innerHTML = `
+        <div class="modal-box">
+          <div class="modal-icon">${icon}</div>
+          <div class="modal-title">${title}</div>
+          <div class="modal-desc">${description}</div>
+          <div class="modal-form">${inputsHtml}</div>
+          <div class="modal-actions">
+            <button class="modal-btn modal-btn--cancel" id="modalCancel">${cancelText}</button>
+            <button class="modal-btn modal-btn--confirm" id="modalConfirm">${confirmText}</button>
+          </div>
+        </div>`;
+      document.body.appendChild(backdrop);
+      const close = (result) => {
+        backdrop.classList.add('modal--hide');
+        backdrop.addEventListener('animationend', () => backdrop.remove(), { once: true });
+        resolve(result);
+      };
+      backdrop.querySelector('#modalCancel').onclick = () => close(null);
+      backdrop.querySelector('#modalConfirm').onclick = () => {
+        const values = {};
+        fields.forEach(field => {
+          const input = backdrop.querySelector(`#modalInput_${field.name}`);
+          values[field.name] = input ? input.value.trim() : '';
+        });
+        if (fields.length === 1) {
+          close(values[fields[0].name]);
+        } else {
+          close(values);
+        }
+      };
+      backdrop.addEventListener('click', e => { if (e.target === backdrop) close(null); });
+      const firstInput = backdrop.querySelector('input');
+      if (firstInput) {
+        firstInput.focus();
+        firstInput.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            backdrop.querySelector('#modalConfirm')?.click();
+          }
+        });
+      }
+    });
+  }
+
+  // ===== SYSTEM EVENT LOG =====
+  const systemEvents = [];
+  function logSystemEvent(msg, type = "info") {
+    const icons = { info: "ℹ️", ok: "✅", warn: "⚠️", err: "❌" };
+    systemEvents.unshift({ msg, type, icon: icons[type] || "ℹ️", time: new Date().toISOString() });
+    if (systemEvents.length > 20) systemEvents.length = 20;
+    renderSystemLog();
+  }
+  function renderSystemLog() {
+    const el = document.getElementById("systemEventLog");
+    if (!el) return;
+    if (!systemEvents.length) { el.innerHTML = `<div class="a-empty">No events this session.</div>`; return; }
+    el.innerHTML = systemEvents.map((ev, i) => `
+      <div class="log-item" style="animation-delay:${i*0.04}s">
+        <span class="log-item__time">${fmtRel(ev.time)}</span>
+        <span class="log-item__content">${ev.icon} ${esc(ev.msg)}</span>
+        <span class="log-item__badge badge-${ev.type === 'ok' ? 'signup' : ev.type === 'err' ? 'chat' : 'signin'}">${ev.type.toUpperCase()}</span>
+      </div>`).join("");
+  }
+
+  function esc(str) {
+    const d = document.createElement("div"); d.textContent = String(str ?? ""); return d.innerHTML;
+  }
+
+  const handleColorCache = new Map();
+  function handleColor(handle) {
+    const key = String(handle || "").toLowerCase();
+    if (handleColorCache.has(key)) return handleColorCache.get(key);
+    let hash = 0;
+    for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+    const color = `hsl(${hash % 360}, 72%, 68%)`;
+    handleColorCache.set(key, color); return color;
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return "—";
+    return new Date(iso).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+  }
+
+  function fmtRel(iso) {
+    if (!iso) return "—";
+    const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+    if (diff < 60) return `${diff}s ago`;
+    if (diff < 3600) return `${Math.floor(diff/60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff/3600)}h ago`;
+    return `${Math.floor(diff/86400)}d ago`;
+  }
+
+  function fmtDuration(ms) {
+    const s = Math.floor(ms / 1000);
+    const m = Math.floor(s / 60), h = Math.floor(m / 60);
+    if (h > 0) return `${h}h ${m % 60}m`;
+    if (m > 0) return `${m}m ${s % 60}s`;
+    return `${s}s`;
+  }
+
+  async function apiFetch(path) {
+    const res = await fetch(`${API}${path}`, { headers: { Authorization: `Bearer ${getToken()}` } });
+    if (res.status === 401 || res.status === 403) { clearToken(); showLogin("Session expired."); throw new Error("auth"); }
+    if (!res.ok) throw new Error("Request failed");
+    return res.json();
+  }
+
+  async function apiPost(path, body) {
+    const res = await fetch(`${API}${path}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${getToken()}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body || {})
+    });
+    if (res.status === 401 || res.status === 403) { clearToken(); showLogin("Session expired."); throw new Error("auth"); }
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(payload.error || "Request failed");
+    return payload;
+  }
+
+  async function apiPatch(path, body) {
+    const res = await fetch(`${API}${path}`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${getToken()}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body || {})
+    });
+    if (res.status === 401 || res.status === 403) { clearToken(); showLogin("Session expired."); throw new Error("auth"); }
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(payload.error || "Request failed");
+    return payload;
+  }
+
+  async function apiDelete(path, idsOrBody) {
+    const payload = Array.isArray(idsOrBody) ? { ids: idsOrBody } : (idsOrBody || {});
+    const res = await fetch(`${API}${path}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${getToken()}`, "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    if (res.status === 401 || res.status === 403) { clearToken(); showLogin("Session expired."); throw new Error("auth"); }
+    const result = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(result.error || "Delete request failed");
+    return result;
+  }
+
+  async function apiDeleteNoBody(path) {
+    const res = await fetch(`${API}${path}`, { method: "DELETE", headers: { Authorization: `Bearer ${getToken()}` } });
+    if (res.status === 401 || res.status === 403) { clearToken(); showLogin("Session expired."); throw new Error("auth"); }
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(payload.error || "Delete request failed");
+    return payload;
+  }
+
+  // ===== IDLE TIMER =====
+  const IDLE_LIMIT_MS = 10 * 60 * 1000;
+  const IDLE_EVENTS = ["mousemove","mousedown","keydown","scroll","touchstart","click"];
+  let idleTimer = null, idleCountdown = null, idleStartedAt = null;
+
+  function handleIdleLogout() {
+    stopIdleTracking();
+    clearToken();
+    showLogin("Signed out after 10 minutes of inactivity.");
+  }
+
+  function resetIdleTimer() {
+    clearTimeout(idleTimer);
+    idleStartedAt = Date.now();
+    idleTimer = setTimeout(handleIdleLogout, IDLE_LIMIT_MS);
+  }
+
+  function startIdleTracking() {
+    IDLE_EVENTS.forEach(evt => document.addEventListener(evt, resetIdleTimer, { passive: true }));
+    resetIdleTimer();
+    idleCountdown = setInterval(() => {
+      if (!idleStartedAt) return;
+      const remaining = IDLE_LIMIT_MS - (Date.now() - idleStartedAt);
+      const el = document.getElementById("idleTimerDisplay");
+      if (el) {
+        const m = Math.floor(Math.max(remaining, 0) / 60000);
+        const s = Math.floor((Math.max(remaining, 0) % 60000) / 1000);
+        el.textContent = `${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+        el.style.color = remaining < 60000 ? "var(--red)" : remaining < 120000 ? "var(--amber)" : "";
+      }
+    }, 1000);
+  }
+
+  function stopIdleTracking() {
+    clearTimeout(idleTimer); clearInterval(idleCountdown);
+    idleTimer = null; idleCountdown = null; idleStartedAt = null;
+    IDLE_EVENTS.forEach(evt => document.removeEventListener(evt, resetIdleTimer));
+  }
+
+  // ===== REFRESH COUNTDOWN =====
+  let refreshCountdownVal = 15;
+  let refreshCountdownInt = null;
+  function startRefreshCountdown() {
+    clearInterval(refreshCountdownInt);
+    refreshCountdownVal = 15;
+    refreshCountdownInt = setInterval(() => {
+      refreshCountdownVal--;
+      const el = document.getElementById("qsRefreshCountdown");
+      if (el) el.textContent = refreshCountdownVal + "s";
+      if (refreshCountdownVal <= 0) refreshCountdownVal = 15;
+    }, 1000);
+  }
+
+  // ===== SESSION TRACKING =====
+  let sessionStartTime = null;
+
+  // ===== LOGIN =====
+  const passwordInput = document.getElementById("adminPasswordInput");
+  const loginBtn = document.getElementById("adminLoginBtn");
+  const loginError = document.getElementById("loginError");
+
+  async function handleLogin() {
+    const password = passwordInput.value;
+    loginError.textContent = "";
+    if (!password) { loginError.textContent = "Enter the admin password"; return; }
+    loginBtn.disabled = true; loginBtn.textContent = "Signing in…";
+    try {
+      // Best-effort wake the API (do not await so we don't block the UX)
+      ensureServerWarm().catch(() => {});
+      const res = await fetch(`${API}/admin/login`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password })
+      });
+      const result = await res.json();
+      if (!res.ok) { loginError.textContent = result.error || "Incorrect password"; return; }
+      setToken(result.token);
+      passwordInput.value = "";
+      showDashboard();
+    } catch (e) {
+      loginError.textContent = "Could not reach the server";
+    } finally {
+      loginBtn.disabled = false; loginBtn.textContent = "Sign in to dashboard";
+    }
+  }
+
+  loginBtn.addEventListener("click", handleLogin);
+  passwordInput.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); handleLogin(); } });
+
+  function showLogin(msg) {
+    stopIdleTracking();
+    document.getElementById("loginScreen").style.display = "flex";
+    document.getElementById("dashboard").style.display = "none";
+    passwordInput.value = "";
+    loginError.textContent = msg || "";
+    setTimeout(() => passwordInput.focus(), 300);
+  }
+
+  function showDashboard() {
+    document.getElementById("loginScreen").style.display = "none";
+    document.getElementById("dashboard").style.display = "block";
+    sessionStartTime = Date.now();
+    logSystemEvent("Admin signed in", "ok");
+    loadAll();
+    startIdleTracking();
+    startRefreshCountdown();
+    startDashboardAutoRefresh();
+    updateHealthPanel();
+  }
+
+  document.getElementById("logoutBtn").addEventListener("click", () => { logSystemEvent("Admin signed out", "info"); clearToken(); showLogin(); });
+  document.getElementById("logoutBtnMobile").addEventListener("click", () => { clearToken(); showLogin(); });
+
+  // ===== TAB SWITCHING =====
+  const TAB_LABELS = {
+    activity: "Live Activity", analytics: "Analytics", locations: "Locations",
+    reports: "Reports", users: "Users", chats: "Community Reports", news: "Official News", health: "System Health"
+  };
+
+  function switchTab(tab) {
+    document.querySelectorAll(".nav-btn, .bottom-nav__btn").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
+    document.querySelectorAll(".panel").forEach(p => p.classList.remove("active"));
+    const panel = document.getElementById(`${tab}Panel`);
+    if (panel) panel.classList.add("active");
+    const title = document.getElementById("mobilePageTitle");
+    if (title) title.textContent = TAB_LABELS[tab] || tab;
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    if (tab === "health") updateHealthPanel();
+    // Leaflet sizes itself off the container's dimensions at build time;
+    // if the Locations tab wasn't the active one yet, #locationsMap was
+    // still display:none (0×0) when initLocationMap() first tried to run.
+    // On reveal: try to build it now if it hasn't been built at all yet
+    // (this also renders+fits any pending data from the last
+    // updateLocationMap() call), and either way nudge Leaflet to
+    // remeasure now that it's actually on screen.
+    if (tab === "locations") {
+      if (!locationsMap) initLocationMap();
+      if (locationsMap) setTimeout(() => locationsMap.invalidateSize(), 0);
+    }
+  }
+
+  document.querySelectorAll(".nav-btn, .bottom-nav__btn").forEach(btn => {
+    btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+  });
+
+  let allUsers = [], allChats = [], allReports = [], allLocations = [], allNews = [];
+  const selectedUserIds = new Set(), selectedChatIds = new Set(), selectedReportIds = new Set(), selectedNewsIds = new Set();
+
+  function syncDeleteButtons() {
+    const delUsersBtn = document.getElementById("deleteUsersBtn");
+    const delChatsBtn = document.getElementById("deleteChatsBtn");
+    const delReportsBtn = document.getElementById("deleteReportsBtn");
+    const delNewsBtn = document.getElementById("deleteNewsBtn");
+    if (delUsersBtn) { const c = selectedUserIds.size; delUsersBtn.disabled = !c; delUsersBtn.textContent = c > 0 ? `Delete selected (${c})` : "Delete selected"; }
+    if (delChatsBtn) { const c = selectedChatIds.size; delChatsBtn.disabled = !c; delChatsBtn.textContent = c > 0 ? `Delete selected (${c})` : "Delete selected"; }
+    if (delReportsBtn) { const c = selectedReportIds.size; delReportsBtn.disabled = !c; delReportsBtn.textContent = c > 0 ? `Delete selected (${c})` : "Delete selected"; }
+    if (delNewsBtn) { const c = selectedNewsIds.size; delNewsBtn.disabled = !c; delNewsBtn.textContent = c > 0 ? `Delete selected (${c})` : "Delete selected"; }
+  }
+
+  async function loadAll() {
+    loadSummary(); loadActivity(); loadAnalytics(); loadLocations();
+    loadReportsPanel(); loadUsers(); loadChats(); loadNewsPanel();
+  }
+
+  // ===== LOCATIONS =====
+  async function loadLocations() {
+    const status = document.getElementById("locationsStatus");
+    try {
+      allLocations = await apiFetch("/admin/locations");
+      renderLocations(allLocations);
+      updateLocationQuickStats();
+      updateLocationMap(allLocations);
+      populateBroadcastLocations();
+      status.textContent = `${allLocations.length} location${allLocations.length !== 1 ? "s" : ""} tracked`;
+      const badge = document.getElementById("navBadgeLocations");
+      const onCount = allLocations.filter(l => l.status === "on").length;
+      if (badge) { badge.textContent = onCount; badge.classList.toggle("visible", onCount > 0); }
+    } catch (e) {
+      if (e.message !== "auth") status.textContent = "Could not load locations.";
+    }
+  }
+
+  function updateLocationQuickStats() {
+    const on = allLocations.filter(l => l.status === "on").length;
+    const off = allLocations.filter(l => l.status === "off").length;
+    const unk = allLocations.filter(l => !l.status || l.status === "unknown").length;
+    const qOn = document.getElementById("qsOnCount");
+    const qOff = document.getElementById("qsOffCount");
+    const qUnk = document.getElementById("qsUnknownCount");
+    if (qOn) qOn.textContent = on;
+    if (qOff) qOff.textContent = off;
+    if (qUnk) qUnk.textContent = unk;
+  }
+
+  let locationsMap = null;
+  let locationsHeatLayers = null;
+  let locationsMarkersLayer = null;
+  let locationFlyAnchor = null;
+  let activeLocFilter = "all";
+  let locationsMapHasFit = false;
+  // Data from the most recent updateLocationMap() call that arrived while
+  // #locationsMap was still hidden (Locations isn't the active tab on
+  // load) — held here so the very first reveal can render+fit against it
+  // immediately instead of waiting for the next loadLocations() poll.
+  let locationsMapPendingLocations = null;
+
+  function isElVisible(el) {
+    return !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+  }
+
+  // Same status → color mapping as the public app's Leaflet.heat map
+  // (see views/map-heat-home.js) so the admin view reads the same way.
+  const LOC_STATUS_COLOR = {
+    on: { fill: '#35D07F', glow: 'rgba(53,208,127,0.55)' },
+    unknown: { fill: '#9CA3AF', glow: 'rgba(156,163,175,0.5)' },
+    off: { fill: '#FF5C66', glow: 'rgba(255,92,102,0.6)' }
+  };
+  function locStatusKey(raw) { return String(raw || 'unknown').toLowerCase(); }
+
+  function initLocationMap() {
+    if (locationsMap || typeof L === 'undefined' || typeof L.heatLayer !== 'function') return;
+    // FIX (root cause of the map opening on the wrong/broken view): this
+    // used to build unconditionally the moment loadLocations() first ran
+    // — which happens on page load via loadAll(), well before anyone has
+    // switched to the Locations tab. Leaflet reads its container's actual
+    // pixel size at construction time; #locationsMap is still
+    // display:none (0×0) under the default-active tab at that point, so
+    // fitBounds() below was computing a fit against a nonsensical 0×0
+    // viewport. invalidateSize() on tab-switch (see switchTab()) fixes
+    // the container's rendered size but does NOT recompute a fit that
+    // was already wrong, and locationsMapHasFit being true by then meant
+    // it never got a second chance. Waiting for real layout here — and
+    // letting updateLocationMap()/switchTab() retry once it's visible —
+    // means the first fit Leaflet ever computes is against a real size.
+    const mapEl = document.getElementById('locationsMap');
+    if (!isElVisible(mapEl)) return;
+
+    locationsMap = L.map('locationsMap', {
+      center: [6.7, 0.0],
+      zoom: 5.2,
+      zoomControl: true,
+      attributionControl: false,
+      scrollWheelZoom: true
+    });
+
+    // Dark OSM basemap (CARTO's free dark_all tiles) — matches the dark
+    // theme used everywhere else in the admin console.
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png__LW_CARTO_QUERY__', {
+      subdomains: 'abcd',
+      maxZoom: 19
+    }).addTo(locationsMap);
+
+    // One isolated Leaflet.heat layer per status, same reasoning as the
+    // home view: keeps a dense cluster of stable ("on") points from
+    // bleeding into the outage/red gradient at low zoom.
+    locationsHeatLayers = {};
+    Object.entries(LOC_STATUS_COLOR).forEach(([status, color]) => {
+      locationsHeatLayers[status] = L.heatLayer([], {
+        radius: 34,
+        blur: 26,
+        maxZoom: 12,
+        gradient: { 0.25: 'transparent', 0.55: color.fill, 1: color.fill }
+      }).addTo(locationsMap);
+    });
+    locationsMarkersLayer = L.layerGroup().addTo(locationsMap);
+    
+    // Re-render markers when zoom changes to hide/show city labels based on zoom level
+    locationsMap.on('zoomend', () => updateLocationMap(allLocations));
+
+    // Belt-and-braces: force a size recheck shortly after construction in
+    // case build + reveal landed in the same tick, before the browser
+    // actually painted the new (now-visible) layout.
+    requestAnimationFrame(() => locationsMap.invalidateSize());
+    setTimeout(() => locationsMap.invalidateSize(), 250);
+
+    // Now that the map genuinely exists, render whatever the most recent
+    // updateLocationMap() call was holding onto while we waited.
+    if (locationsMapPendingLocations) {
+      const pending = locationsMapPendingLocations;
+      locationsMapPendingLocations = null;
+      updateLocationMap(pending);
+    }
+  }
+
+  async function updateLocationMap(locations) {
+    initLocationMap();
+    if (!locationsMap) {
+      // Still hidden (Locations isn't the active tab yet) — hold onto
+      // this batch so initLocationMap() can render it the moment the
+      // container is actually visible, instead of it just being dropped.
+      locationsMapPendingLocations = locations;
+      return;
+    }
+    try {
+      const response = await apiFetch('/locations/map');
+      const mapLocations = Array.isArray(response.locations) ? response.locations : [];
+      const visibleKeys = new Set((locations || allLocations).map(l => l.locationKey));
+      const plottable = mapLocations
+        .filter(loc => visibleKeys.has(loc.locationKey))
+        .filter(loc => Number.isFinite(Number(loc.lat)) && Number.isFinite(Number(loc.lng)) && (Number(loc.lat) || Number(loc.lng)));
+
+      Object.keys(locationsHeatLayers).forEach(status => {
+        const points = plottable
+          .filter(loc => locStatusKey(loc.status) === status)
+          .map(loc => [Number(loc.lat), Number(loc.lng), 1]);
+        locationsHeatLayers[status].setLatLngs(points);
+      });
+
+      locationsMarkersLayer.clearLayers();
+      const currentZoom = locationsMap.getZoom();
+      const hideLabels = currentZoom < 3; // Hide city names when zoomed out to region level
+      plottable.forEach(loc => {
+        const color = LOC_STATUS_COLOR[locStatusKey(loc.status)] || LOC_STATUS_COLOR.unknown;
+        const label = loc.name || loc.locationKey;
+        const icon = L.divIcon({
+          className: 'admin-loc-marker-icon',
+          // Wide enough to fit the label text beside the dot without
+          // Leaflet clipping it against the icon's own bounding box.
+          iconSize: hideLabels ? [14, 14] : [160, 20],
+          iconAnchor: hideLabels ? [7, 7] : [7, 10],
+          html: `
+            <span class="admin-loc-marker__dot" style="--marker-fill:${color.fill};--marker-glow:${color.glow}"></span>
+            ${hideLabels ? '' : `<span class="admin-loc-marker__label">${esc(label)}</span>`}
+          `
+        });
+        const marker = L.marker([Number(loc.lat), Number(loc.lng)], { icon, keyboard: false });
+        marker.bindPopup(`<strong>${esc(label)}</strong><br>${esc(locStatusKey(loc.status)).toUpperCase()}`);
+        locationsMarkersLayer.addLayer(marker);
+      });
+
+      if (plottable.length && !locationsMapHasFit) {
+        const bounds = L.latLngBounds(plottable.map(loc => [Number(loc.lat), Number(loc.lng)]));
+        locationsMap.fitBounds(bounds.pad(0.3), { maxZoom: 11, animate: true });
+        locationsMapHasFit = true;
+      }
+    } catch (err) {
+      console.warn('Could not update locations map', err);
+    }
+  }
+
+  const selectedLocationKeys = new Set();
+
+  function renderLocations(locations) {
+    const list = document.getElementById("locationsList");
+    const empty = document.getElementById("locationsEmpty");
+    const filtered = activeLocFilter === "all"
+      ? locations
+      : locations.filter(l => (l.status || "unknown") === activeLocFilter);
+
+    // Keep selection limited to locations that still exist at all (not
+    // just the current filter view — switching filters shouldn't silently
+    // drop a selection made under a different one).
+    const allKeys = new Set((allLocations.length ? allLocations : locations).map(l => l.locationKey));
+    Array.from(selectedLocationKeys).forEach(k => { if (!allKeys.has(k)) selectedLocationKeys.delete(k); });
+
+    if (!filtered.length) {
+      list.innerHTML = "";
+      empty.style.display = "block";
+      empty.querySelector(".empty-state__icon").textContent = "📍";
+      const messageNode = empty.querySelector('.empty-state__icon')?.nextSibling;
+      if (messageNode) messageNode.textContent = locations.length ? "No locations match that filter." : "No locations yet — add one above.";
+      updateLocationMap(filtered);
+      updateLocBulkToolbar(filtered);
+      return;
+    }
+    empty.style.display = "none";
+    list.innerHTML = filtered.map((loc, idx) => {
+      const status = loc.status || "unknown";
+      const chipClass = status === "on" ? "status-chip--on" : status === "off" ? "status-chip--off" : "status-chip--unknown";
+      const chipLabel = status === "on" ? "Light ON" : status === "off" ? "Light OFF" : "Unknown";
+      const meta = loc.reportedAt
+        ? `Last updated by <strong>${esc(loc.reportedBy || "—")}</strong> · ${fmtRel(loc.reportedAt)}`
+        : "No status set yet";
+      const isOn = status === "on";
+      const isSelected = selectedLocationKeys.has(loc.locationKey);
+      const schedule = loc.schedule;
+      const scheduleLine = (schedule && (schedule.onTime || schedule.offTime))
+        ? `<div class="loc-card__schedule">⏱ ${schedule.onTime ? `ON ${esc(schedule.onTime)}` : ""}${schedule.onTime && schedule.offTime ? " · " : ""}${schedule.offTime ? `OFF ${esc(schedule.offTime)}` : ""}</div>`
+        : "";
+      return `
+        <div class="loc-card loc-card--${status}" data-location-key="${esc(loc.locationKey)}" style="animation-delay:${idx * 0.04}s">
+          <div class="loc-card__body">
+            <div class="loc-card__top">
+              <label class="loc-card__name" style="cursor:pointer;">
+                <input type="checkbox" class="loc-card__select" data-select-key="${esc(loc.locationKey)}" ${isSelected ? "checked" : ""} aria-label="Select ${esc(loc.label)}" />
+                <span class="loc-card__dot loc-card__dot--${status}"></span>
+                ${esc(loc.label)}
+              </label>
+              <span class="status-chip ${chipClass}">${chipLabel}</span>
+            </div>
+            <div class="loc-card__meta">${meta}</div>
+            ${scheduleLine}
+          </div>
+          <div class="loc-card__footer">
+            <div class="loc-toggle-group">
+              <label class="loc-toggle-switch">
+                <input type="checkbox" data-action="toggle" data-loc-key="${esc(loc.locationKey)}" ${isOn ? "checked" : ""} />
+                <span class="loc-toggle-track"></span>
+                <span class="loc-toggle-thumb"></span>
+              </label>
+              <span class="loc-toggle-state-label loc-toggle-state-label--${status}">${isOn ? "ON" : "OFF"}</span>
+            </div>
+            <button class="loc-card__action-btn" type="button" data-action="schedule" data-loc-key="${esc(loc.locationKey)}" title="Set ON/OFF timer for ${esc(loc.label)}" aria-label="Set ON/OFF timer for ${esc(loc.label)}">⏱</button>
+            <button class="loc-card__action-btn" type="button" data-action="delete" data-loc-key="${esc(loc.locationKey)}" title="Remove ${esc(loc.label)}" aria-label="Remove ${esc(loc.label)}">✕</button>
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    list.querySelectorAll("input[data-select-key]").forEach(cb => {
+      cb.addEventListener("change", (e) => {
+        const key = e.currentTarget.dataset.selectKey;
+        if (e.currentTarget.checked) selectedLocationKeys.add(key);
+        else selectedLocationKeys.delete(key);
+        updateLocBulkToolbar(filtered);
+      });
+    });
+
+    list.querySelectorAll("input[data-action='toggle']").forEach(input => {
+      input.addEventListener("change", async (e) => {
+        const key = e.currentTarget.dataset.locKey;
+        const newStatus = e.currentTarget.checked ? "on" : "off";
+        e.currentTarget.disabled = true;
+        await pushLocationStatus(key, newStatus);
+      });
+    });
+
+    list.querySelectorAll("button[data-action='schedule']").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        const key = e.currentTarget.dataset.locKey;
+        const loc = allLocations.find(l => l.locationKey === key);
+        const existing = loc?.schedule || {};
+        const isCurrentlyOn = (loc?.status || "unknown") === "on";
+        const onField = { name: "onTime", label: "☀️ Turn ON at", accent: "on", type: "time", value: existing.onTime || "" };
+        const offField = { name: "offTime", label: "🌙 Turn OFF at", accent: "off", type: "time", value: existing.offTime || "" };
+        // Lead with whichever action is next for this location — if the
+        // light is currently on, the OFF time is the more relevant one to
+        // set first, and vice versa.
+        const fields = isCurrentlyOn ? [offField, onField] : [onField, offField];
+        const result = await showPrompt({
+          icon: "⏱",
+          title: `Timer — ${loc?.label || key}`,
+          description: "Set a daily time to auto-switch this location's light status. Leave both blank and save to clear the timer.",
+          fields,
+          confirmText: "Save timer"
+        });
+        if (result === null) return;
+        try {
+          await apiPost("/admin/locations/schedule", { location: key, onTime: result.onTime || null, offTime: result.offTime || null });
+          if (loc) loc.schedule = (result.onTime || result.offTime) ? { onTime: result.onTime || null, offTime: result.offTime || null } : null;
+          renderLocations(allLocations);
+          const label = loc?.label || key;
+          if (result.onTime || result.offTime) {
+            logSystemEvent(`Set timer for ${label}: ON ${result.onTime || "—"} / OFF ${result.offTime || "—"}`, "ok");
+            showToast(`Timer saved for ${label}`, "ok");
+          } else {
+            logSystemEvent(`Cleared timer for ${label}`, "info");
+            showToast(`Timer cleared for ${label}`, "info");
+          }
+        } catch (err) {
+          if (err.message !== "auth") showToast(err.message || "Could not save timer.", "err");
+        }
+      });
+    });
+
+    list.querySelectorAll("button[data-action='delete']").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        const key = e.currentTarget.dataset.locKey;
+        const loc = allLocations.find(l => l.locationKey === key);
+        const confirmed = await showConfirm({
+          icon: "🗑️", title: "Remove Location",
+          desc: `Remove <strong>${esc(loc?.label || key)}</strong> from the tracking list? This cannot be undone.`,
+          confirmText: "Remove", danger: true
+        });
+        if (!confirmed) return;
+        try {
+          await apiDelete('/admin/locations', { locationKeys: [key] });
+          allLocations = allLocations.filter(l => l.locationKey !== key);
+          selectedLocationKeys.delete(key);
+          renderLocations(allLocations);
+          updateLocationQuickStats();
+          logSystemEvent(`Removed location: ${loc?.label || key}`, "warn");
+          showToast(`Removed ${loc?.label || key}`, "info");
+        } catch (err) {
+          if (err.message !== "auth") showToast(err.message || "Could not remove location.", "err");
+        }
+      });
+    });
+
+    updateLocationMap(filtered);
+    updateLocBulkToolbar(filtered);
+  }
+
+  // Keeps the bulk toolbar (select-all state, selected count, enabled
+  // state of the selection-scoped buttons) in sync with
+  // selectedLocationKeys — called after every render and every
+  // checkbox change rather than re-rendering the whole list for that.
+  function updateLocBulkToolbar(filtered) {
+    const toolbar = document.getElementById("locBulkToolbar");
+    if (!toolbar) return;
+    toolbar.hidden = !filtered.length;
+    if (!filtered.length) return;
+
+    const selectAllCb = document.getElementById("locSelectAll");
+    const countEl = document.getElementById("locSelectedCount");
+    const offBtn = document.getElementById("locBulkOffBtn");
+    const onBtn = document.getElementById("locBulkOnBtn");
+
+    const selectedInView = filtered.filter(l => selectedLocationKeys.has(l.locationKey)).length;
+    if (selectAllCb) selectAllCb.checked = selectedInView > 0 && selectedInView === filtered.length;
+    if (countEl) countEl.textContent = selectedLocationKeys.size ? `${selectedLocationKeys.size} selected` : "";
+    if (offBtn) offBtn.disabled = selectedLocationKeys.size === 0;
+    if (onBtn) onBtn.disabled = selectedLocationKeys.size === 0;
+    const pushSelectedBtn = document.getElementById("locPushSelectedBtn");
+    if (pushSelectedBtn) pushSelectedBtn.disabled = selectedLocationKeys.size === 0;
+  }
+
+  document.getElementById("locFilterTabs")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-loc-filter]");
+    if (!btn) return;
+    activeLocFilter = btn.dataset.locFilter;
+    document.querySelectorAll("#locFilterTabs .loc-filter-tab").forEach(b => b.classList.toggle("is-active", b === btn));
+    const q = (document.getElementById("locationSearch")?.value || "").toLowerCase();
+    renderLocations(q ? allLocations.filter(l => l.label.toLowerCase().includes(q)) : allLocations);
+  });
+
+  async function pushLocationStatus(locationKey, status) {
+    try {
+      await apiPost("/admin/lightstatus", { location: locationKey, status });
+      await Promise.all([loadLocations(), loadSummary(), loadActivity()]);
+      const refreshedItem = document.querySelector(`.loc-card[data-location-key="${CSS.escape(locationKey)}"]`);
+      if (refreshedItem) {
+        refreshedItem.classList.add("loc-card--pushed");
+        setTimeout(() => refreshedItem.classList.remove("loc-card--pushed"), 1200);
+      }
+      const loc = allLocations.find(l => l.locationKey === locationKey);
+      logSystemEvent(`Set ${loc?.label || locationKey} → ${status.toUpperCase()}`, "ok");
+      showToast(`${loc?.label || locationKey} set to ${status.toUpperCase()}`, "ok");
+    } catch (e) {
+      if (e.message !== "auth") showToast(e.message || "Could not update location status.", "err");
+      // Re-render so a failed toggle snaps back to its actual last-known
+      // state instead of sitting on the flipped-but-not-saved position.
+      renderLocations(allLocations);
+    }
+  }
+
+  // Same POST /admin/lightstatus contract as pushLocationStatus, fired for
+  // every key in one batch (used by the bulk toolbar's "selected"/"all"
+  // actions) — one combined refresh + toast at the end rather than one
+  // per location.
+  async function pushLocationStatusMany(locationKeys, status) {
+    if (!locationKeys.length) return;
+    try {
+      await Promise.all(locationKeys.map(key => apiPost("/admin/lightstatus", { location: key, status })));
+      await Promise.all([loadLocations(), loadSummary(), loadActivity()]);
+      logSystemEvent(`Set ${locationKeys.length} location${locationKeys.length === 1 ? "" : "s"} → ${status.toUpperCase()}`, "ok");
+      showToast(`${locationKeys.length} location${locationKeys.length === 1 ? "" : "s"} set to ${status.toUpperCase()}`, "ok");
+    } catch (e) {
+      if (e.message !== "auth") showToast(e.message || "Could not update some locations.", "err");
+      renderLocations(allLocations);
+    }
+  }
+
+  document.getElementById("refreshLocations")?.addEventListener("click", loadLocations);
+  document.getElementById("locSelectAll")?.addEventListener("change", (e) => {
+    const q = (document.getElementById("locationSearch")?.value || "").toLowerCase();
+    const filtered = q ? allLocations.filter(l => l.label.toLowerCase().includes(q)) : allLocations;
+    const inView = activeLocFilter === "all" ? filtered : filtered.filter(l => (l.status || "unknown") === activeLocFilter);
+    if (e.target.checked) inView.forEach(l => selectedLocationKeys.add(l.locationKey));
+    else inView.forEach(l => selectedLocationKeys.delete(l.locationKey));
+    renderLocations(allLocations);
+  });
+  document.getElementById("locDeselectAllBtn")?.addEventListener("click", () => {
+    selectedLocationKeys.clear();
+    const selectAllCb = document.getElementById("locSelectAll");
+    if (selectAllCb) selectAllCb.checked = false;
+    renderLocations(allLocations);
+  });
+  document.getElementById("locBulkOffBtn")?.addEventListener("click", () => {
+    pushLocationStatusMany(Array.from(selectedLocationKeys), "off");
+  });
+  document.getElementById("locBulkOnBtn")?.addEventListener("click", () => {
+    pushLocationStatusMany(Array.from(selectedLocationKeys), "on");
+  });
+  document.getElementById("locBulkAllOffBtn")?.addEventListener("click", async () => {
+    const confirmed = await showConfirm({
+      icon: "⚠️", title: "Turn all locations OFF",
+      desc: `Push a live OFF status to all <strong>${allLocations.length}</strong> tracked location${allLocations.length === 1 ? "" : "s"}? This updates what every user sees on their home screen.`,
+      confirmText: "Turn all OFF", danger: true
+    });
+    if (!confirmed) return;
+    pushLocationStatusMany(allLocations.map(l => l.locationKey), "off");
+  });
+  // Sends one /admin/broadcast call per location key, in sequence (not
+  // Promise.all) so this is genuinely "one by one" — each call already
+  // posts to that area's Community Reports feed AND pushes a notification
+  // to subscribed devices, same as the single-location broadcast card.
+  async function pushMessageToLocations(locationKeys, { title, body }) {
+    const statusEl = document.getElementById("locPushStatus");
+    if (!locationKeys.length || !statusEl) return;
+    statusEl.className = "broadcast-status";
+    let sentOk = 0, failed = 0;
+    for (let i = 0; i < locationKeys.length; i++) {
+      statusEl.textContent = `Sending ${i + 1} of ${locationKeys.length}…`;
+      try {
+        await apiPost("/admin/broadcast", { title, body, location: locationKeys[i] });
+        sentOk++;
+      } catch (e) {
+        if (e.message === "auth") return;
+        failed++;
+      }
+      if (i < locationKeys.length - 1) await new Promise(r => setTimeout(r, 200));
+    }
+    statusEl.textContent = failed
+      ? `✅ Sent to ${sentOk} location(s) — ${failed} failed.`
+      : `✅ Sent to ${sentOk} location(s), posted to their Community Reports feed and pushed as a notification.`;
+    statusEl.classList.add(failed ? "broadcast-status--err" : "broadcast-status--ok");
+    logSystemEvent(`Pushed message to ${sentOk} location${sentOk === 1 ? "" : "s"}${failed ? ` (${failed} failed)` : ""}`, failed ? "warn" : "ok");
+    showToast(failed ? `Sent to ${sentOk}, ${failed} failed` : `Sent to ${sentOk} location${sentOk === 1 ? "" : "s"}`, failed ? "err" : "ok");
+    loadChats();
+  }
+
+  document.getElementById("locPushSelectedBtn")?.addEventListener("click", async () => {
+    const title = document.getElementById("locPushTitleInput").value.trim();
+    const body = document.getElementById("locPushBodyInput").value.trim();
+    if (!body) { showToast("Write a message first.", "err"); return; }
+    const keys = Array.from(selectedLocationKeys);
+    if (!keys.length) { showToast("Select at least one location.", "err"); return; }
+    const confirmed = await showConfirm({
+      icon: "📢", title: "Push to Selected Areas",
+      desc: `Send this message to <strong>${keys.length}</strong> selected location${keys.length === 1 ? "" : "s"}: "<strong>${esc(body.slice(0, 80))}${body.length > 80 ? "…" : ""}</strong>"<br><br>This posts to each area's Community Reports feed and pushes a notification to their devices.`,
+      confirmText: "Send", danger: false
+    });
+    if (!confirmed) return;
+    const btn = document.getElementById("locPushSelectedBtn");
+    btn.disabled = true;
+    await pushMessageToLocations(keys, { title, body });
+    document.getElementById("locPushBodyInput").value = "";
+    document.getElementById("locPushTitleInput").value = "";
+    updateLocBulkToolbar(allLocations);
+    btn.disabled = selectedLocationKeys.size === 0;
+  });
+
+  document.getElementById("locPushAllBtn")?.addEventListener("click", async () => {
+    const title = document.getElementById("locPushTitleInput").value.trim();
+    const body = document.getElementById("locPushBodyInput").value.trim();
+    if (!body) { showToast("Write a message first.", "err"); return; }
+    if (!allLocations.length) { showToast("No locations to send to.", "err"); return; }
+    const confirmed = await showConfirm({
+      icon: "📢", title: "Push to All Locations",
+      desc: `Send this message to all <strong>${allLocations.length}</strong> tracked locations, one by one: "<strong>${esc(body.slice(0, 80))}${body.length > 80 ? "…" : ""}</strong>"<br><br>This posts to each area's Community Reports feed and pushes a notification to their devices.`,
+      confirmText: "Send to all", danger: false
+    });
+    if (!confirmed) return;
+    const btn = document.getElementById("locPushAllBtn");
+    btn.disabled = true;
+    await pushMessageToLocations(allLocations.map(l => l.locationKey), { title, body });
+    document.getElementById("locPushBodyInput").value = "";
+    document.getElementById("locPushTitleInput").value = "";
+    btn.disabled = false;
+  });
+
+  document.getElementById("locationSearch")?.addEventListener("input", (e) => {
+    const q = e.target.value.toLowerCase();
+    renderLocations(q ? allLocations.filter(l => l.label.toLowerCase().includes(q)) : allLocations);
+  });
+
+  // Region select + city input, wired through the same shared
+  // js/utils/location-picker.js widget the user-facing Locations map's
+  // Add Location modal and the signup form use — gives admin real
+  // search-as-you-type + geolocate instead of a bare text box, and
+  // (crucially) a real lat/lng pin so the added location shows up on
+  // the public map immediately instead of waiting on a geocode guess
+  // (see getLocationsMapData() in server.js).
+  const newLocationRegionEl = document.getElementById("newLocationRegion");
+  const newLocationPicker = window.LWLocationPicker?.attach({
+    input: document.getElementById("newLocationInput"),
+    resultsEl: document.getElementById("newLocationResults"),
+    locateBtn: document.getElementById("newLocationLocateBtn"),
+    hintEl: document.getElementById("newLocationHint"),
+    getRegion: () => newLocationRegionEl?.value || ""
+  }) || null;
+  newLocationRegionEl?.addEventListener("change", () => newLocationPicker?.refresh());
+
+  document.getElementById("addLocationBtn")?.addEventListener("click", async () => {
+    const input = document.getElementById("newLocationInput");
+    const value = input.value.trim();
+    if (!value) return;
+    const key = value.toLowerCase().split(",")[0].trim();
+    const region = newLocationRegionEl?.value || null;
+    const coords = newLocationPicker ? newLocationPicker.getCoords() : null;
+    if (allLocations.some(l => l.locationKey === key)) {
+      input.value = "";
+      document.getElementById("locationSearch").value = value.split(",")[0].trim();
+      renderLocations(allLocations.filter(l => l.locationKey === key));
+      showToast("Location already exists — showing it now.", "info");
+      return;
+    }
+    const label = key.split(" ").filter(Boolean).map(w => w[0].toUpperCase() + w.slice(1)).join(" ");
+    try {
+      await apiPost('/admin/locations', {
+        location: key,
+        label,
+        region,
+        ...(coords ? { lat: coords.lat, lng: coords.lng } : {})
+      });
+      allLocations = [...allLocations, { locationKey: key, label, region, lat: coords?.lat ?? null, lng: coords?.lng ?? null, status: "unknown", reportedBy: null, reportedAt: null }]
+        .sort((a, b) => a.label.localeCompare(b.label));
+      renderLocations(allLocations);
+      updateLocationQuickStats();
+      input.value = "";
+      newLocationPicker?.reset();
+      logSystemEvent(`Added location: ${label}`, "info");
+      showToast(`Added "${label}"`, "ok");
+    } catch (err) {
+      if (err.message !== "auth") showToast(err.message || "Could not add location.", "err");
+    }
+  });
+
+  // ===== REPORTS =====
+  async function loadReportsPanel() {
+    const table = document.getElementById("reportsTable");
+    const empty = document.getElementById("reportsEmpty");
+    const status = document.getElementById("reportsStatus");
+    const selectAll = document.getElementById("reportsSelectAll");
+    try {
+      allReports = await apiFetch("/admin/reports?limit=80");
+      const validIds = new Set(allReports.map(r => String(r.id)));
+      [...selectedReportIds].forEach(id => { if (!validIds.has(id)) selectedReportIds.delete(id); });
+      const badge = document.getElementById("navBadgeReports");
+      if (badge) { badge.textContent = allReports.length; badge.classList.toggle("visible", allReports.length > 0); }
+      if (!allReports.length) {
+        table.style.display = "none"; empty.style.display = "block";
+        status.textContent = "No reports available.";
+        if (selectAll) selectAll.checked = false;
+        syncDeleteButtons(); return;
+      }
+      const tbody = document.getElementById("reportsTbody");
+      tbody.innerHTML = allReports.map(r => `
+        <tr>
+          <td data-label="Select"><input type="checkbox" class="select-checkbox report-row-select" data-report-id="${esc(r.id)}" ${selectedReportIds.has(String(r.id)) ? "checked" : ""} /></td>
+          <td data-label="Type" class="${r.type === 'warning' ? 'faint' : 'gold'}">${esc(r.type === 'warning' ? '⚡ Outage' : '✅ Restored')}</td>
+          <td data-label="Location">${esc(r.location || '—')}</td>
+          <td data-label="Details">${esc(r.text || r.title || '—')}</td>
+          <td data-label="Reported" class="faint">${fmtDate(r.reportedAt)}</td>
+          <td data-label="Actions"><button type="button" class="row-del-btn report-row-delete" data-report-del="${esc(r.id)}">Delete</button></td>
+        </tr>`).join("");
+      tbody.querySelectorAll(".report-row-select").forEach(cb => {
+        cb.addEventListener("change", (e) => {
+          const id = e.target.dataset.reportId; if (!id) return;
+          if (e.target.checked) selectedReportIds.add(id); else selectedReportIds.delete(id);
+          syncDeleteButtons();
+        });
+      });
+      tbody.querySelectorAll(".report-row-delete").forEach(btn => {
+        btn.addEventListener("click", async (e) => { await deleteReportsByIds([e.currentTarget.dataset.reportDel]); });
+      });
+      if (selectAll) {
+        const visibleIds = allReports.map(r => String(r.id));
+        selectAll.checked = visibleIds.length > 0 && visibleIds.every(id => selectedReportIds.has(id));
+      }
+      table.style.display = "table"; empty.style.display = "none";
+      status.textContent = `${allReports.length} recent report${allReports.length === 1 ? '' : 's'}`;
+      syncDeleteButtons();
+    } catch (e) {
+      if (e.message !== "auth") { table.style.display = "none"; empty.style.display = "block"; status.textContent = "Could not load reports."; }
+    }
+  }
+
+  async function deleteReportsByIds(ids) {
+    if (!ids.length) return;
+    const confirmed = await showConfirm({
+      icon: "🗑️", title: "Delete Reports",
+      desc: ids.length === 1 ? "Delete this report? This cannot be undone." : `Delete ${ids.length} reports? This cannot be undone.`,
+      confirmText: "Delete", danger: true
+    });
+    if (!confirmed) return;
+    try {
+      await apiDelete('/admin/reports', ids);
+      ids.forEach(id => selectedReportIds.delete(String(id)));
+      await Promise.all([loadSummary(), loadActivity(), loadReportsPanel()]);
+      logSystemEvent(`Deleted ${ids.length} report(s)`, "warn");
+      showToast(`Deleted ${ids.length} report${ids.length > 1 ? "s" : ""}`, "ok");
+    } catch (e) {
+      if (e.message !== "auth") showToast(e.message || "Could not delete reports.", "err");
+    }
+  }
+
+  async function clearAllReports() {
+    const confirmed = await showConfirm({
+      icon: "⚠️", title: "Clear All Reports",
+      desc: "This will permanently delete every outage report. This action cannot be undone.",
+      confirmText: "Clear all", danger: true
+    });
+    if (!confirmed) return;
+    try {
+      const payload = await apiDeleteNoBody('/admin/reports');
+      const deleted = Number(payload.deletedCount || 0);
+      await Promise.all([loadSummary(), loadActivity(), loadReportsPanel()]);
+      logSystemEvent(`Cleared all ${deleted} reports`, "warn");
+      showToast(`Cleared ${deleted} report${deleted === 1 ? "" : "s"}`, "ok");
+    } catch (e) {
+      if (e.message !== "auth") showToast(e.message || "Could not clear reports.", "err");
+    }
+  }
+
+  // ===== SUMMARY + ACTIVITY =====
+  async function loadSummary() {
+    try {
+      const s = await apiFetch("/admin/summary");
+      document.getElementById("sTotal").textContent = s.userCount ?? "—";
+      document.getElementById("sNew24h").textContent = s.newUsers24h ?? "—";
+      document.getElementById("sChats").textContent = s.chatCount ?? "—";
+      document.getElementById("sChats24h").textContent = s.newChats24h ?? "—";
+      document.getElementById("sLocations").textContent = s.locationsTracked ?? "—";
+      const healthEl = document.getElementById("hTotalEvents");
+      if (healthEl) healthEl.textContent = ((s.userCount || 0) + (s.chatCount || 0)).toLocaleString();
+    } catch(e) {}
+  }
+
+  async function loadActivity() {
+    try {
+      const [users, chats] = await Promise.all([apiFetch("/admin/users"), apiFetch("/admin/chats")]);
+      const events = [
+        ...users.map(u => ({ type:"signup", time: u.createdAt, name: u.name, contact: u.emailPhone, location: u.city ? `${u.city}, ${u.region}` : u.region })),
+        ...chats.map(c => ({ type:"chat", time: c.createdAt, handle: c.handle, text: c.text, location: c.location }))
+      ].sort((a,b) => new Date(b.time) - new Date(a.time)).slice(0, 60);
+
+      if (events.length > 0) document.getElementById("sLastActivity").textContent = fmtRel(events[0].time);
+
+      const log = document.getElementById("activityLog");
+      const badge = document.getElementById("navBadgeActivity");
+      if (badge) { badge.textContent = events.length; badge.classList.toggle("visible", events.length > 0); }
+
+      if (events.length === 0) {
+        log.innerHTML = `<div class="empty-state"><div class="empty-state__icon">⚡</div>No activity yet.</div>`;
+        document.getElementById("activityStatus").textContent = "No activity yet."; return;
+      }
+      log.innerHTML = events.map((ev, i) => {
+        if (ev.type === "signup") return `
+          <div class="log-item" style="animation-delay:${i*0.03}s">
+            <span class="log-item__time">${fmtRel(ev.time)}</span>
+            <span class="log-item__content"><strong>${esc(ev.name)}</strong> signed up — ${esc(ev.contact)}${ev.location ? ` <span style="color:var(--faint)">· ${esc(ev.location)}</span>` : ""}</span>
+            <span class="log-item__badge badge-signup">New user</span>
+          </div>`;
+        return `
+          <div class="log-item" style="animation-delay:${i*0.03}s">
+            <span class="log-item__time">${fmtRel(ev.time)}</span>
+            <span class="log-item__content"><strong style="color:${handleColor(ev.handle)}">${esc(ev.handle)}</strong>: "${esc(ev.text.length > 60 ? ev.text.slice(0,60)+"…" : ev.text)}"${ev.location ? ` <span style="color:var(--faint)">in ${esc(ev.location)}</span>` : ""}</span>
+            <span class="log-item__badge badge-chat">Chat</span>
+          </div>`;
+      }).join("");
+      document.getElementById("activityStatus").textContent = `${events.length} recent events`;
+    } catch(e) {
+      if (e.message !== "auth") document.getElementById("activityStatus").textContent = "Could not load activity.";
+    }
+  }
+
+  // ===== USERS =====
+  async function loadUsers() {
+    try {
+      allUsers = await apiFetch("/admin/users");
+      const validIds = new Set(allUsers.map(u => String(u._id)));
+      [...selectedUserIds].forEach(id => { if (!validIds.has(id)) selectedUserIds.delete(id); });
+      renderUsers(allUsers);
+      document.getElementById("usersStatus").textContent = `${allUsers.length} registered user${allUsers.length !== 1 ? "s" : ""}`;
+      syncDeleteButtons();
+    } catch(e) {
+      if (e.message !== "auth") document.getElementById("usersStatus").textContent = "Could not load users.";
+    }
+  }
+
+  function renderUsers(users) {
+    const tbody = document.getElementById("usersTbody");
+    const table = document.getElementById("usersTable");
+    const empty = document.getElementById("usersEmpty");
+    const selectAll = document.getElementById("usersSelectAll");
+    if (!users.length) { table.style.display = "none"; empty.style.display = "block"; if (selectAll) selectAll.checked = false; return; }
+    tbody.innerHTML = users.map(u => {
+      const lastActiveMs = u.lastActiveAt ? Date.now() - new Date(u.lastActiveAt).getTime() : Infinity;
+      const isActive = u.isActive || lastActiveMs < 10 * 60 * 1000;
+      const statusLabel = isActive ? 'Active now' : (u.lastActiveAt ? fmtRel(u.lastActiveAt) : 'Idle');
+      const statusClass = isActive ? 'gold' : 'faint';
+      return `
+        <td data-label="Select"><input type="checkbox" class="select-checkbox user-row-select" data-user-id="${esc(u._id)}" ${selectedUserIds.has(String(u._id)) ? "checked" : ""} /></td>
+        <td data-label="Name">${esc(u.name)}</td>
+        <td data-label="Contact" class="gold">${esc(u.emailPhone)}</td>
+        <td data-label="Region">${esc(u.region)}</td>
+        <td data-label="City">${esc(u.city)}</td>
+        <td data-label="Last seen" class="${statusClass}">${esc(statusLabel)}</td>
+        <td data-label="Joined" class="faint">${fmtDate(u.createdAt)}</td>
+        <td data-label="Actions"><button type="button" class="btn-ghost row-edit-btn" data-user-edit="${esc(u._id)}">Edit</button> <button type="button" class="row-del-btn user-row-delete" data-user-del="${esc(u._id)}">Delete</button></td>
+      </tr>`;
+    }).join("");
+    table.style.display = "table"; empty.style.display = "none";
+    tbody.querySelectorAll(".user-row-select").forEach(cb => {
+      cb.addEventListener("change", (e) => {
+        const id = e.target.dataset.userId; if (!id) return;
+        if (e.target.checked) selectedUserIds.add(id); else selectedUserIds.delete(id);
+        syncDeleteButtons();
+      });
+    });
+    tbody.querySelectorAll(".row-edit-btn").forEach(btn => {
+      btn.addEventListener("click", async (e) => { await editUserLocation(e.currentTarget.dataset.userEdit); });
+    });
+    tbody.querySelectorAll(".user-row-delete").forEach(btn => {
+      btn.addEventListener("click", async (e) => { await deleteUsersByIds([e.currentTarget.dataset.userDel]); });
+    });
+    if (selectAll) {
+      const visibleIds = users.map(u => String(u._id));
+      selectAll.checked = visibleIds.length > 0 && visibleIds.every(id => selectedUserIds.has(id));
+    }
+  }
+
+  async function editUserLocation(userId) {
+    if (!userId) return;
+    const user = allUsers.find(u => String(u._id) === String(userId));
+    if (!user) return;
+    const result = await showPrompt({
+      title: `Edit location for ${esc(user.name || 'user')}`,
+      description: `Update the user's city and region. Current location: ${esc(user.city || 'unknown')}, ${esc(user.region || 'unknown')}.`,
+      fields: [
+        { name: 'city', label: 'City', placeholder: 'City', value: user.city || '' },
+        { name: 'region', label: 'Region', placeholder: 'Region', value: user.region || '' }
+      ],
+      confirmText: 'Save location',
+      cancelText: 'Cancel'
+    });
+    if (!result || !result.city || !result.region) return;
+    const city = result.city.trim();
+    const region = result.region.trim();
+    if (!city || !region) return;
+    try {
+      await apiPatch(`/admin/users/${encodeURIComponent(userId)}/location`, { city, region });
+      await Promise.all([loadUsers(), loadActivity()]);
+      logSystemEvent(`Updated location for ${user.name || user.emailPhone || userId} → ${city}, ${region}`, "info");
+      showToast(`Updated ${user.name || user.emailPhone || 'user'} location`, "ok");
+    } catch (err) {
+      if (err.message !== "auth") showToast(err.message || "Could not update user location.", "err");
+    }
+  }
+
+  async function deleteUsersByIds(ids) {
+    if (!ids.length) return;
+    const confirmed = await showConfirm({
+      icon: "👤", title: "Delete Users",
+      desc: ids.length === 1
+        ? "Delete this user? This will also remove their chats and subscriptions."
+        : `Delete ${ids.length} users? This will also remove their chats and subscriptions.`,
+      confirmText: "Delete users", danger: true
+    });
+    if (!confirmed) return;
+    try {
+      await apiDelete('/admin/users', ids);
+      ids.forEach(id => selectedUserIds.delete(String(id)));
+      await Promise.all([loadUsers(), loadChats(), loadSummary(), loadActivity()]);
+      logSystemEvent(`Deleted ${ids.length} user(s)`, "warn");
+      showToast(`Deleted ${ids.length} user${ids.length > 1 ? "s" : ""}`, "ok");
+    } catch (e) {
+      if (e.message !== "auth") showToast(e.message || "Could not delete users.", "err");
+    }
+  }
+
+  // ===== BROADCAST =====
+  const broadcastTitleInput = document.getElementById("broadcastTitleInput");
+  const broadcastBodyInput = document.getElementById("broadcastBodyInput");
+
+  broadcastBodyInput?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      document.getElementById("broadcastSendBtn")?.click();
+    }
+  });
+
+  const broadcastLocationSelect = document.getElementById("broadcastLocationSelect");
+
+  // Keep the location dropdown in sync with whatever locations exist —
+  // called once locations load, and again any time loadLocations() re-runs.
+  function populateBroadcastLocations() {
+    if (!broadcastLocationSelect) return;
+    const prevValue = broadcastLocationSelect.value;
+    broadcastLocationSelect.innerHTML = '<option value="">📍 Everyone (all locations)</option>' +
+      allLocations.map(l => `<option value="${esc(l.locationKey)}">${esc(l.label)}</option>`).join("");
+    if ([...broadcastLocationSelect.options].some(o => o.value === prevValue)) {
+      broadcastLocationSelect.value = prevValue;
+    }
+  }
+
+  document.getElementById("broadcastSendBtn")?.addEventListener("click", async () => {
+    const statusEl = document.getElementById("broadcastStatus");
+    const btn = document.getElementById("broadcastSendBtn");
+    const body = broadcastBodyInput.value.trim();
+    const location = broadcastLocationSelect ? broadcastLocationSelect.value : "";
+    const audienceLabel = location
+      ? (broadcastLocationSelect.options[broadcastLocationSelect.selectedIndex]?.textContent || location)
+      : "everyone";
+    statusEl.className = "broadcast-status";
+    if (!body) { statusEl.textContent = "Write a post first."; statusEl.classList.add("broadcast-status--err"); return; }
+    const confirmed = await showConfirm({
+      icon: "📢", title: "Send Broadcast",
+      desc: `Send this message to <strong>${esc(audienceLabel)}</strong>: "<strong>${esc(body.slice(0, 80))}${body.length > 80 ? "…" : ""}</strong>"<br><br>This also posts it to the Community chat and Reports feed for that audience.`,
+      confirmText: "Send", danger: false
+    });
+    if (!confirmed) return;
+    btn.disabled = true; btn.textContent = "Sending…";
+    try {
+      const result = await apiPost("/admin/broadcast", { title: broadcastTitleInput.value.trim(), body, location: location || undefined });
+      statusEl.textContent = `✅ Sent to ${result.sentCount} of ${result.subscribers} subscriber(s) in ${audienceLabel}.`;
+      statusEl.classList.add("broadcast-status--ok");
+      broadcastBodyInput.value = ""; broadcastTitleInput.value = "";
+      logSystemEvent(`Broadcast sent to ${result.sentCount} subscribers (${audienceLabel})`, "ok");
+      showToast(`Broadcast sent to ${result.sentCount} subscribers`, "ok");
+      loadChats();
+    } catch (e) {
+      if (e.message !== "auth") {
+        statusEl.textContent = e.message || "Could not send broadcast.";
+        statusEl.classList.add("broadcast-status--err");
+        showToast(e.message || "Could not send broadcast.", "err");
+      }
+    } finally {
+      btn.disabled = false; btn.textContent = "Send";
+    }
+  });
+
+  // ===== CHATS =====
+  async function loadChats() {
+    try {
+      allChats = await apiFetch("/admin/chats");
+      const validIds = new Set(allChats.map(c => String(c._id)));
+      [...selectedChatIds].forEach(id => { if (!validIds.has(id)) selectedChatIds.delete(id); });
+      renderChats(allChats);
+      document.getElementById("chatsStatus").textContent = `${allChats.length} message${allChats.length !== 1 ? "s" : ""}`;
+      syncDeleteButtons();
+    } catch(e) {
+      if (e.message !== "auth") document.getElementById("chatsStatus").textContent = "Could not load messages.";
+    }
+  }
+
+  function renderChats(chats) {
+    const tbody = document.getElementById("chatsTbody");
+    const table = document.getElementById("chatsTable");
+    const empty = document.getElementById("chatsEmpty");
+    const selectAll = document.getElementById("chatsSelectAll");
+    if (!chats.length) { table.style.display = "none"; empty.style.display = "block"; if (selectAll) selectAll.checked = false; return; }
+    tbody.innerHTML = chats.map(c => `
+      <tr>
+        <td data-label="Select"><input type="checkbox" class="select-checkbox chat-row-select" data-chat-id="${esc(c._id)}" ${selectedChatIds.has(String(c._id)) ? "checked" : ""} /></td>
+        <td data-label="Handle"><span class="handle-pill" style="--handle-color:${handleColor(c.handle)}">${esc(c.handle)}</span></td>
+        <td data-label="Message">${esc(c.text)}</td>
+        <td data-label="Location" class="faint">${esc(c.location)}</td>
+        <td data-label="Sent" class="faint">${fmtDate(c.createdAt)}</td>
+        <td data-label="Actions"><button type="button" class="row-del-btn chat-row-delete" data-chat-del="${esc(c._id)}">Delete</button></td>
+      </tr>`).join("");
+    table.style.display = "table"; empty.style.display = "none";
+    tbody.querySelectorAll(".chat-row-select").forEach(cb => {
+      cb.addEventListener("change", (e) => {
+        const id = e.target.dataset.chatId; if (!id) return;
+        if (e.target.checked) selectedChatIds.add(id); else selectedChatIds.delete(id);
+        syncDeleteButtons();
+      });
+    });
+    tbody.querySelectorAll(".chat-row-delete").forEach(btn => {
+      btn.addEventListener("click", async (e) => { await deleteChatsByIds([e.currentTarget.dataset.chatDel]); });
+    });
+    if (selectAll) {
+      const visibleIds = chats.map(c => String(c._id));
+      selectAll.checked = visibleIds.length > 0 && visibleIds.every(id => selectedChatIds.has(id));
+    }
+  }
+
+  async function deleteChatsByIds(ids) {
+    if (!ids.length) return;
+    try {
+      await apiDelete('/admin/chats', ids);
+      ids.forEach(id => selectedChatIds.delete(String(id)));
+      await Promise.all([loadChats(), loadSummary(), loadActivity()]);
+      showToast(`Deleted ${ids.length} message${ids.length > 1 ? "s" : ""}`, "ok");
+    } catch (e) {
+      if (e.message !== "auth") showToast(e.message || "Could not delete chats.", "err");
+    }
+  }
+
+  // ===== OFFICIAL NEWS =====
+  function newsCategoryLabel(cat) {
+    return { outage: "Outage / Fault", restoration: "Power Restored", maintenance: "Planned Maintenance", tariff: "Tariff Update", general: "General" }[cat] || cat;
+  }
+
+  async function loadNewsPanel() {
+    try {
+      allNews = await apiFetch("/news?limit=100");
+      const validIds = new Set(allNews.map(a => String(a.id)));
+      [...selectedNewsIds].forEach(id => { if (!validIds.has(id)) selectedNewsIds.delete(id); });
+      renderNewsTable(allNews);
+      document.getElementById("newsStatus").textContent = `${allNews.length} article${allNews.length !== 1 ? "s" : ""}`;
+      syncDeleteButtons();
+    } catch (e) {
+      if (e.message !== "auth") document.getElementById("newsStatus").textContent = "Could not load news.";
+    }
+  }
+
+  function renderNewsTable(articles) {
+    const tbody = document.getElementById("newsTbody");
+    const table = document.getElementById("newsTable");
+    const empty = document.getElementById("newsEmpty");
+    const selectAll = document.getElementById("newsSelectAll");
+    if (!articles.length) { table.style.display = "none"; empty.style.display = "block"; if (selectAll) selectAll.checked = false; return; }
+    tbody.innerHTML = articles.map(a => `
+      <tr>
+        <td data-label="Select"><input type="checkbox" class="select-checkbox news-row-select" data-news-id="${esc(a.id)}" ${selectedNewsIds.has(String(a.id)) ? "checked" : ""} /></td>
+        <td data-label="Headline"><a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer" class="gold">${esc(a.title)}</a>${a.isAdminPosted ? ' <span class="faint">· Admin</span>' : ''}</td>
+        <td data-label="Source" class="faint">${esc(a.sourceIcon || "📰")} ${esc(a.source)}${a.isOfficial ? " · Official" : ""}</td>
+        <td data-label="Category" class="faint">${esc(newsCategoryLabel(a.category))}</td>
+        <td data-label="Published" class="faint">${fmtDate(a.publishedAt)}</td>
+        <td data-label="Actions"><button type="button" class="row-del-btn news-row-delete" data-news-del="${esc(a.id)}">Delete</button></td>
+      </tr>`).join("");
+    table.style.display = "table"; empty.style.display = "none";
+    tbody.querySelectorAll(".news-row-select").forEach(cb => {
+      cb.addEventListener("change", (e) => {
+        const id = e.target.dataset.newsId; if (!id) return;
+        if (e.target.checked) selectedNewsIds.add(id); else selectedNewsIds.delete(id);
+        syncDeleteButtons();
+      });
+    });
+    tbody.querySelectorAll(".news-row-delete").forEach(btn => {
+      btn.addEventListener("click", async (e) => { await deleteNewsByIds([e.currentTarget.dataset.newsDel]); });
+    });
+    if (selectAll) {
+      const visibleIds = articles.map(a => String(a.id));
+      selectAll.checked = visibleIds.length > 0 && visibleIds.every(id => selectedNewsIds.has(id));
+    }
+  }
+
+  async function deleteNewsByIds(ids) {
+    if (!ids.length) return;
+    const confirmed = await showConfirm({
+      icon: "📰", title: "Delete Article(s)",
+      desc: ids.length === 1 ? "Remove this article from Official News?" : `Remove ${ids.length} articles from Official News?`,
+      confirmText: "Delete", danger: true
+    });
+    if (!confirmed) return;
+    try {
+      await apiDelete('/admin/news', ids);
+      ids.forEach(id => selectedNewsIds.delete(String(id)));
+      await loadNewsPanel();
+      showToast(`Deleted ${ids.length} article${ids.length > 1 ? "s" : ""}`, "ok");
+    } catch (e) {
+      if (e.message !== "auth") showToast(e.message || "Could not delete article(s).", "err");
+    }
+  }
+
+  // ===== NEWS IMAGE — upload directly from device =====
+  // Reads the chosen file as a base64 data URI and uses that in place of
+  // the URL field's value. Keeps this working with the existing
+  // /admin/news `image` field (a plain string) without any new backend
+  // route — see chat reply for the tradeoffs (payload size, DB bloat)
+  // and the proper-upload-endpoint alternative.
+  let newsUploadedImageDataUrl = null;
+  const newsImageFileInput = document.getElementById("newsImageFileInput");
+  const newsImageInputEl = document.getElementById("newsImageInput");
+  const newsImagePreviewRow = document.getElementById("newsImagePreviewRow");
+
+  function clearNewsUploadedImage() {
+    newsUploadedImageDataUrl = null;
+    if (newsImageFileInput) newsImageFileInput.value = "";
+    if (newsImageInputEl) { newsImageInputEl.disabled = false; newsImageInputEl.placeholder = "Image URL (optional)"; }
+    if (newsImagePreviewRow) newsImagePreviewRow.style.display = "none";
+  }
+
+  document.getElementById("newsImageUploadBtn")?.addEventListener("click", () => newsImageFileInput?.click());
+
+  newsImageFileInput?.addEventListener("change", () => {
+    const file = newsImageFileInput.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { showToast("Please choose an image file.", "err"); newsImageFileInput.value = ""; return; }
+    if (file.size > 3 * 1024 * 1024) { showToast("Image is too large — please pick one under 3MB.", "err"); newsImageFileInput.value = ""; return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      newsUploadedImageDataUrl = reader.result;
+      if (newsImageInputEl) { newsImageInputEl.value = ""; newsImageInputEl.disabled = true; newsImageInputEl.placeholder = "Using uploaded image below"; }
+      const preview = document.getElementById("newsImagePreview");
+      if (preview) preview.src = newsUploadedImageDataUrl;
+      if (newsImagePreviewRow) newsImagePreviewRow.style.display = "flex";
+    };
+    reader.onerror = () => showToast("Could not read that image.", "err");
+    reader.readAsDataURL(file);
+  });
+
+  document.getElementById("newsImageClearBtn")?.addEventListener("click", clearNewsUploadedImage);
+
+  document.getElementById("newsPublishBtn")?.addEventListener("click", async () => {
+    const statusEl = document.getElementById("newsPublishStatus");
+    const btn = document.getElementById("newsPublishBtn");
+    const title = document.getElementById("newsTitleInput").value.trim();
+    const summary = document.getElementById("newsSummaryInput").value.trim();
+    const url = document.getElementById("newsUrlInput").value.trim();
+    const image = newsUploadedImageDataUrl || document.getElementById("newsImageInput").value.trim();
+    const category = document.getElementById("newsCategorySelect").value;
+    const sourceName = document.getElementById("newsSourceInput").value.trim();
+    const isOfficial = document.getElementById("newsOfficialCheckbox").checked;
+
+    statusEl.className = "broadcast-status";
+    if (!title) { statusEl.textContent = "Write a headline first."; statusEl.classList.add("broadcast-status--err"); return; }
+    if (!url) { statusEl.textContent = "A link is required (article URL, or the tweet/post link)."; statusEl.classList.add("broadcast-status--err"); return; }
+
+    btn.disabled = true; btn.textContent = "Publishing…";
+    try {
+      await apiPost("/admin/news", { title, summary, url, image, category, sourceName, isOfficial });
+      statusEl.textContent = "✅ Published to Official News.";
+      statusEl.classList.add("broadcast-status--ok");
+      document.getElementById("newsTitleInput").value = "";
+      document.getElementById("newsSummaryInput").value = "";
+      document.getElementById("newsUrlInput").value = "";
+      document.getElementById("newsImageInput").value = "";
+      clearNewsUploadedImage();
+      document.getElementById("newsCategorySelect").value = "general";
+      document.getElementById("newsSourceInput").value = "";
+      document.getElementById("newsOfficialCheckbox").checked = true;
+      logSystemEvent(`Published news article: ${title}`, "ok");
+      showToast("Article published", "ok");
+      loadNewsPanel();
+    } catch (e) {
+      if (e.message !== "auth") {
+        statusEl.textContent = e.message || "Could not publish article.";
+        statusEl.classList.add("broadcast-status--err");
+        showToast(e.message || "Could not publish article.", "err");
+      }
+    } finally {
+      btn.disabled = false; btn.textContent = "Publish";
+    }
+  });
+
+  // ===== ANALYTICS =====
+  function fmtDayLabel(iso) {
+    const d = new Date(iso + "T00:00:00Z");
+    return d.toLocaleDateString([], { month: "short", day: "numeric", timeZone: "UTC" });
+  }
+
+  function renderBarList(containerId, items, opts = {}) {
+    const el = document.getElementById(containerId);
+    if (!items || !items.length) { el.innerHTML = `<div class="a-empty">${opts.emptyText || "No data yet."}</div>`; return; }
+    const max = Math.max(...items.map(i => i.value), 1);
+    const fillClass = opts.fillClass ? ` bar-row__fill--${opts.fillClass}` : "";
+    el.innerHTML = items.map(i => `
+      <div class="bar-row">
+        <div class="bar-row__label" title="${esc(i.label)}">${esc(i.label)}</div>
+        <div class="bar-row__track"><div class="bar-row__fill${fillClass}" style="width:${Math.max((i.value / max) * 100, 3)}%"></div></div>
+        <div class="bar-row__value">${esc(i.value)}${opts.suffix || ""}</div>
+      </div>`).join("");
+  }
+
+  function renderDayChart(containerId, series, segments) {
+    const el = document.getElementById(containerId);
+    if (!series || !series.length) { el.innerHTML = `<div class="a-empty">No data yet.</div>`; return; }
+    const maxTotal = Math.max(...series.map(d => segments.reduce((sum, s) => sum + (d[s.key] || 0), 0)), 1);
+    el.innerHTML = series.map(d => {
+      const segsHtml = segments.map(s => {
+        const val = d[s.key] || 0;
+        const px = Math.round((val / maxTotal) * 100);
+        return `<div class="day-chart__seg day-chart__seg--${s.cls}" style="height:${px}px" title="${esc(s.cls)}: ${esc(val)}"></div>`;
+      }).join("");
+      return `<div class="day-chart__col"><div class="day-chart__bar-wrap">${segsHtml}</div><div class="day-chart__label">${fmtDayLabel(d.date)}</div></div>`;
+    }).join("");
+  }
+
+  async function loadAnalytics() {
+    const status = document.getElementById("analyticsStatus");
+    const days = document.getElementById("analyticsRange")?.value || 14;
+    try {
+      const data = await apiFetch(`/admin/analytics/overview?days=${days}`);
+      renderBarList("topLocationsList", (data.topSearchedAreas || []).map(a => ({ label: a.location, value: a.count })), { emptyText: "No search activity recorded yet." });
+      renderBarList("dropOffList", (data.dropOff || []).map(d => ({ label: d.screen, value: d.pct, suffix: "%" })), { emptyText: "No exit events recorded yet.", fillClass: "red" });
+      renderBarList("screenTimeList", (data.screenTime || []).map(s => ({ label: s.screen, value: s.avgSeconds, suffix: "s" })), { emptyText: "No screen-time data recorded yet.", fillClass: "amber" });
+      renderDayChart("reportsPerDayChart", (data.reportsPerDay || []).map(r => ({ date: r.date, reports: r.count })), [{ key: "reports", cls: "reports" }]);
+      const totalReports = (data.reportsPerDay || []).reduce((sum, r) => sum + r.count, 0);
+      document.getElementById("reportsPerDayHint").textContent = `${totalReports} total over ${data.rangeDays || days} days`;
+      renderDayChart("dailyUsersChart", (data.dailyReturningUsers || []).map(u => ({ date: u.date, returning: u.returning, new: u.new })), [{ key: "returning", cls: "returning" }, { key: "new", cls: "new" }]);
+      const totalActive = (data.dailyReturningUsers || []).reduce((sum, u) => sum + (u.total || 0), 0);
+      document.getElementById("dailyUsersHint").textContent = `${totalActive} active-user-days over ${data.rangeDays || days} days`;
+      status.textContent = `Updated just now`;
+    } catch (e) {
+      if (e.message !== "auth") status.textContent = "Could not load analytics.";
+    }
+  }
+
+  document.getElementById("refreshAnalytics")?.addEventListener("click", loadAnalytics);
+  document.getElementById("analyticsRange")?.addEventListener("change", loadAnalytics);
+
+  // ===== HEALTH PANEL =====
+  let healthPanelRefreshTimer = null;
+  let healthPanelRequestInFlight = false;
+  let healthPanelAbortController = null;
+  let lastDisplayedLatencyMs = null;
+
+  function renderHealthSettings(settings) {
+    const maintenanceEl = document.getElementById("hSettingMaintenance");
+    const adminAccountsEl = document.getElementById("hSettingAdminAccounts");
+    const notificationsEl = document.getElementById("hSettingNotifications");
+    const newsFetchEl = document.getElementById("hSettingNewsFetch");
+    const apiKeysEl = document.getElementById("hSettingApiKeys");
+    const backupDbEl = document.getElementById("hSettingBackupDb");
+    if (maintenanceEl) maintenanceEl.textContent = settings.maintenanceMode ? "Enabled" : "Disabled";
+    if (adminAccountsEl) adminAccountsEl.textContent = `Console: ${settings.adminAccounts.consoleLoginEnabled ? 'Yes' : 'No'}, Dev: ${settings.adminAccounts.devLoginEnabled ? 'Yes' : 'No'}`;
+    if (notificationsEl) notificationsEl.textContent = `Web: ${settings.notificationSettings.webPushEnabled ? 'Yes' : 'No'}, FCM: ${settings.notificationSettings.fcmEnabled ? 'Yes' : 'No'}, Email: ${settings.notificationSettings.emailOtpEnabled ? 'Yes' : 'No'}, SMS: ${settings.notificationSettings.smsOtpEnabled ? 'Yes' : 'No'}`;
+    if (newsFetchEl) newsFetchEl.textContent = `${settings.newsFetchIntervalMs} ms`;
+    if (apiKeysEl) apiKeysEl.textContent = `Google: ${settings.apiKeys.googleMaps ? 'Yes' : 'No'}, VAPID: ${settings.apiKeys.vapid ? 'Yes' : 'No'}, Brevo: ${settings.apiKeys.brevo ? 'Yes' : 'No'}, Arkesel: ${settings.apiKeys.arkesel ? 'Yes' : 'No'}, Firebase: ${settings.apiKeys.firebase ? 'Yes' : 'No'}`;
+    if (backupDbEl) backupDbEl.textContent = settings.backupDatabase.enabled ? `Configured (${settings.backupDatabase.url || 'hidden'})` : 'Disabled';
+  }
+
+  function renderHealthLogItems(logs) {
+    const list = document.getElementById("healthLogList");
+    if (!list) return;
+    if (!Array.isArray(logs) || !logs.length) {
+      list.innerHTML = `<div class="a-empty">No recent server logs available.</div>`;
+      return;
+    }
+    list.innerHTML = logs.map(log => `
+      <div class="health-log-item">
+        <span>${esc(log.entry)}</span>
+        <span class="health-log-item__time">${fmtDate(log.time)}</span>
+      </div>
+    `).join("");
+  }
+
+  async function updateHealthPanel({ force = false } = {}) {
+    const status = document.getElementById("healthStatus");
+    if (status && (!healthPanelRequestInFlight || force)) {
+      status.textContent = "Checking…";
+    }
+
+    if (healthPanelRequestInFlight && !force) return;
+
+    if (healthPanelAbortController) {
+      healthPanelAbortController.abort();
+    }
+
+    const controller = new AbortController();
+    healthPanelAbortController = controller;
+    healthPanelRequestInFlight = true;
+
+    const start = performance.now();
+    try {
+      const health = await apiFetch('/admin/health');
+      const rawLatency = Math.round(performance.now() - start);
+      const latency = lastDisplayedLatencyMs == null
+        ? rawLatency
+        : Math.round(lastDisplayedLatencyMs * 0.65 + rawLatency * 0.35);
+      lastDisplayedLatencyMs = latency;
+
+      const hApiLatency = document.getElementById("hApiLatency");
+      const hApiIndicator = document.getElementById("hApiIndicator");
+      if (hApiLatency) hApiLatency.textContent = latency + "ms";
+      if (hApiIndicator) hApiIndicator.className = "health-card__indicator " + (latency < 400 ? "health-card__indicator--ok" : latency < 1200 ? "health-card__indicator--warn" : "health-card__indicator--err");
+      if (status) status.textContent = `Round-trip: ${latency}ms`;
+
+      const hDbLatency = document.getElementById("hDbLatency");
+      const hDbIndicator = document.getElementById("hDbIndicator");
+      if (hDbLatency) hDbLatency.textContent = health.dbLatencyMs != null ? `${health.dbLatencyMs}ms` : "Unavailable";
+      if (hDbIndicator) {
+        const dbOk = health.dbStatus === 'connected';
+        hDbIndicator.className = "health-card__indicator " + (dbOk ? "health-card__indicator--ok" : health.dbStatus === 'connecting' ? "health-card__indicator--warn" : "health-card__indicator--err");
+      }
+
+      const hCpuUsage = document.getElementById("hCpuUsage");
+      const hCpuIndicator = document.getElementById("hCpuIndicator");
+      if (hCpuUsage) hCpuUsage.textContent = health.cpuPercent != null ? `${health.cpuPercent}%` : "—";
+      if (hCpuIndicator) hCpuIndicator.className = "health-card__indicator " + (health.cpuPercent != null && health.cpuPercent < 70 ? "health-card__indicator--ok" : health.cpuPercent != null && health.cpuPercent < 90 ? "health-card__indicator--warn" : "health-card__indicator--err");
+
+      const hRamUsage = document.getElementById("hRamUsage");
+      const hRamIndicator = document.getElementById("hRamIndicator");
+      if (hRamUsage) hRamUsage.textContent = health.ramUsedMb != null && health.ramTotalMb != null ? `${health.ramUsedMb} / ${health.ramTotalMb} MB` : "—";
+      if (hRamIndicator) hRamIndicator.className = "health-card__indicator " + (health.ramPercent != null && health.ramPercent < 70 ? "health-card__indicator--ok" : health.ramPercent != null && health.ramPercent < 90 ? "health-card__indicator--warn" : "health-card__indicator--err");
+
+      const hAvgApiLatency = document.getElementById("hAvgApiLatency");
+      const hAvgApiIndicator = document.getElementById("hAvgApiIndicator");
+      if (hAvgApiLatency) hAvgApiLatency.textContent = health.avgApiLatencyMs != null ? `${health.avgApiLatencyMs}ms` : "—";
+      if (hAvgApiIndicator) hAvgApiIndicator.className = "health-card__indicator " + (health.avgApiLatencyMs != null && health.avgApiLatencyMs < 400 ? "health-card__indicator--ok" : health.avgApiLatencyMs != null && health.avgApiLatencyMs < 900 ? "health-card__indicator--warn" : "health-card__indicator--err");
+
+      renderHealthSettings(health.buildSettings || {});
+      renderHealthLogItems(health.recentServerLogs || []);
+    } catch (e) {
+      if (e?.name === "AbortError") return;
+      const hApiIndicator = document.getElementById("hApiIndicator");
+      if (hApiIndicator) hApiIndicator.className = "health-card__indicator health-card__indicator--err";
+      const hDbIndicator = document.getElementById("hDbIndicator");
+      if (hDbIndicator) hDbIndicator.className = "health-card__indicator health-card__indicator--err";
+      const hCpuIndicator = document.getElementById("hCpuIndicator");
+      if (hCpuIndicator) hCpuIndicator.className = "health-card__indicator health-card__indicator--err";
+      const hRamIndicator = document.getElementById("hRamIndicator");
+      if (hRamIndicator) hRamIndicator.className = "health-card__indicator health-card__indicator--err";
+      const hAvgApiIndicator = document.getElementById("hAvgApiIndicator");
+      if (hAvgApiIndicator) hAvgApiIndicator.className = "health-card__indicator health-card__indicator--err";
+      if (status) status.textContent = "Health check failed";
+    } finally {
+      if (healthPanelAbortController === controller) {
+        healthPanelAbortController = null;
+      }
+      healthPanelRequestInFlight = false;
+    }
+
+    if (sessionStartTime) {
+      const hUptime = document.getElementById("hUptime");
+      const hSessionAge = document.getElementById("hSessionAge");
+      const elapsed = Date.now() - sessionStartTime;
+      if (hUptime) hUptime.textContent = fmtDuration(elapsed);
+      if (hSessionAge) hSessionAge.textContent = fmtDuration(elapsed);
+    }
+
+    renderSystemLog();
+  }
+
+  function startHealthPanelAutoRefresh() {
+    if (healthPanelRefreshTimer) {
+      clearInterval(healthPanelRefreshTimer);
+    }
+
+    updateHealthPanel();
+    const interval = document.visibilityState === 'visible' ? 15000 : 60000;
+    healthPanelRefreshTimer = setInterval(() => {
+      updateHealthPanel();
+    }, interval);
+  }
+
+  // ===== DASHBOARD / VISIBILITY-AWARE POLLING =====
+  let dashboardRefreshTimer = null;
+  const DASHBOARD_INTERVAL_VISIBLE = 15000;
+  const DASHBOARD_INTERVAL_HIDDEN = 60000;
+
+  async function ensureServerWarm() {
+    try {
+      await fetch(`${API}/`, { cache: 'no-store' });
+    } catch (e) {
+      // ignore; warming best-effort
+    }
+  }
+
+  function startDashboardAutoRefresh() {
+    stopDashboardAutoRefresh();
+    // immediate updates
+    loadActivity();
+    startRefreshCountdown();
+    updateHealthPanel();
+    const interval = document.visibilityState === 'visible' ? DASHBOARD_INTERVAL_VISIBLE : DASHBOARD_INTERVAL_HIDDEN;
+    dashboardRefreshTimer = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        loadActivity();
+        startRefreshCountdown();
+      } else {
+        // when hidden, reduce load but still keep health checks
+        updateHealthPanel();
+      }
+    }, interval);
+  }
+
+  function stopDashboardAutoRefresh() {
+    if (dashboardRefreshTimer) { clearInterval(dashboardRefreshTimer); dashboardRefreshTimer = null; }
+  }
+
+  function handleVisibilityChange() {
+    if (document.visibilityState === 'visible') {
+      // Warm the API and refresh immediately when returning to the tab
+      ensureServerWarm().catch(() => {});
+      setTimeout(() => { loadAll(); startRefreshCountdown(); updateHealthPanel({ force: true }); }, 200);
+    }
+    // restart timers so they use the appropriate interval
+    startDashboardAutoRefresh();
+    // restart health timer with new interval
+    if (healthPanelRefreshTimer) { clearInterval(healthPanelRefreshTimer); }
+    const hInterval = document.visibilityState === 'visible' ? 15000 : 60000;
+    healthPanelRefreshTimer = setInterval(() => updateHealthPanel(), hInterval);
+  }
+
+  document.addEventListener('visibilitychange', handleVisibilityChange);
+
+  setInterval(() => {
+    if (sessionStartTime) {
+      const elapsed = Date.now() - sessionStartTime;
+      const hUptime = document.getElementById("hUptime");
+      const hSessionAge = document.getElementById("hSessionAge");
+      if (hUptime) hUptime.textContent = fmtDuration(elapsed);
+      if (hSessionAge) hSessionAge.textContent = fmtDuration(elapsed);
+    }
+  }, 5000);
+
+  document.getElementById("refreshHealth")?.addEventListener("click", () => updateHealthPanel({ force: true }));
+  startHealthPanelAutoRefresh();
+
+  // ===== SEARCHES =====
+  document.getElementById("userSearch")?.addEventListener("input", e => {
+    const q = e.target.value.toLowerCase();
+    renderUsers(allUsers.filter(u => (u.name||"").toLowerCase().includes(q) || (u.emailPhone||"").toLowerCase().includes(q) || (u.city||"").toLowerCase().includes(q)));
+  });
+  document.getElementById("chatSearch")?.addEventListener("input", e => {
+    const q = e.target.value.toLowerCase();
+    renderChats(allChats.filter(c => (c.text||"").toLowerCase().includes(q) || (c.location||"").toLowerCase().includes(q) || (c.handle||"").toLowerCase().includes(q)));
+  });
+  document.getElementById("newsSearch")?.addEventListener("input", e => {
+    const q = e.target.value.toLowerCase();
+    renderNewsTable(allNews.filter(a => (a.title||"").toLowerCase().includes(q) || (a.source||"").toLowerCase().includes(q)));
+  });
+
+  // ===== SELECT ALL =====
+  document.getElementById("usersSelectAll")?.addEventListener("change", (e) => {
+    const q = (document.getElementById("userSearch")?.value || "").toLowerCase();
+    const visible = allUsers.filter(u => !q || (u.name||"").toLowerCase().includes(q) || (u.emailPhone||"").toLowerCase().includes(q) || (u.city||"").toLowerCase().includes(q));
+    visible.forEach(u => { const id = String(u._id); if (e.target.checked) selectedUserIds.add(id); else selectedUserIds.delete(id); });
+    renderUsers(visible); syncDeleteButtons();
+  });
+  document.getElementById("chatsSelectAll")?.addEventListener("change", (e) => {
+    const q = (document.getElementById("chatSearch")?.value || "").toLowerCase();
+    const visible = allChats.filter(c => !q || (c.text||"").toLowerCase().includes(q) || (c.location||"").toLowerCase().includes(q) || (c.handle||"").toLowerCase().includes(q));
+    visible.forEach(c => { const id = String(c._id); if (e.target.checked) selectedChatIds.add(id); else selectedChatIds.delete(id); });
+    renderChats(visible); syncDeleteButtons();
+  });
+  document.getElementById("reportsSelectAll")?.addEventListener("change", (e) => {
+    allReports.forEach(r => { const id = String(r.id); if (e.target.checked) selectedReportIds.add(id); else selectedReportIds.delete(id); });
+    loadReportsPanel();
+  });
+  document.getElementById("newsSelectAll")?.addEventListener("change", (e) => {
+    const q = (document.getElementById("newsSearch")?.value || "").toLowerCase();
+    const visible = allNews.filter(a => !q || (a.title||"").toLowerCase().includes(q) || (a.source||"").toLowerCase().includes(q));
+    visible.forEach(a => { const id = String(a.id); if (e.target.checked) selectedNewsIds.add(id); else selectedNewsIds.delete(id); });
+    renderNewsTable(visible); syncDeleteButtons();
+  });
+
+  document.getElementById("deleteChatsBtn")?.addEventListener("click", async () => { await deleteChatsByIds([...selectedChatIds]); });
+  document.getElementById("deleteUsersBtn")?.addEventListener("click", async () => { await deleteUsersByIds([...selectedUserIds]); });
+  document.getElementById("deleteReportsBtn")?.addEventListener("click", async () => { await deleteReportsByIds([...selectedReportIds]); });
+  document.getElementById("deleteNewsBtn")?.addEventListener("click", async () => { await deleteNewsByIds([...selectedNewsIds]); });
+  document.getElementById("clearReportsBtnActivity")?.addEventListener("click", clearAllReports);
+  document.getElementById("clearReportsBtnPanel")?.addEventListener("click", clearAllReports);
+  document.getElementById("refreshActivity")?.addEventListener("click", loadActivity);
+  document.getElementById("refreshReports")?.addEventListener("click", loadReportsPanel);
+
+  // Init
+  if (getToken()) showDashboard(); else showLogin();
+</script>
+  <script src="/_sdk/719055fef2a85d14.editing_sdk.js" integrity="sha512-kFqrdGgIiTOsu307feB5Cy3JVP9IayftsmCIZ0csxYBGuBmJQPhyvcnmKR8F0fTW97h5s1gAvz3SumI8zJ6OxQ=="></script>
+ <script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a1ae9e4046f66936',t:'MTc4NDAxMjA4OC4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</html>

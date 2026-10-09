@@ -779,6 +779,21 @@ app.use(express.json({ limit: '6mb' }));
 // before it's controlling anything yet. Both are cheap to serve fresh
 // every time (tiny files, no DB hit), so they're excluded from the
 // long-lived cache and forced to always revalidate.
+const dashboardFiles = {
+    '/admin.html': path.join(__dirname, 'public', 'admin_dashboard.html'),
+    '/admin_dashboard.html': path.join(__dirname, 'public', 'admin_dashboard.html'),
+    '/ecg-dashboard.html': path.join(__dirname, 'public', 'ecg-dashboard.html')
+};
+app.get(Object.keys(dashboardFiles), (req, res, next) => {
+    fs.readFile(dashboardFiles[req.path], 'utf8', (err, html) => {
+        if (err) return next(err);
+        const cartoApiKey = process.env.EXPO_PUBLIC_CARTO_API_KEY;
+        const cartoQuery = cartoApiKey ? `?key=${encodeURIComponent(cartoApiKey)}` : '';
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.type('html').send(html.replaceAll('__LW_CARTO_QUERY__', cartoQuery));
+    });
+});
+
 app.use(express.static(path.join(__dirname, '../frontend'), {
     maxAge: process.env.NODE_ENV === 'production' ? '1d' : 0,
     etag: true,
