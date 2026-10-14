@@ -468,6 +468,7 @@
       <div class="nav-item hidden" data-tab="regions" data-role-gate="regions" onclick="switchTab('regions')"><span class="nav-ic">🌍</span> Regions</div>
       <div class="nav-item hidden" data-tab="org" data-role-gate="org" onclick="switchTab('org')"><span class="nav-ic">🏢</span> Districts / Stations</div>
       <div class="nav-item" data-tab="staff" onclick="switchTab('staff')"><span class="nav-ic">👥</span> Users &amp; Staff</div>
+      <div class="nav-item hidden" data-tab="invitations" data-role-gate="invitations" onclick="switchTab('invitations')"><span class="nav-ic">✉️</span> Invitations</div>
       <div class="nav-item" data-tab="alerts" onclick="switchTab('alerts')"><span class="nav-ic">📣</span> Alerts &amp; Announcements</div>
       <div class="nav-item hidden" data-tab="audit" data-role-gate="audit" onclick="switchTab('audit')"><span class="nav-ic">🕓</span> Audit Logs</div>
 
@@ -674,6 +675,36 @@ function renderHeatMapPanel(scope, metrics) {
       <div class="map-refresh" title="Refresh" onclick="switchTab('overview')">⟳</div>
     </div>
   </div>`;
+  window.INVITATION_CATALOG = catalog;
+  window.INVITATION_GRANTABLE = grantable;
+  updateInviteRoleOptions();
+}
+function updateInviteRoleOptions() {
+  const unitSelect = document.getElementById("invUnit");
+  const roleSelect = document.getElementById("invRole");
+  if (!unitSelect || !roleSelect) return;
+  const selectedUnit = unitSelect.options[unitSelect.selectedIndex];
+  const roles = invitableRolesForUnit(selectedUnit?.dataset.unitType || "");
+  roleSelect.innerHTML = roles.map(role => `<option value="${role}">${formatRole(role)}</option>`).join('');
+  roleSelect.disabled = roles.length === 0;
+  if (!roles.length) {
+  document.getElementById("invRoleDefaults").textContent = "You cannot invite a role into this organization.";
+  document.getElementById("invExtraPermissions").innerHTML = "";
+  return;
+  }
+  renderInvitePermissionOptions();
+}
+function renderInvitePermissionOptions() {
+  const role = document.getElementById("invRole")?.value;
+  if (!role) return;
+  const defaults = window.INVITATION_CATALOG?.roleDefaults?.[role] || [];
+  document.getElementById("invRoleDefaults").textContent = defaults.length
+  ? `Automatically included: ${defaults.map(permission => (PERM_LABELS[permission] || [permission])[0]).join(", ")}`
+  : "No default permissions are assigned to this role.";
+  const extraPermissions = (window.INVITATION_GRANTABLE || []).filter(permission => !defaults.includes(permission));
+  document.getElementById("invExtraPermissions").innerHTML = extraPermissions.length
+  ? extraPermissions.map(permission => `<label class="perm-check"><input type="checkbox" value="${permission}" class="inv-perm-cb"><span>${esc((PERM_LABELS[permission] || [permission])[0])}<span class="pdesc">${esc((PERM_LABELS[permission] || ['', ''])[1] || '')}</span></span></label>`).join('')
+  : '<span style="color:var(--faint);font-size:0.8rem">No additional permissions available to grant.</span>';
 }
 
 // Real region-shaped polygons for Ghana's 16 regions, embedded locally (no
@@ -1187,9 +1218,9 @@ async function handleAcceptInvite(e) {
 
 function formatRole(role) {
   return {
-    hq_super_admin: "HQ Super Admin", hq_manager: "HQ Manager", hq_staff: "HQ Staff",
+    hq_super_admin: "HQ Manager", hq_manager: "HQ Manager", hq_staff: "HQ Staff",
     regional_manager: "Regional Manager", regional_staff: "Regional Staff",
-    station_manager: "Station Manager", station_operator: "Station Operator"
+    station_manager: "Station Manager", station_operator: "Station Staff / Operator"
   }[role] || role;
 }
 function roleBadgeClass(role) {
@@ -1567,7 +1598,7 @@ async function resolveEvent(id) {
 }
 
 // ---- Power Control ----
-// Nationwide is HQ Super Admin only. Regional Manager/Staff toggle their own
+// Nationwide control is limited to HQ Manager. Regional Manager/Staff toggle their own
 // region (selected/specific/all areas). Station Manager/Operator toggle
 // their own station's coverage areas the same way. Every button here is
 // just a convenience — the server independently re-checks role, permission
@@ -1583,7 +1614,7 @@ async function renderPower(content) {
       <div class="power-card ${off ? 'is-off' : 'is-on'}">
         <div class="power-card__head"><h4><span class="power-dot ${off ? 'off' : 'on'}"></span>Nationwide</h4>
           <span class="badge badge--${off ? 'inactive' : 'active'}">${off ? 'Power off' : 'Power on'}</span></div>
-        <p class="hint">Declares/restores power status for the entire country. Restricted to the HQ Super Admin — this immediately publishes to the public LightWatch news feed.</p>
+        <p class="hint">Declares/restores power status for the entire country. Restricted to HQ Managers — this immediately publishes to the public LightWatch news feed.</p>
         <div class="field-wrap"><input type="text" id="pwReasonNationwide" placeholder="Reason (optional, shown publicly)"></div>
         <div class="power-actions">
           <button class="btn btn--power-off" onclick="togglePower('nationwide', 'power_off', null)">Turn Off Nationwide</button>
@@ -1915,7 +1946,10 @@ async function renderStaff(content) {
   const staff = await ecgGet("/ecg/staff");
   content.innerHTML = `
     <div class="panel">
-      <div class="panel__head"><h3>Staff In Your Scope</h3><p>Deactivating an account immediately revokes dashboard access.</p></div>
+      <div class="panel__head">
+        <div><h3>Staff In Your Scope</h3><p>Deactivating an account immediately revokes dashboard access.</p></div>
+        ${ME.permissions.canInviteStaff ? `<button class="btn btn--primary" onclick="switchTab('invitations')">Invite Staff</button>` : ''}
+      </div>
       <table><thead><tr><th></th><th>Name</th><th>Email</th><th>Role</th><th>Assigned To</th><th>Status</th><th>Last Login</th><th></th></tr></thead>
       <tbody>${staff.length ? staff.map(s => `
         <tr>
@@ -1925,7 +1959,7 @@ async function renderStaff(content) {
           <td><b>${esc(s.orgUnitName || '—')}</b>${s.orgUnitRegion ? `<div style="color:var(--muted);font-size:0.72rem">${esc(s.orgUnitRegion)}</div>` : ''}</td>
           <td><span class="badge badge--${s.active ? 'active' : 'inactive'}">${s.active ? 'active' : 'inactive'}</span></td>
           <td>${fmtDate(s.lastLoginAt)}</td>
-          <td>${s.id !== ME.staff.id ? `<button class="btn btn--sm ${s.active ? 'btn--danger' : ''}" onclick="toggleStaff('${s.id}', ${!s.active})">${s.active ? 'Deactivate' : 'Reactivate'}</button>${ME.staff.role === 'hq_super_admin' ? ` <button class="btn btn--sm btn--danger" onclick="deleteStaff('${s.id}')">Delete</button>` : ''}` : `<button class="btn btn--sm" onclick="document.getElementById('avatarFileInput').click()">${getLocalAvatar(s.id) ? 'Change photo' : 'Add photo'}</button>`}</td>
+          <td>${s.id !== ME.staff.id ? `${ME.permissions.canManageStaff ? `<button class="btn btn--sm ${s.active ? 'btn--danger' : ''}" onclick="toggleStaff('${s.id}', ${!s.active})">${s.active ? 'Deactivate' : 'Reactivate'}</button>` : ''}${ME.staff.role === 'hq_manager' ? ` <button class="btn btn--sm btn--danger" onclick="deleteStaff('${s.id}')">Delete</button>` : ''}` : `<button class="btn btn--sm" onclick="document.getElementById('avatarFileInput').click()">${getLocalAvatar(s.id) ? 'Change photo' : 'Add photo'}</button>`}</td>
         </tr>`).join('') : '<tr><td colspan="8" class="empty-row">No staff visible in your scope.</td></tr>'}
       </tbody></table>
     </div>`;
@@ -1945,28 +1979,34 @@ async function deleteStaff(id) {
 
 // ---- Invitations ----
 const INVITABLE_ROLES = {
-  hq_super_admin: ['hq_super_admin', 'hq_manager', 'hq_staff', 'regional_manager', 'regional_staff', 'station_manager', 'station_operator'],
-  hq_manager: ['hq_staff'],
+  hq_manager: ['hq_staff', 'regional_manager', 'regional_staff', 'station_manager', 'station_operator'],
   regional_manager: ['regional_staff', 'station_manager', 'station_operator'],
   station_manager: ['station_operator']
 };
+function invitableRolesForUnit(unitType) {
+  const roles = INVITABLE_ROLES[ME.staff.role] || [];
+  return roles.filter(role =>
+    (unitType === 'headquarters' && ['hq_staff'].includes(role)) ||
+    (unitType === 'regional' && ['regional_manager', 'regional_staff'].includes(role)) ||
+    (unitType === 'district' && ['station_manager', 'station_operator'].includes(role))
+  );
+}
 async function renderInvitations(content) {
   if (!ME.permissions.canInviteStaff) { content.innerHTML = `<div class="panel">You don't have access to this section.</div>`; return; }
   const [invites, units, catalog] = await Promise.all([ecgGet("/ecg/invitations"), ecgGet("/ecg/org-units"), loadPermCatalog()]);
-  const invitableRoles = INVITABLE_ROLES[ME.staff.role] || [];
-  const unitOptions = units.map(u => `<option value="${u.id}" ${u.id === ME.organizationUnit.id ? 'selected' : ''}>${esc(u.name)} (${u.type})</option>`).join('');
+  const unitOptions = units.map(u => `<option value="${u.id}" data-unit-type="${u.type}" ${u.id === ME.organizationUnit.id ? 'selected' : ''}>${esc(u.name)} (${u.type})</option>`).join('');
   const grantable = catalog.grantable || [];
   content.innerHTML = `
     <div class="panel">
       <div class="panel__head"><h3>Invite ECG Staff</h3><p>Organization and role are fixed by you here — the invitee can't change them during signup.</p></div>
       <form onsubmit="return sendInvite(event)">
         <div class="field-wrap"><label class="field">Work Email</label><input type="email" id="invEmail" required></div>
-        <div class="field-wrap"><label class="field">Role</label><select id="invRole">${invitableRoles.map(r => `<option value="${r}">${formatRole(r)}</option>`).join('')}</select></div>
-        <div class="field-wrap"><label class="field">Organization</label><select id="invUnit">${unitOptions}</select></div>
-        <div class="field-wrap"><label class="field">Permissions (in addition to the role's defaults)</label>
-          <div class="perm-grid">
-            ${grantable.length ? grantable.map(p => `<label class="perm-check"><input type="checkbox" value="${p}" class="inv-perm-cb"><span>${esc((PERM_LABELS[p] || [p])[0])}<span class="pdesc">${esc((PERM_LABELS[p] || ['', ''])[1] || '')}</span></span></label>`).join('') : '<span style="color:var(--faint);font-size:0.8rem">No additional permissions available to grant.</span>'}
-          </div>
+        <div class="field-wrap"><label class="field">Organization</label><select id="invUnit" onchange="updateInviteRoleOptions()">${unitOptions}</select></div>
+        <div class="field-wrap"><label class="field">Role</label><select id="invRole" onchange="renderInvitePermissionOptions()"></select></div>
+        <div class="field-wrap"><label class="field">Role permissions</label>
+          <p id="invRoleDefaults" class="invite-info"></p>
+          <label class="field">Additional permissions (optional)</label>
+          <div class="perm-grid" id="invExtraPermissions"></div>
         </div>
         <div style="height:6px"></div>
         <button class="btn btn--primary" type="submit">Send Invitation</button>

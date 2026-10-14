@@ -15,15 +15,12 @@
 //      (nationwide)    (one region)      (one station + coverage areas)
 //
 //  ROLES per unit type (three tiers at every level, same shape):
-//      headquarters : hq_super_admin, hq_manager, hq_staff
+//      headquarters : hq_manager, hq_staff
 //      regional     : regional_manager, regional_staff
 //      district     : station_manager, station_operator
 //
-//  Headquarters is NOT limited to one account. The hq_super_admin is
-//  the single highest-authority tier (kept intentionally rare / hard
-//  to grant — see canGrantRole below); hq_manager and hq_staff let
-//  ECG bring on as many Headquarters employees as needed without
-//  handing every one of them full administrative control.
+//  HQ Manager is the highest-authority staff tier. HQ Staff have
+//  limited operational access.
 //
 //  PERMISSIONS: access is Organization Unit + Role + Permissions, not
 //  role alone. Each role has a sensible default permission set
@@ -73,21 +70,23 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
     // Roles & permission catalog
     // ------------------------------------------------------------
     const ROLES = [
-        'hq_super_admin', 'hq_manager', 'hq_staff',
+        'hq_manager', 'hq_staff',
         'regional_manager', 'regional_staff',
         'station_manager', 'station_operator'
     ];
 
-    // Rank within a unit's tier — used to stop a manager granting a
-    // permission/role that would out-rank (or match) themselves.
+    const LEGACY_HQ_ADMIN_ROLE = 'hq_super_admin';
+
+    // Hierarchical rank — managers can appoint lower-level staff, including
+    // station managers under a regional manager.
     const ROLE_TIER = {
-        hq_super_admin: 3, hq_manager: 2, hq_staff: 1,
-        regional_manager: 2, regional_staff: 1,
+        hq_manager: 4, hq_staff: 1,
+        regional_manager: 3, regional_staff: 2,
         station_manager: 2, station_operator: 1
     };
 
     const UNIT_ROLES = {
-        headquarters: ['hq_super_admin', 'hq_manager', 'hq_staff'],
+        headquarters: ['hq_manager', 'hq_staff'],
         regional: ['regional_manager', 'regional_staff'],
         district: ['station_manager', 'station_operator']
     };
@@ -114,23 +113,8 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
         'manage_power_plants', 'manage_transmission', 'manage_announcements', 'manage_integrations'
     ];
 
-    // Everything HQ Super Admin gets, always, non-negotiable.
-    const SUPER_ADMIN_PERMISSIONS = [...ALL_PERMISSIONS];
-
     const ROLE_DEFAULT_PERMISSIONS = {
-        hq_super_admin: SUPER_ADMIN_PERMISSIONS,
-        hq_manager: [
-            'view_nationwide_status', 'view_all_regions', 'view_community_reports',
-            'view_outages', 'monitor_stations', 'view_audit_log',
-            'publish_updates', 'manage_events', 'invite_staff',
-            'manage_power_plants', 'manage_transmission', 'manage_announcements'
-            // Deliberately excluded: assign_roles beyond hq_staff, manage_staff over
-            // peers/super admin, manage_org_units, delete_org_units, manage_branch_keys,
-            // manage_operational_permissions, manage_ecg_config, manage_integrations,
-            // control_nationwide_power. These require an explicit grant from an HQ
-            // Super Admin (see canGrantRole / invitation permission checks below) —
-            // never assumed by the hq_manager role.
-        ],
+        hq_manager: ALL_PERMISSIONS,
         hq_staff: [
             'view_nationwide_status', 'view_outages', 'view_community_reports', 'monitor_stations'
         ],
@@ -161,7 +145,6 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
     }
 
     function hasPermission(staff, permission) {
-        if (staff.role === 'hq_super_admin') return true; // always all-permissions
         return effectivePermissions(staff).includes(permission);
     }
 
@@ -190,7 +173,7 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
         name: { type: String, required: true, trim: true },
         email: { type: String, required: true, unique: true, lowercase: true, trim: true },
         passwordHash: { type: String, required: true, select: false },
-        role: { type: String, enum: ROLES, required: true },
+        role: { type: String, enum: [...ROLES, LEGACY_HQ_ADMIN_ROLE], required: true },
         orgUnitId: { type: mongoose.Schema.Types.ObjectId, ref: 'EcgOrgUnit', required: true },
         // Explicit extra permissions granted on top of the role's defaults —
         // e.g. one HQ Staff member given `manage_events` without becoming a
@@ -206,7 +189,7 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
     const ecgInvitationSchema = new mongoose.Schema({
         tokenHash: { type: String, required: true, unique: true, select: false },
         email: { type: String, required: true, lowercase: true, trim: true },
-        role: { type: String, enum: ROLES, required: true },
+        role: { type: String, enum: [...ROLES, LEGACY_HQ_ADMIN_ROLE], required: true },
         orgUnitId: { type: mongoose.Schema.Types.ObjectId, ref: 'EcgOrgUnit', required: true },
         permissions: { type: [String], default: [] },
         branchKeyRequired: { type: Boolean, default: false },
@@ -334,9 +317,7 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
         if (!targetUnit) return false;
         const actorUnit = await OrgUnit.findById(staff.orgUnitId).lean();
         if (!actorUnit) return false;
-        if (staff.role === 'hq_super_admin') return true;
         if (staff.role === 'hq_manager') {
-            // HQ Manager needs the explicit permission to touch org structure at all.
             return hasPermission(staff, 'manage_org_units');
         }
         if (staff.role === 'regional_manager') {
@@ -350,24 +331,19 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
     }
 
     // Can `granter` invite someone into `role`, and hand them `requestedPermissions`?
-    // Enforces: role must fit the target unit's tier; the invited role can never
-    // out-rank (or match, except HQ Super Admin inviting another HQ Super Admin is
-    // allowed, deliberately, since only a Super Admin can ever do this) the
-    // granter's own tier within that unit type; and every requested permission
-    // must already be one the granter effectively holds.
+    // Enforces that the role fits the target unit, is below the granter's tier,
+    // and only permissions the granter already holds are explicitly granted.
     function canGrantRoleAndPermissions(granter, targetUnitType, role, requestedPermissions) {
         if (!roleAllowedUnderUnitType(role, targetUnitType)) {
             return { ok: false, error: `Role "${role}" is not valid for a ${targetUnitType} unit` };
         }
-        if (granter.role !== 'hq_super_admin') {
-            const granterTier = ROLE_TIER[granter.role] || 0;
-            const targetTier = ROLE_TIER[role] || 0;
-            if (targetTier >= granterTier) {
-                return { ok: false, error: 'You cannot invite someone into a role equal to or higher than your own' };
-            }
+        const granterTier = ROLE_TIER[granter.role] || 0;
+        const targetTier = ROLE_TIER[role] || 0;
+        if (targetTier >= granterTier) {
+            return { ok: false, error: 'You cannot invite someone into a role equal to or higher than your own' };
         }
         const granterPerms = new Set(effectivePermissions(granter));
-        const bad = (requestedPermissions || []).filter(p => !granterPerms.has(p) && granter.role !== 'hq_super_admin');
+        const bad = (requestedPermissions || []).filter(p => !granterPerms.has(p));
         if (bad.length > 0) {
             return { ok: false, error: `You cannot grant permissions you don't have: ${bad.join(', ')}` };
         }
@@ -461,7 +437,7 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
     // ==============================================================
 
     // ---- One-time-per-deploy bootstrap: create HQ + invite the first
-    //      hq_super_admin. Gated by the EXISTING super-admin password,
+    //      hq_manager. Gated by the existing admin password,
     //      not a new secret, so nothing new needs to be memorized/rotated. ----
     app.post('/ecg/bootstrap/hq', verifyAdminToken, async (req, res) => {
         try {
@@ -481,7 +457,7 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
             const invitation = await EcgInvitation.create({
                 tokenHash: sha256(token),
                 email: String(email).toLowerCase().trim(),
-                role: 'hq_super_admin',
+                role: 'hq_manager',
                 orgUnitId: hq._id,
                 permissions: [],
                 expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
@@ -489,7 +465,7 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
 
             return res.status(201).json({
                 organizationUnit: publicOrgUnit(hq),
-                invitationToken: token, // shown once — send this to the first HQ Super Admin out-of-band
+                invitationToken: token, // shown once — send this to the first HQ Manager out-of-band
                 acceptUrl: `/ecg-dashboard.html?invite=${token}`,
                 expiresAt: invitation.expiresAt
             });
@@ -510,7 +486,7 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
         const unit = await OrgUnit.findById(invitation.orgUnitId).lean();
         return res.json({
             email: invitation.email,
-            role: invitation.role,
+            role: invitation.role === LEGACY_HQ_ADMIN_ROLE ? 'hq_manager' : invitation.role,
             organizationUnit: unit ? publicOrgUnit(unit) : null,
             branchKeyRequired: invitation.branchKeyRequired
         });
@@ -543,7 +519,7 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
                 name: String(name).trim(),
                 email: invitation.email,
                 passwordHash: hashPassword(password),
-                role: invitation.role,
+                role: invitation.role === LEGACY_HQ_ADMIN_ROLE ? 'hq_manager' : invitation.role,
                 orgUnitId: unit._id,
                 permissions: invitation.permissions || [],
                 invitedByStaffId: invitation.createdByStaffId
@@ -598,7 +574,7 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
                 name: 'ECG Headquarters Admin',
                 email,
                 passwordHash: hashPassword(randomToken(48)),
-                role: 'hq_super_admin',
+                role: 'hq_manager',
                 orgUnitId: headquarters._id,
                 permissions: []
             });
@@ -626,7 +602,8 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
 
             const storedPasswordMatches = staff && verifyPassword(password, staff.passwordHash);
             const usedAuthorAdminPassword = Boolean(
-                staff && staff.role === 'hq_super_admin' && authorAdminPasswordMatches && !storedPasswordMatches
+                staff && ['hq_manager', LEGACY_HQ_ADMIN_ROLE].includes(staff.role) &&
+                authorAdminPasswordMatches && !storedPasswordMatches
             );
             const passwordOk = storedPasswordMatches || usedAuthorAdminPassword;
 
@@ -639,6 +616,7 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
                 loginAttempts.set(email, attempt);
                 return res.status(401).json({ error: 'Incorrect email or password' });
             }
+            if (staff.role === LEGACY_HQ_ADMIN_ROLE) staff.role = 'hq_manager';
             if (!staff.active) return res.status(403).json({ error: 'This account has been deactivated' });
 
             loginAttempts.delete(email);
@@ -673,18 +651,18 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
             organizationUnit: publicOrgUnit(req.ecgOrgUnit),
             permissions: {
                 list: perms,
-                canManageOrgUnits: has('manage_org_units') || req.ecgStaff.role === 'regional_manager' || req.ecgStaff.role === 'hq_super_admin',
+                canManageOrgUnits: has('manage_org_units') || req.ecgStaff.role === 'regional_manager',
                 canDeleteOrgUnits: has('delete_org_units'),
                 canInviteStaff: has('invite_staff'),
-                canAssignRoles: has('assign_roles') || req.ecgStaff.role === 'hq_super_admin',
+                canAssignRoles: has('assign_roles'),
                 canPublishEvents: has('publish_updates'),
                 canManageEvents: has('manage_events'),
-                canRotateBranchKeys: has('manage_branch_keys') || ['hq_super_admin', 'regional_manager', 'station_manager'].includes(req.ecgStaff.role),
+                canRotateBranchKeys: has('manage_branch_keys') || ['hq_manager', 'regional_manager', 'station_manager'].includes(req.ecgStaff.role),
                 canViewAuditLog: has('view_audit_log'),
                 canControlNationwidePower: has('control_nationwide_power'),
                 canControlRegionalPower: has('control_regional_power'),
                 canControlDistrictPower: has('control_district_power'),
-                canManageStaff: has('manage_staff') || ['hq_super_admin', 'regional_manager', 'station_manager'].includes(req.ecgStaff.role),
+                canManageStaff: has('manage_staff') || ['regional_manager', 'station_manager'].includes(req.ecgStaff.role),
                 canManageOperationalPermissions: has('manage_operational_permissions'),
                 canManageEcgConfig: has('manage_ecg_config'),
                 canManagePowerPlants: has('manage_power_plants'),
@@ -724,8 +702,7 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
             if (!name || !type) return res.status(400).json({ error: 'name and type are required' });
             if (!['regional', 'district'].includes(type)) return res.status(400).json({ error: 'type must be regional or district (headquarters is singular and pre-existing)' });
 
-            const canCreate = req.ecgStaff.role === 'hq_super_admin' ||
-                (req.ecgStaff.role === 'hq_manager' && hasPermission(req.ecgStaff, 'manage_org_units')) ||
+            const canCreate = (req.ecgStaff.role === 'hq_manager' && hasPermission(req.ecgStaff, 'manage_org_units')) ||
                 req.ecgStaff.role === 'regional_manager';
             if (!canCreate) return res.status(403).json({ error: 'You do not have permission to create organization units' });
 
@@ -780,7 +757,7 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
             const { name, coverageAreas, active } = req.body || {};
             if (name !== undefined) unit.name = String(name).trim();
             if (coverageAreas !== undefined) unit.coverageAreas = Array.isArray(coverageAreas) ? coverageAreas.map(a => String(a).trim()).filter(Boolean) : unit.coverageAreas;
-            if (active !== undefined && (req.ecgStaff.role === 'hq_super_admin' || (req.ecgStaff.role === 'hq_manager' && hasPermission(req.ecgStaff, 'manage_org_units')) || req.ecgStaff.role === 'regional_manager')) {
+            if (active !== undefined && ((req.ecgStaff.role === 'hq_manager' && hasPermission(req.ecgStaff, 'manage_org_units')) || req.ecgStaff.role === 'regional_manager')) {
                 unit.active = Boolean(active);
             }
             await unit.save();
@@ -832,7 +809,7 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
     });
 
     // ---- PROTECTED: rotate a district's branch key (shown once) ----
-    app.post('/ecg/org-units/:id/rotate-key', verifyEcgToken, requireRole('hq_super_admin', 'hq_manager', 'regional_manager', 'station_manager'), async (req, res) => {
+    app.post('/ecg/org-units/:id/rotate-key', verifyEcgToken, requireRole('hq_manager', 'regional_manager', 'station_manager'), async (req, res) => {
         try {
             const unit = await OrgUnit.findById(req.params.id).select('+branchKeyHash');
             if (!unit || unit.deletedAt) return res.status(404).json({ error: 'Not found' });
@@ -883,7 +860,8 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
             const targetUnit = await OrgUnit.findById(target.orgUnitId);
             if (!(await canManageUnit(req.ecgStaff, targetUnit))) return res.status(403).json({ error: 'Forbidden' });
             if (String(target._id) === String(req.ecgStaff._id)) return res.status(400).json({ error: 'Use your own profile settings to change your own account' });
-            if ((ROLE_TIER[target.role] || 0) >= (ROLE_TIER[req.ecgStaff.role] || 0) && req.ecgStaff.role !== 'hq_super_admin') {
+            const targetTier = target.role === LEGACY_HQ_ADMIN_ROLE ? ROLE_TIER.hq_manager : (ROLE_TIER[target.role] || 0);
+            if (targetTier >= (ROLE_TIER[req.ecgStaff.role] || 0)) {
                 return res.status(403).json({ error: 'You cannot modify an account at or above your own tier' });
             }
 
@@ -891,7 +869,7 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
             if (active !== undefined) target.active = Boolean(active);
             if (name !== undefined) target.name = String(name).trim();
             if (permissions !== undefined) {
-                if (!hasPermission(req.ecgStaff, 'manage_operational_permissions') && req.ecgStaff.role !== 'hq_super_admin') {
+                if (!hasPermission(req.ecgStaff, 'manage_operational_permissions')) {
                     return res.status(403).json({ error: 'Missing manage_operational_permissions permission' });
                 }
                 const check = canGrantRoleAndPermissions(req.ecgStaff, targetUnit.type, target.role, permissions);
@@ -910,8 +888,8 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
 
     app.delete('/ecg/staff/:id', verifyEcgToken, async (req, res) => {
         try {
-            if (req.ecgStaff.role !== 'hq_super_admin') {
-                return res.status(403).json({ error: 'Only the HQ Super Admin can delete staff accounts' });
+            if (req.ecgStaff.role !== 'hq_manager') {
+                return res.status(403).json({ error: 'Only an HQ Manager can delete staff accounts' });
             }
 
             const target = await EcgStaff.findById(req.params.id);
@@ -960,9 +938,9 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
             if (req.ecgStaff.role === 'regional_manager' && !['regional_staff', 'station_manager', 'station_operator'].includes(role)) {
                 return res.status(403).json({ error: 'Regional managers may only invite regional staff or station-level roles within their region' });
             }
-            // hq_manager may only invite hq_staff by default (matches the "if permitted" cap on manager-level invites)
-            if (req.ecgStaff.role === 'hq_manager' && role !== 'hq_staff') {
-                return res.status(403).json({ error: 'HQ Managers may only invite HQ Staff' });
+            // HQ managers cannot appoint another manager at the same tier.
+            if (req.ecgStaff.role === 'hq_manager' && role === 'hq_manager') {
+                return res.status(403).json({ error: 'HQ Managers cannot invite another HQ Manager' });
             }
 
             const requestedPermissions = Array.isArray(permissions) ? [...new Set(permissions)] : [];
@@ -1014,7 +992,11 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
         return res.json(invitations.map(inv => {
             const unit = unitById.get(String(inv.orgUnitId));
             return {
-                id: inv._id, email: inv.email, role: inv.role, permissions: inv.permissions, orgUnitId: inv.orgUnitId,
+                id: inv._id,
+                email: inv.email,
+                role: inv.role === LEGACY_HQ_ADMIN_ROLE ? 'hq_manager' : inv.role,
+                permissions: inv.permissions,
+                orgUnitId: inv.orgUnitId,
                 orgUnitName: unit ? unit.name : null,
                 orgUnitType: unit ? unit.type : null,
                 expiresAt: inv.expiresAt, createdAt: inv.createdAt
@@ -1048,7 +1030,7 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
     app.get('/ecg/permissions-catalog', verifyEcgToken, (req, res) => {
         return res.json({
             all: ALL_PERMISSIONS,
-            grantable: req.ecgStaff.role === 'hq_super_admin' ? ALL_PERMISSIONS : effectivePermissions(req.ecgStaff),
+            grantable: effectivePermissions(req.ecgStaff),
             roles: ROLES,
             roleDefaults: ROLE_DEFAULT_PERMISSIONS
         });

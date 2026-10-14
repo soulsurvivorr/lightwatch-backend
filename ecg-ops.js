@@ -184,7 +184,6 @@ module.exports = function setupEcgOps(app, { mongoose }) {
 
     // Can this staff member manage (create/edit/delete) assets tagged to `region`?
     function canManageRegion(staff, orgUnit, region) {
-        if (staff.role === 'hq_super_admin') return true;
         if (orgUnit.type === 'headquarters') return true; // hq_manager/hq_staff gated by permission check at the route
         return orgUnit.region === region;
     }
@@ -407,8 +406,7 @@ module.exports = function setupEcgOps(app, { mongoose }) {
         try {
             const region = req.params.region;
             if (!GHANA_REGIONS.includes(region)) return res.status(404).json({ error: 'Unknown region' });
-            const canEdit = req.ecgStaff.role === 'hq_super_admin' ||
-                (req.ecgOrgUnit.type === 'headquarters' && hasPermission(req.ecgStaff, 'manage_regional_offices')) ||
+            const canEdit = (req.ecgOrgUnit.type === 'headquarters' && hasPermission(req.ecgStaff, 'manage_regional_offices')) ||
                 (req.ecgOrgUnit.type === 'regional' && req.ecgOrgUnit.region === region && hasPermission(req.ecgStaff, 'manage_local_stations'));
             if (!canEdit) return res.status(403).json({ error: 'You cannot edit this region\'s profile' });
 

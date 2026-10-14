@@ -11,11 +11,11 @@
 //
 //  Scope/permission rules (enforced server-side — see ecg-auth.js's
 //  security note; the frontend only hides buttons, never enforces):
-//    nationwide — role hq_super_admin ONLY, permission control_nationwide_power.
+//    nationwide — HQ Manager, permission control_nationwide_power.
 //    regional   — staff whose own org unit is that regional office
 //                 (regional_manager / regional_staff), permission
-//                 control_regional_power. HQ Super Admin / HQ Manager
-//                 with manage_org_units may also act on any region.
+//                 control_regional_power. HQ Manager with the permission
+//                 may also act on any region.
 //    district   — staff whose own org unit is that district/local
 //                 station (station_manager / station_operator),
 //                 permission control_district_power. Regional/HQ roles
@@ -111,11 +111,11 @@ module.exports = function setupEcgPower(app, { mongoose }) {
         return res.json(changes.map(publicChange));
     });
 
-    // ---- PROTECTED: nationwide toggle — HQ Super Admin only ----
+    // ---- PROTECTED: nationwide toggle — HQ Manager only ----
     app.post('/ecg/power/nationwide', verifyEcgToken, async (req, res) => {
         try {
-            if (req.ecgStaff.role !== 'hq_super_admin') {
-                return res.status(403).json({ error: 'Only the HQ Super Admin can toggle nationwide power status' });
+            if (req.ecgStaff.role !== 'hq_manager') {
+                return res.status(403).json({ error: 'Only an HQ Manager can toggle nationwide power status' });
             }
             if (!hasPermission(req.ecgStaff, 'control_nationwide_power')) {
                 return res.status(403).json({ error: 'Missing control_nationwide_power permission' });
