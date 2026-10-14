@@ -568,6 +568,14 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
     const authorAdminLoginEnabled = process.env.ECG_AUTHOR_ADMIN_LOGIN !== 'false' && Boolean(adminPassword);
     const authorAdminEmail = 'opokuericsarkodie@gmail.com';
 
+    app.get('/ecg/public-config', (req, res) => {
+        const cartoTileKey = process.env.EXPO_PUBLIC_CARTO_API_KEY;
+        if (!cartoTileKey) {
+            return res.status(503).json({ error: 'CARTO map key is not configured on the server' });
+        }
+        return res.json({ cartoTileKey });
+    });
+
     function timingSafeEqualStrings(left, right) {
         const leftBuffer = Buffer.from(String(left || ''));
         const rightBuffer = Buffer.from(String(right || ''));
@@ -897,6 +905,36 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
         } catch (err) {
             console.error('[ecg-auth] update staff error:', err.message);
             return res.status(500).json({ error: 'Server error updating staff' });
+        }
+    });
+
+    app.delete('/ecg/staff/:id', verifyEcgToken, async (req, res) => {
+        try {
+            if (req.ecgStaff.role !== 'hq_super_admin') {
+                return res.status(403).json({ error: 'Only the HQ Super Admin can delete staff accounts' });
+            }
+
+            const target = await EcgStaff.findById(req.params.id);
+            if (!target) return res.status(404).json({ error: 'Staff account not found' });
+            if (String(target._id) === String(req.ecgStaff._id)) {
+                return res.status(400).json({ error: 'You cannot delete your own account' });
+            }
+
+            const deleted = await EcgStaff.deleteOne({ _id: target._id });
+            if (!deleted.deletedCount) return res.status(404).json({ error: 'Staff account not found' });
+
+            await logAudit({
+                staff: req.ecgStaff,
+                orgUnit: req.ecgOrgUnit,
+                action: 'staff_deleted',
+                target: target.email,
+                details: { targetStaffId: target._id, targetRole: target.role },
+                req
+            });
+            return res.json({ success: true });
+        } catch (err) {
+            console.error('[ecg-auth] delete staff error:', err.message);
+            return res.status(500).json({ error: 'Server error deleting staff account' });
         }
     });
 

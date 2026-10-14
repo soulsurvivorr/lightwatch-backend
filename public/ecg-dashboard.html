@@ -399,7 +399,7 @@
   <div class="auth-card">
     <div class="auth-mark">ECG</div>
     <h1>LightWatch ECG Operations</h1>
-    <p class="sub">Staff access is invitation-only. The ECG author can sign in with the configured admin password.</p>
+    <p class="sub">Staff access is invitation-only. This page is separate from the public LightWatch app.</p>
 
     <div class="auth-tabs">
       <div class="auth-tab active" id="tabLogin" onclick="switchAuthTab('login')">Staff Login</div>
@@ -412,7 +412,7 @@
     <form id="loginForm" onsubmit="return handleLogin(event)">
       <div class="field-wrap">
         <label class="field">Work Email</label>
-        <input type="email" id="loginEmail" required autocomplete="username" placeholder="opokuericsarkodie@gmail.com">
+        <input type="email" id="loginEmail" required autocomplete="username" placeholder="Enter your work email">
       </div>
       <div class="field-wrap">
         <label class="field">Password</label>
@@ -444,7 +444,7 @@
       <button class="btn btn--primary" style="width:100%" type="submit" id="inviteBtn">Create Account</button>
     </form>
 
-    <p class="auth-note">Staff accounts require an invitation. ECG author access uses opokuericsarkodie@gmail.com and the server's ADMIN_PASSWORD.</p>
+    <p class="auth-note">Don't have an invitation? Ask your regional office or district station manager to invite you.</p>
   </div>
 </div>
 
@@ -508,13 +508,10 @@
 
 <script>
 // ============================================================
-// Config / API base — same resolution logic as admin.html so this
-// file behaves identically wherever it's deployed alongside it.
+// Default to the backend because this dashboard can be hosted separately.
 // ============================================================
 const API = (typeof window.API_URL === "string" && window.API_URL)
-  || (window.location.protocol === "file:"
-    ? "https://lightwatch-backend-lightwatch-backend.up.railway.app"
-    : window.location.origin);
+  || "https://lightwatch-backend-lightwatch-backend.up.railway.app";
 
 const TK = "lw_ecg_tk";
 function getToken() { return sessionStorage.getItem(TK); }
@@ -707,6 +704,24 @@ function polygonLabelPoint(layer) {
   return b.getCenter();
 }
 
+let cartoTileKeyPromise;
+function getCartoTileKey() {
+  if (!cartoTileKeyPromise) {
+    cartoTileKeyPromise = fetch(`${API}/ecg/public-config`)
+      .then(async response => {
+        const config = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(config.error || `Map configuration request failed (${response.status})`);
+        if (!config.cartoTileKey) throw new Error("CARTO map key is not configured on the server");
+        return config.cartoTileKey;
+      })
+      .catch(err => {
+        cartoTileKeyPromise = null;
+        throw err;
+      });
+  }
+  return cartoTileKeyPromise;
+}
+
 // Mounts (or refreshes) the real Leaflet + OpenStreetMap heat map into
 // #lwLeafletMap. Called right after renderHeatMapPanel's markup lands in the
 // DOM.
@@ -716,6 +731,7 @@ async function mountHeatMap() {
   const scope = window.__lwHeatScope;
   if (!el || !window.L) return;
 
+  const cartoTileKey = await getCartoTileKey();
   if (LW_MAP) { LW_MAP.remove(); LW_MAP = null; }
   const ghanaBounds = ghanaBoundsLatLng();
   LW_MAP = L.map(el, {
@@ -726,7 +742,7 @@ async function mountHeatMap() {
     // the map from ever reading as "all of West Africa".
     maxBounds: ghanaBounds.pad(0.22), maxBoundsViscosity: 0.85, minZoom: 6
   });
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+  L.tileLayer(`https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=${encodeURIComponent(cartoTileKey)}`, {
     attribution: '© OpenStreetMap, © CARTO', maxZoom: 18, subdomains: 'abcd'
   }).addTo(LW_MAP);
 
@@ -1442,7 +1458,7 @@ async function renderOverview(content) {
         ${renderActivityPanel(recentEvents)}
       </div>
     </div>`;
-  mountHeatMap();
+  mountHeatMap().catch(err => toast(err.message, "err"));
   initGenDemandChart(scope);
 }
 
@@ -1478,7 +1494,7 @@ async function renderLiveMapPage(content) {
     </div>`;
   window.__lwHeatNodes = metrics.map(n => ({ ...n, latlng: latLngForNode(scope, n.name) }));
   window.__lwHeatScope = scope;
-  mountHeatMap();
+  mountHeatMap().catch(err => toast(err.message, "err"));
 }
 
 function statChip(icon, value, label) {
@@ -1909,7 +1925,7 @@ async function renderStaff(content) {
           <td><b>${esc(s.orgUnitName || '—')}</b>${s.orgUnitRegion ? `<div style="color:var(--muted);font-size:0.72rem">${esc(s.orgUnitRegion)}</div>` : ''}</td>
           <td><span class="badge badge--${s.active ? 'active' : 'inactive'}">${s.active ? 'active' : 'inactive'}</span></td>
           <td>${fmtDate(s.lastLoginAt)}</td>
-          <td>${s.id !== ME.staff.id ? `<button class="btn btn--sm ${s.active ? 'btn--danger' : ''}" onclick="toggleStaff('${s.id}', ${!s.active})">${s.active ? 'Deactivate' : 'Reactivate'}</button>` : `<button class="btn btn--sm" onclick="document.getElementById('avatarFileInput').click()">${getLocalAvatar(s.id) ? 'Change photo' : 'Add photo'}</button>`}</td>
+          <td>${s.id !== ME.staff.id ? `<button class="btn btn--sm ${s.active ? 'btn--danger' : ''}" onclick="toggleStaff('${s.id}', ${!s.active})">${s.active ? 'Deactivate' : 'Reactivate'}</button>${ME.staff.role === 'hq_super_admin' ? ` <button class="btn btn--sm btn--danger" onclick="deleteStaff('${s.id}')">Delete</button>` : ''}` : `<button class="btn btn--sm" onclick="document.getElementById('avatarFileInput').click()">${getLocalAvatar(s.id) ? 'Change photo' : 'Add photo'}</button>`}</td>
         </tr>`).join('') : '<tr><td colspan="8" class="empty-row">No staff visible in your scope.</td></tr>'}
       </tbody></table>
     </div>`;
@@ -1917,6 +1933,14 @@ async function renderStaff(content) {
 async function toggleStaff(id, active) {
   try { await ecgPatch(`/ecg/staff/${id}`, { active }); toast("Updated."); switchTab("staff"); }
   catch (err) { toast(err.message, "err"); }
+}
+async function deleteStaff(id) {
+  if (!confirm("Permanently delete this staff account? They will need a new invitation to regain access.")) return;
+  try {
+    await ecgDelete(`/ecg/staff/${id}`);
+    toast("Staff account deleted.");
+    switchTab("staff");
+  } catch (err) { toast(err.message, "err"); }
 }
 
 // ---- Invitations ----
