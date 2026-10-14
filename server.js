@@ -2433,6 +2433,7 @@ async function createNotificationForUser({ recipientUserId, actorUserId, actorHa
                 tone: 'chat',
                 type,
                 chatId: chatId || undefined,
+                parentChatId: parentChatId || undefined,
                 chatScope: chatScope || undefined,
                 chatLocation: chatLocation || undefined
             };
@@ -2758,6 +2759,7 @@ app.post('/chats', async (req, res) => {
                     requireInteraction: true,
                     vibrate: isPriorityMention ? [280, 120, 280] : [240, 120, 240],
                     chatScope: normalizedScope,
+                    chatId: String(saved._id),
                     isReply: isReplyForThisUser,
                     isMention: isMentionForThisUser,
                     tone: 'chat'

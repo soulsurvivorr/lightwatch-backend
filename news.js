@@ -1026,6 +1026,8 @@ module.exports = function initNewsSystem(app, deps) {
                 title: `LightWatch News — ${displayLocation}`,
                 body: event.headline,
                 url: '/pages/chat.html',
+                type: 'news',
+                articleId: String(event._id),
                 tag: `news-event-${event._id}-${event.category}`,
                 requireInteraction: false,
                 vibrate: [200, 90, 200],
@@ -1050,6 +1052,8 @@ module.exports = function initNewsSystem(app, deps) {
                 title: 'LightWatch News — Ghana',
                 body: event.headline,
                 url: '/pages/chat.html',
+                type: 'news',
+                articleId: String(event._id),
                 tag: `news-event-broadcast-${event._id}-${event.category}`,
                 requireInteraction: false,
                 vibrate: [200, 90, 200, 90, 200],
@@ -1072,6 +1076,8 @@ module.exports = function initNewsSystem(app, deps) {
                 title: `LightWatch News — ${events.length} power updates`,
                 body: headlines.join(' • ') + more,
                 url: '/pages/chat.html',
+                type: 'news',
+                articleId: String(events[0]._id),
                 tag: `news-digest-broadcast-${Date.now()}`,
                 requireInteraction: false,
                 vibrate: [200, 90, 200, 90, 200],
@@ -1095,6 +1101,8 @@ module.exports = function initNewsSystem(app, deps) {
                 title: `LightWatch News — ${displayLocation} (${events.length} updates)`,
                 body: headlines.join(' • ') + more,
                 url: '/pages/chat.html',
+                type: 'news',
+                articleId: String(events[0]._id),
                 tag: `news-digest-${locationKey}-${Date.now()}`,
                 requireInteraction: false,
                 vibrate: [200, 90, 200],
@@ -2183,6 +2191,12 @@ module.exports = function initNewsSystem(app, deps) {
             andClauses.push(cats.length > 1 ? { category: { $in: cats } } : { category: cats[0] });
         }
         if (req.query.status) andClauses.push({ status: req.query.status });
+        if (req.query.id) {
+            if (!mongoose.Types.ObjectId.isValid(String(req.query.id))) {
+                return res.status(400).json({ error: 'Invalid news event id' });
+            }
+            andClauses.push({ _id: String(req.query.id) });
+        }
         if (req.query.official === 'true') andClauses.push({ 'sources.official': true });
         if (req.query.before) {
             const beforeDate = new Date(req.query.before);
