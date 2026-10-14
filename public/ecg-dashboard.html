@@ -399,7 +399,7 @@
   <div class="auth-card">
     <div class="auth-mark">ECG</div>
     <h1>LightWatch ECG Operations</h1>
-    <p class="sub">Staff access is invitation-only. This page is separate from the public LightWatch app.</p>
+    <p class="sub">Staff access is invitation-only. The ECG author can sign in with the configured admin password.</p>
 
     <div class="auth-tabs">
       <div class="auth-tab active" id="tabLogin" onclick="switchAuthTab('login')">Staff Login</div>
@@ -412,7 +412,7 @@
     <form id="loginForm" onsubmit="return handleLogin(event)">
       <div class="field-wrap">
         <label class="field">Work Email</label>
-        <input type="email" id="loginEmail" required autocomplete="username" placeholder="you@ecg.example">
+        <input type="email" id="loginEmail" required autocomplete="username" placeholder="opokuericsarkodie@gmail.com">
       </div>
       <div class="field-wrap">
         <label class="field">Password</label>
@@ -444,7 +444,7 @@
       <button class="btn btn--primary" style="width:100%" type="submit" id="inviteBtn">Create Account</button>
     </form>
 
-    <p class="auth-note">Don't have an invitation? Ask your regional office or district station manager to invite you — ECG accounts can't be self-registered.</p>
+    <p class="auth-note">Staff accounts require an invitation. ECG author access uses opokuericsarkodie@gmail.com and the server's ADMIN_PASSWORD.</p>
   </div>
 </div>
 
@@ -1128,14 +1128,16 @@ async function lookupInvite() {
   const branchField = document.getElementById("branchKeyField");
   if (!token) { box.classList.add("hidden"); return; }
   try {
-    const info = await fetch(`${API}/ecg/invitations/${token}`).then(r => r.ok ? r.json() : Promise.reject(new Error((r.status === 404) ? "Invitation not found" : "Invitation is no longer valid")));
+    const response = await fetch(`${API}/ecg/invitations/lookup?token=${encodeURIComponent(token)}`);
+    const info = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(info.error || `Request failed (${response.status})`);
     box.classList.remove("hidden");
     box.innerHTML = `
       <div><b>Email:</b> ${esc(info.email)}</div>
       <div><b>Organization:</b> ${esc(info.organizationUnit?.name || '—')}${info.organizationUnit?.region ? ' · ' + esc(info.organizationUnit.region) : ''}</div>
       <div><b>Role:</b> ${esc(formatRole(info.role))}</div>`;
-    branchField.classList.toggle("hidden", !info.requiresBranchKey);
-    document.getElementById("inviteBranchKey").required = Boolean(info.requiresBranchKey);
+    branchField.classList.toggle("hidden", !info.branchKeyRequired);
+    document.getElementById("inviteBranchKey").required = Boolean(info.branchKeyRequired);
   } catch (err) {
     box.classList.remove("hidden");
     box.innerHTML = `<span style="color:var(--red)">${esc(err.message)}</span>`;
@@ -1947,11 +1949,12 @@ async function renderInvitations(content) {
       </form>
     </div>
     <div class="panel">
-      <div class="panel__head"><h3>Pending Invitations</h3></div>
-      <table><thead><tr><th>Email</th><th>Role</th><th>Assigned To</th><th>Expires</th><th></th></tr></thead>
+      <div class="panel__head"><div><h3>Invitations</h3><p>Expired invitations remain visible here so you can identify them; send a new invitation if someone still needs access.</p></div></div>
+      <table><thead><tr><th>Email</th><th>Role</th><th>Assigned To</th><th>Status</th><th>Expires</th><th></th></tr></thead>
       <tbody>${invites.length ? invites.map(i => `
-        <tr><td>${esc(i.email)}</td><td>${esc(formatRole(i.role))}</td><td>${esc(i.orgUnitName || '—')}</td><td>${fmtDate(i.expiresAt)}</td>
-        <td><button class="btn btn--sm btn--danger" onclick="revokeInvite('${i.id}')">Revoke</button></td></tr>`).join('') : '<tr><td colspan="5" class="empty-row">No pending invitations.</td></tr>'}
+        <tr><td>${esc(i.email)}</td><td>${esc(formatRole(i.role))}</td><td>${esc(i.orgUnitName || '—')}</td>
+        <td><span class="badge badge--${new Date(i.expiresAt).getTime() <= Date.now() ? 'inactive' : 'active'}">${new Date(i.expiresAt).getTime() <= Date.now() ? 'Expired' : 'Pending'}</span></td>
+        <td>${fmtDate(i.expiresAt)}</td><td><button class="btn btn--sm btn--danger" onclick="revokeInvite('${i.id}')">Revoke</button></td></tr>`).join('') : '<tr><td colspan="6" class="empty-row">No invitations found.</td></tr>'}
       </tbody></table>
     </div>`;
 }

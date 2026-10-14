@@ -34,7 +34,7 @@
 //  the inviter's own role tier. Effective permissions for a staff
 //  member = role defaults ∪ their explicit `permissions` grants.
 //
-//  NO PUBLIC SIGNUP. The only ways an EcgStaff row gets created:
+//  NO PUBLIC SIGNUP. The ways an EcgStaff row gets created:
 //    1. POST /ecg/invitations/:token/accept — the invited person
 //       completing an invitation an authorized manager already sent
 //       (org unit + role + permissions are fixed by the invitation,
@@ -45,6 +45,8 @@
 //       chicken-and-egg problem of "who invites the first HQ Super
 //       Admin"; it still produces an invitation (not a direct
 //       account), so even HQ's first user goes through the accept flow.
+//    3. The ECG author can sign in with ADMIN_PASSWORD and their fixed
+//       email to create/access the HQ super-admin account.
 //
 //  BRANCH KEYS: every 'district' OrgUnit gets a private, random,
 //  unpredictable branch key (never derived from the station name).
@@ -562,9 +564,9 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
 
     // ---- PUBLIC: staff login ----
     const loginAttempts = new Map(); // email -> { count, lockedUntil } — simple in-memory throttle
-    const testAdminLoginEnabled = process.env.ECG_TEST_ADMIN_LOGIN === 'true';
-    const testAdminEmail = (process.env.ECG_TEST_ADMIN_EMAIL || 'sarkdev@yahoo.com').toLowerCase().trim();
     const adminPassword = process.env.ADMIN_PASSWORD || '';
+    const authorAdminLoginEnabled = process.env.ECG_AUTHOR_ADMIN_LOGIN !== 'false' && Boolean(adminPassword);
+    const authorAdminEmail = 'opokuericsarkodie@gmail.com';
 
     function timingSafeEqualStrings(left, right) {
         const leftBuffer = Buffer.from(String(left || ''));
@@ -572,7 +574,7 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
         return leftBuffer.length > 0 && leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
     }
 
-    async function createTestAdminStaff(email) {
+    async function createAuthorAdminStaff(email) {
         let headquarters = await OrgUnit.findOne({ type: 'headquarters', deletedAt: null });
         if (!headquarters) {
             headquarters = await OrgUnit.create({
@@ -585,7 +587,7 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
 
         try {
             return await EcgStaff.create({
-                name: 'ECG Test Admin',
+                name: 'ECG Headquarters Admin',
                 email,
                 passwordHash: hashPassword(randomToken(48)),
                 role: 'hq_super_admin',
@@ -610,15 +612,15 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
             }
 
             let staff = await EcgStaff.findOne({ email }).select('+passwordHash');
-            const testAdminPasswordMatches = testAdminLoginEnabled && email === testAdminEmail &&
+            const authorAdminPasswordMatches = authorAdminLoginEnabled && email === authorAdminEmail &&
                 timingSafeEqualStrings(password, adminPassword);
-            if (!staff && testAdminPasswordMatches) staff = await createTestAdminStaff(email);
+            if (!staff && authorAdminPasswordMatches) staff = await createAuthorAdminStaff(email);
 
             const storedPasswordMatches = staff && verifyPassword(password, staff.passwordHash);
-            const usedTestAdminPassword = Boolean(
-                staff && staff.role === 'hq_super_admin' && testAdminPasswordMatches && !storedPasswordMatches
+            const usedAuthorAdminPassword = Boolean(
+                staff && staff.role === 'hq_super_admin' && authorAdminPasswordMatches && !storedPasswordMatches
             );
-            const passwordOk = storedPasswordMatches || usedTestAdminPassword;
+            const passwordOk = storedPasswordMatches || usedAuthorAdminPassword;
 
             if (!staff || !passwordOk) {
                 attempt.count += 1;
@@ -641,7 +643,7 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
                 staff,
                 orgUnit,
                 action: 'login',
-                details: usedTestAdminPassword ? { method: 'test_admin_password' } : null,
+                details: usedAuthorAdminPassword ? { method: 'author_admin_password' } : null,
                 req
             });
 
