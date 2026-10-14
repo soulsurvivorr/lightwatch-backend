@@ -122,7 +122,10 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
             'view_nationwide_status', 'view_all_regions', 'view_community_reports',
             'view_outages', 'monitor_stations', 'publish_updates', 'manage_events',
             'invite_staff', 'manage_local_stations', 'control_regional_power',
-            'manage_power_plants', 'manage_transmission', 'manage_announcements'
+            'manage_power_plants', 'manage_transmission', 'manage_announcements',
+            // Territory-level admin: audit log is already scoped to this region + its stations
+            // server-side (scopedUnitIds), so this never exposes the nationwide log.
+            'view_audit_log', 'assign_roles', 'manage_staff', 'manage_operational_permissions', 'manage_branch_keys'
         ],
         regional_staff: [
             'view_nationwide_status', 'view_community_reports', 'view_outages',
@@ -131,7 +134,8 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
         station_manager: [
             'view_community_reports', 'view_outages', 'monitor_stations',
             'publish_updates', 'manage_events', 'invite_staff', 'control_district_power',
-            'manage_transmission', 'manage_announcements'
+            'manage_transmission', 'manage_announcements',
+            'view_audit_log', 'assign_roles', 'manage_staff'
         ],
         station_operator: [
             'view_community_reports', 'view_outages', 'monitor_stations', 'control_district_power'
@@ -920,11 +924,24 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
     //      fully validated server-side against the granter's own scope/tier) ----
     app.post('/ecg/invitations', verifyEcgToken, requirePermission('invite_staff'), async (req, res) => {
         try {
-            const { email, role, orgUnitId, permissions } = req.body || {};
+            const { email, role, orgUnitId, permissions, region } = req.body || {};
             if (!email || !role) return res.status(400).json({ error: 'email and role are required' });
 
-            const targetUnitId = orgUnitId || req.ecgStaff.orgUnitId;
-            const targetUnit = await OrgUnit.findById(targetUnitId);
+            // HQ can invite a Regional Manager/Staff by picking one of the 16 regions; the
+            // regional office for that region is found, or created on the spot if missing.
+            let targetUnit;
+            if (!orgUnitId && region && ['regional_manager', 'regional_staff'].includes(role) && req.ecgStaff.role === 'hq_manager') {
+                const REGIONS = ['Ahafo', 'Ashanti', 'Bono', 'Bono East', 'Central', 'Eastern', 'Greater Accra', 'North East', 'Northern', 'Oti', 'Savannah', 'Upper East', 'Upper West', 'Volta', 'Western', 'Western North'];
+                const regionName = REGIONS.find(r => r.toLowerCase() === String(region).trim().toLowerCase());
+                if (!regionName) return res.status(400).json({ error: 'Unknown region' });
+                targetUnit = await OrgUnit.findOne({ type: 'regional', region: regionName, deletedAt: null });
+                if (!targetUnit) {
+                    targetUnit = await OrgUnit.create({ name: `${regionName} Regional Office`, type: 'regional', region: regionName, parentUnitId: req.ecgStaff.orgUnitId, createdByStaffId: req.ecgStaff._id });
+                    await logAudit({ staff: req.ecgStaff, orgUnit: req.ecgOrgUnit, action: 'org_unit_created', target: targetUnit.name, details: { newUnitId: targetUnit._id, via: 'invitation' }, req });
+                }
+            } else {
+                targetUnit = await OrgUnit.findById(orgUnitId || req.ecgStaff.orgUnitId);
+            }
             if (!targetUnit || targetUnit.deletedAt) return res.status(404).json({ error: 'Organization unit not found' });
 
             const withinScope = String(targetUnit._id) === String(req.ecgStaff.orgUnitId) || (await canManageUnit(req.ecgStaff, targetUnit));
@@ -935,12 +952,12 @@ module.exports = function setupEcgAuth(app, { mongoose, jwt, JWT_SECRET, verifyA
                 return res.status(403).json({ error: 'Station managers may only invite station operators' });
             }
             // regional_manager may only invite within their own region's tiers
-            if (req.ecgStaff.role === 'regional_manager' && !['regional_staff', 'station_manager', 'station_operator'].includes(role)) {
-                return res.status(403).json({ error: 'Regional managers may only invite regional staff or station-level roles within their region' });
+            if (req.ecgStaff.role === 'regional_manager' && !['regional_staff', 'station_manager'].includes(role)) {
+                return res.status(403).json({ error: 'Regional managers may only invite regional staff or station managers within their region' });
             }
             // HQ managers cannot appoint another manager at the same tier.
-            if (req.ecgStaff.role === 'hq_manager' && role === 'hq_manager') {
-                return res.status(403).json({ error: 'HQ Managers cannot invite another HQ Manager' });
+            if (req.ecgStaff.role === 'hq_manager' && !['hq_staff', 'regional_manager'].includes(role)) {
+                return res.status(403).json({ error: 'Headquarters can only invite HQ staff and regional managers' });
             }
 
             const requestedPermissions = Array.isArray(permissions) ? [...new Set(permissions)] : [];
