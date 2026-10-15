@@ -760,6 +760,45 @@ app.use(cors());
 // the route handlers instead of failing before postChat() gets a response.
 app.use(express.json({ limit: '6mb' }));
 
+// Public, read-only cache for Ghana's real administrative boundary GeoJSON.
+// The dashboard calls these same-origin routes first (avoids browser CORS and
+// reduces third-party requests); if the upstream GIS service is temporarily
+// unavailable, the last successful in-memory copy is served stale.
+const ECG_BOUNDARY_SOURCES = {
+    districts: 'https://services9.arcgis.com/wIeOHuxI1ZWIXdZQ/ArcGIS/rest/services/GHA_Boundaries_2021_2d8cd/FeatureServer/2/query?where=1%3D1&outFields=NAME%2COBJECTID%2CTOTPOP_CY&returnGeometry=true&outSR=4326&f=geojson',
+    regions: 'https://services9.arcgis.com/wIeOHuxI1ZWIXdZQ/ArcGIS/rest/services/GHA_Boundaries_2021_2d8cd/FeatureServer/1/query?where=1%3D1&outFields=NAME%2COBJECTID&returnGeometry=true&outSR=4326&f=geojson'
+};
+const ECG_BOUNDARY_CACHE = new Map();
+const ECG_BOUNDARY_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+async function serveEcgBoundaryGeoJSON(req, res, level) {
+    const sourceUrl = ECG_BOUNDARY_SOURCES[level];
+    if (!sourceUrl) return res.status(404).json({ error: 'Unknown boundary layer' });
+    const cached = ECG_BOUNDARY_CACHE.get(level);
+    res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+    res.setHeader('X-Geo-Boundary-Source', 'Ghana Boundaries 2021 — Ghana Statistical Services / UN / Michael Bauer Research');
+    if (cached && Date.now() - cached.fetchedAt < ECG_BOUNDARY_CACHE_TTL_MS) return res.json(cached.data);
+    try {
+        const upstream = await fetch(sourceUrl, {
+            headers: { Accept: 'application/geo+json, application/json' },
+            signal: AbortSignal.timeout(20000)
+        });
+        if (!upstream.ok) throw new Error(`upstream GIS returned HTTP ${upstream.status}`);
+        const data = await upstream.json();
+        if (!data || !Array.isArray(data.features) || data.features.length === 0) throw new Error('upstream GIS returned empty GeoJSON');
+        ECG_BOUNDARY_CACHE.set(level, { data, fetchedAt: Date.now() });
+        return res.json(data);
+    } catch (error) {
+        console.warn(`[ECG boundary GeoJSON] ${level} fetch failed: ${error.message}`);
+        if (cached) {
+            res.setHeader('X-Geo-Boundary-Cache', 'stale');
+            return res.json(cached.data);
+        }
+        return res.status(502).json({ error: 'Boundary data is temporarily unavailable', source: 'Ghana Boundaries 2021' });
+    }
+}
+app.get('/ecg/map/boundaries/districts', (req, res) => serveEcgBoundaryGeoJSON(req, res, 'districts'));
+app.get('/ecg/map/boundaries/regions', (req, res) => serveEcgBoundaryGeoJSON(req, res, 'regions'));
+
 // Serves frontend files from the frontend folder during development
 // In production, copy built frontend files to a 'public' folder or adjust path
 // maxAge adds a Cache-Control header so browsers/CDNs stop re-requesting
