@@ -627,12 +627,30 @@ function computeNodeMetrics(nodes, events, matchFn) {
   });
 }
 
+function buildDistrictMapNodes(nodes) {
+  const districts = new Map();
+  nodes.forEach(node => {
+    if (!node.district) return;
+    if (!districts.has(node.district)) districts.set(node.district, []);
+    districts.get(node.district).push(node);
+  });
+  return Array.from(districts, ([name, locations]) => ({
+    name,
+    locations,
+    latlng: [
+      locations.reduce((sum, location) => sum + location.latlng[0], 0) / locations.length,
+      locations.reduce((sum, location) => sum + location.latlng[1], 0) / locations.length
+    ],
+    outageCount: locations.filter(location => location.isOutage).length
+  }));
+}
+
 let LW_MAP = null; // the single live Leaflet map instance for the heat panel
 function scopeLabels(scope) {
   return scope === 'headquarters'
     ? { unit: 'Region', unitPlural: 'Regions', mapTitle: 'Registered Location Map', mapSub: 'Registered towns and cities across Ghana; active outage reports are highlighted', weatherTitle: 'Region Weather Overview', healthTitle: 'Region Power Health' }
     : scope === 'regional'
-    ? { unit: 'District', unitPlural: 'Districts', mapTitle: 'Registered Location Map', mapSub: `Registered towns and cities across ${esc(ME.organizationUnit.region || 'the region')}; active outage reports are highlighted`, weatherTitle: 'District Weather Overview', healthTitle: 'District Power Health' }
+    ? { unit: 'District', unitPlural: 'Districts', mapTitle: 'District and City Map', mapSub: `Districts across ${esc(ME.organizationUnit.region || 'the region')}; zoom in to see registered towns and cities`, weatherTitle: 'District Weather Overview', healthTitle: 'District Power Health' }
     : { unit: 'Area', unitPlural: 'Coverage Areas', mapTitle: 'Registered Location Map', mapSub: 'Registered towns and cities in your assigned coverage; active outage reports are highlighted', weatherTitle: 'Coverage Area Weather', healthTitle: 'Area Power Health' };
 }
 
@@ -649,7 +667,7 @@ function renderHeatMapPanel(scope, mapNodes) {
       <div class="heatmap-wrap"><div id="lwLeafletMap" class="lw-leaflet-map"></div></div>
       <div class="map-legend-col"><span>Active outage</span><div class="grad"></div><span>No heat signal</span></div>
     </div>
-    <div class="map-updated"><span>${positioned.length ? 'Pins are registered towns/cities. Approximate coordinates are identified in each location popup.' : 'No registered locations with usable coordinates were found in this scope.'}</span></div>
+    <div class="map-updated"><span>${positioned.length ? (scope === 'regional' ? 'District markers group registered locations by district; zoom in to see individual town and city pins.' : 'Pins are registered towns/cities. Approximate coordinates are identified in each location popup.') : 'No registered locations with usable coordinates were found in this scope.'}</span></div>
     <div class="map-updated">
       <span id="mapUpdatedAt">Last updated: ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
       <div class="map-refresh" title="Refresh" onclick="switchTab('overview')">⟳</div>
@@ -802,32 +820,60 @@ async function mountHeatMap() {
   }
 
   const bounds = [];
-  nodes.forEach(n => {
-    bounds.push(n.latlng);
+  const districtLayer = L.layerGroup();
+  const locationLayer = L.layerGroup();
+  const addLocationMarker = (n, layerGroup) => {
     const color = n.isOutage ? '#E4392E' : n.status === 'on' ? '#2FE08C' : '#8E99B0';
     const icon = L.divIcon({
       className: 'lw-map-label',
       html: `<div class="lw-map-label__pin"><div class="lw-map-label__dot" style="background:${color}"></div><div class="lw-map-label__name">${esc(n.name)}</div><div class="lw-map-label__val" style="color:${color}">${esc(n.statusLabel)}${n.coordsApproximate ? ' · approximate pin' : ''}</div></div>`,
       iconSize: [1, 1], iconAnchor: [0, 6]
     });
-    const marker = L.marker(n.latlng, { icon }).addTo(LW_MAP);
+    const marker = L.marker(n.latlng, { icon }).addTo(layerGroup);
     marker.bindPopup(`<b>${esc(n.name)}</b><div class="lw-pop-sub">${n.district ? `District: ${esc(n.district)} · ` : ''}${n.region ? `Region: ${esc(n.region)} · ` : ''}${esc(n.statusLabel)} · ${n.outageCount} active outage report${n.outageCount === 1 ? '' : 's'}${n.coordsApproximate ? ' · approximate coordinates' : ''}${n.confirmations ? ` · ${n.confirmations} confirmations` : ''}</div>`, { className: 'lw-map-popup' });
+  };
+  nodes.forEach(n => {
+    bounds.push(n.latlng);
+    addLocationMarker(n, locationLayer);
   });
 
-  const updateLocationLabels = () => {
-    const showLabels = scope !== 'headquarters' || LW_MAP.getZoom() >= 9;
-    el.querySelectorAll('.lw-map-label__name, .lw-map-label__val').forEach(label => {
-      label.style.display = showLabels ? '' : 'none';
+  if (scope === 'regional') {
+    buildDistrictMapNodes(nodes).forEach(district => {
+      const { name: districtName, locations, latlng: center, outageCount } = district;
+      const color = outageCount ? '#E4392E' : '#8E99B0';
+      const icon = L.divIcon({
+        className: 'lw-map-label',
+        html: `<div class="lw-map-label__pin"><div class="lw-map-label__name">${esc(districtName)}</div><div class="lw-map-label__val" style="color:${color}">${locations.length} registered location${locations.length === 1 ? '' : 's'}${outageCount ? ` · ${outageCount} outage${outageCount === 1 ? '' : 's'}` : ''}</div></div>`,
+        iconSize: [1, 1], iconAnchor: [0, 0]
+      });
+      const marker = L.marker(center, { icon }).addTo(districtLayer);
+      marker.bindPopup(`<b>${esc(districtName)}</b><div class="lw-pop-sub">${locations.length} registered location${locations.length === 1 ? '' : 's'} mapped from their coordinates${outageCount ? ` · ${outageCount} with outage signals` : ''}</div>`, { className: 'lw-map-popup' });
     });
-  };
-  LW_MAP.on('zoomend', updateLocationLabels);
-  updateLocationLabels();
+  }
 
-  if (bounds.length === 1) LW_MAP.setView(bounds[0], 11);
+  const updateMapLevel = () => {
+    const showCities = scope !== 'regional' || LW_MAP.getZoom() >= 9;
+    if (scope === 'regional') {
+      if (showCities) {
+        if (LW_MAP.hasLayer(districtLayer)) LW_MAP.removeLayer(districtLayer);
+        if (!LW_MAP.hasLayer(locationLayer)) LW_MAP.addLayer(locationLayer);
+      } else {
+        if (LW_MAP.hasLayer(locationLayer)) LW_MAP.removeLayer(locationLayer);
+        if (!LW_MAP.hasLayer(districtLayer)) LW_MAP.addLayer(districtLayer);
+      }
+    } else if (!LW_MAP.hasLayer(locationLayer)) {
+      LW_MAP.addLayer(locationLayer);
+    }
+  };
+  LW_MAP.on('zoomend', updateMapLevel);
+
+  if (scope === 'regional' && bounds.length === 1) LW_MAP.setView(bounds[0], 8);
+  else if (bounds.length === 1) LW_MAP.setView(bounds[0], 11);
   else {
-    LW_MAP.fitBounds(bounds, { padding: [42, 42], maxZoom: scope === 'headquarters' ? 8 : 12.5 });
+    LW_MAP.fitBounds(bounds, { padding: [42, 42], maxZoom: scope === 'headquarters' || scope === 'regional' ? 8 : 12.5 });
     if (scope !== 'headquarters') LW_MAP.setMaxBounds(L.latLngBounds(bounds).pad(0.6));
   }
+  updateMapLevel();
 
   setTimeout(() => LW_MAP && LW_MAP.invalidateSize(), 60);
 }
@@ -1565,7 +1611,7 @@ async function renderLiveMapPage(content) {
         <div class="map-legend-col"><span>Active outage</span><div class="grad"></div><span>No heat signal</span></div>
       </div>
       <div class="map-updated" style="padding:0 20px 16px;">
-        <span>Pins show registered locations; approximate coordinates are marked in their popups.</span>
+        <span>${scope === 'regional' ? 'District markers group registered locations; zoom in for town and city pins.' : 'Pins show registered locations; approximate coordinates are marked in their popups.'}</span>
         <span id="mapUpdatedAt">Last updated: ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
         <div class="map-refresh" title="Refresh" onclick="switchTab('livemap')">⟳</div>
       </div>
