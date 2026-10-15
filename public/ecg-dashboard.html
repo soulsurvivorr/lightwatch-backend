@@ -586,31 +586,10 @@ function timeAgo(iso) {
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
-// Real-world lat/lng of each region's capital, used to place the heat map on
-// an actual Ghana basemap (Leaflet + OpenStreetMap) instead of a drawn silhouette.
-const REGION_LATLNG = {
-  "Ahafo": [6.8018, -2.5199], "Ashanti": [6.6885, -1.6244], "Bono": [7.3399, -2.3268],
-  "Bono East": [7.5911, -1.9391], "Central": [5.1053, -1.2466], "Eastern": [6.0940, -0.2591],
-  "Greater Accra": [5.6037, -0.1870], "North East": [10.5167, -0.3667], "Northern": [9.4034, -0.8424],
-  "Oti": [8.0667, 0.1833], "Savannah": [9.0833, -1.8167], "Upper East": [10.7856, -0.8514],
-  "Upper West": [10.0601, -2.5099], "Volta": [6.6113, 0.4713], "Western": [4.9047, -1.7554],
-  "Western North": [6.2039, -2.4839]
-};
-const GHANA_CENTER = [7.9, -1.2];
-// District/town-level coordinates aren't hand-mapped, so a district or town
-// marker is placed a small, deterministic distance from its region's real
-// capital coordinate — real basemap, best-effort exact pin position.
-function jitterLatLng(baseLatLng, seed, spreadDeg) {
-  const rnd = seededRand(seed);
-  const angle = rnd() * Math.PI * 2, dist = rnd() * spreadDeg;
-  return [baseLatLng[0] + Math.cos(angle) * dist, baseLatLng[1] + Math.sin(angle) * dist * 1.15];
-}
-function latLngForNode(scope, name) {
-  if (scope === 'headquarters') return REGION_LATLNG[name] || GHANA_CENTER;
-  const regionBase = REGION_LATLNG[ME.organizationUnit.region] || GHANA_CENTER;
-  if (scope === 'regional') return jitterLatLng(regionBase, "district-geo:" + ME.organizationUnit.region + ":" + name, 0.42);
-  const stationBase = jitterLatLng(regionBase, "station-geo:" + ME.organizationUnit.id, 0.18);
-  return jitterLatLng(stationBase, "area-geo:" + ME.organizationUnit.id + ":" + name, 0.09);
+function normalizeMapName(value) {
+  return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+    .replace(/\b(?:metropolitan municipality|municipal assembly|district assembly|municipality|municipal|metropolitan|metro|district)\b/g, ' ')
+    .replace(/[^a-z0-9]/g, '');
 }
 
 // Reverse index: town/capital (lowercased) -> { region, district } — built
@@ -619,12 +598,12 @@ function latLngForNode(scope, name) {
 const TOWN_INDEX = {};
 Object.entries(GHANA_DATA).forEach(([region, rdata]) => {
   Object.entries(rdata.districts).forEach(([district, towns]) => {
-    towns.forEach(t => { TOWN_INDEX[String(t).toLowerCase()] = { region, district }; });
+    towns.forEach(t => { TOWN_INDEX[normalizeMapName(t)] = { region, district }; });
   });
-  const capKey = String(rdata.capital).toLowerCase();
+  const capKey = normalizeMapName(rdata.capital);
   if (!TOWN_INDEX[capKey]) TOWN_INDEX[capKey] = { region, district: null };
 });
-function locateArea(name) { return TOWN_INDEX[String(name || '').toLowerCase()] || null; }
+function locateArea(name) { return TOWN_INDEX[normalizeMapName(name)] || null; }
 function normRegionName(s) { return String(s || '').toLowerCase().replace(/region/g, '').replace(/[^a-z]/g, ''); }
 
 const WX_SETS = [
@@ -651,15 +630,15 @@ function computeNodeMetrics(nodes, events, matchFn) {
 let LW_MAP = null; // the single live Leaflet map instance for the heat panel
 function scopeLabels(scope) {
   return scope === 'headquarters'
-    ? { unit: 'Region', unitPlural: 'Regions', mapTitle: 'Live Outage Heat Map', mapSub: "Real-time outage intensity across Ghana", weatherTitle: 'Region Weather Overview', healthTitle: 'Region Power Health' }
+    ? { unit: 'Region', unitPlural: 'Regions', mapTitle: 'Registered Location Map', mapSub: 'Registered towns and cities across Ghana; active outage reports are highlighted', weatherTitle: 'Region Weather Overview', healthTitle: 'Region Power Health' }
     : scope === 'regional'
-    ? { unit: 'District', unitPlural: 'Districts', mapTitle: 'Live Outage Heat Map', mapSub: `Real-time outage intensity across ${esc(ME.organizationUnit.region || 'the region')}`, weatherTitle: 'District Weather Overview', healthTitle: 'District Power Health' }
-    : { unit: 'Area', unitPlural: 'Coverage Areas', mapTitle: 'Coverage Area Map', mapSub: 'Outage intensity across your assigned towns', weatherTitle: 'Coverage Area Weather', healthTitle: 'Area Power Health' };
+    ? { unit: 'District', unitPlural: 'Districts', mapTitle: 'Registered Location Map', mapSub: `Registered towns and cities across ${esc(ME.organizationUnit.region || 'the region')}; active outage reports are highlighted`, weatherTitle: 'District Weather Overview', healthTitle: 'District Power Health' }
+    : { unit: 'Area', unitPlural: 'Coverage Areas', mapTitle: 'Registered Location Map', mapSub: 'Registered towns and cities in your assigned coverage; active outage reports are highlighted', weatherTitle: 'Coverage Area Weather', healthTitle: 'Area Power Health' };
 }
 
-function renderHeatMapPanel(scope, metrics) {
+function renderHeatMapPanel(scope, mapNodes) {
   const Lb = scopeLabels(scope);
-  const positioned = metrics.map(n => ({ ...n, latlng: latLngForNode(scope, n.name) }));
+  const positioned = mapNodes;
   // Stash for mountHeatMap(), called once this markup is actually in the DOM
   // (a live Leaflet instance can't attach to a detached innerHTML string).
   window.__lwHeatNodes = positioned;
@@ -668,8 +647,9 @@ function renderHeatMapPanel(scope, metrics) {
     <div class="panel__head"><div><h3>🗺️ ${Lb.mapTitle}</h3><p>${Lb.mapSub}</p></div></div>
     <div class="heatmap-row">
       <div class="heatmap-wrap"><div id="lwLeafletMap" class="lw-leaflet-map"></div></div>
-      <div class="map-legend-col"><span>High</span><div class="grad"></div><span>Low</span></div>
+      <div class="map-legend-col"><span>Active outage</span><div class="grad"></div><span>No heat signal</span></div>
     </div>
+    <div class="map-updated"><span>${positioned.length ? 'Pins are registered towns/cities. Approximate coordinates are identified in each location popup.' : 'No registered locations with usable coordinates were found in this scope.'}</span></div>
     <div class="map-updated">
       <span id="mapUpdatedAt">Last updated: ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
       <div class="map-refresh" title="Refresh" onclick="switchTab('overview')">⟳</div>
@@ -707,17 +687,8 @@ function renderInvitePermissionOptions() {
   : '<span style="color:var(--faint);font-size:0.8rem">No additional permissions available to grant.</span>';
 }
 
-// Real region-shaped polygons for Ghana's 16 regions, embedded locally (no
-// runtime network fetch). Earlier versions of this map pulled a geoBoundaries
-// GeoJSON over the network at runtime — that endpoint serves a Git-LFS
-// pointer file (not real GeoJSON) from a plain `fetch`, which silently failed
-// JSON parsing on every load and dropped the map back to an unbounded,
-// zoomed-out view that could show all of West Africa with no per-region
-// shapes or labels. To fix that for good, the polygons below are generated
-// once (offline) from each region's real capital coordinate, tessellated and
-// clipped to Ghana's true national outline (GHANA_OUTLINE_GEOJSON) — so the
-// shapes are geographically grounded, every one of the 16 current regions is
-// always present and labeled, and there is nothing left to fail at runtime.
+// Legacy fallback polygons for older headquarters map payloads. Current maps
+// use registered town/city coordinates from the locations API instead.
 const GHANA_REGIONS_GEOJSON = {"type":"FeatureCollection","features":[{"type":"Feature","properties":{"name":"Ahafo"},"geometry":{"type":"Polygon","coordinates":[[[-2.047984625513636,6.936148171690546],[-2.099742542112108,6.5270641971633445],[-3.195733641333222,6.461073764696445],[-3.006577551672966,7.280144257996747],[-2.047984625513636,6.936148171690546]]]}},{"type":"Feature","properties":{"name":"Ashanti"},"geometry":{"type":"Polygon","coordinates":[[[-1.185725690167764,6.696932872913072],[-1.5942251945439195,6.238412613836781],[-2.047984625513636,6.936148171690546],[-1.7237080665573179,7.512928309882649],[-1.2725274881472293,7.229158193637611],[-1.1370655992043412,6.929158193637611],[-1.185725690167764,6.696932872913072]]]}},{"type":"Feature","properties":{"name":"Bono"},"geometry":{"type":"Polygon","coordinates":[[[-2.099742542112108,6.5270641971633445],[-2.047984625513636,6.936148171690546],[-3.006577551672966,7.280144257996747],[-2.983585,7.379705],[-2.856125,7.9],[-2.4,7.65],[-2.099742542112108,6.5270641971633445]]]}},{"type":"Feature","properties":{"name":"Bono East"},"geometry":{"type":"Polygon","coordinates":[[[-1.7237080665573179,7.512928309882649],[-2.047984625513636,6.936148171690546],[-2.4,7.65],[-2.1,8.35],[-1.55,8.35],[-1.42,7.95],[-1.7237080665573179,7.512928309882649]]]}},{"type":"Feature","properties":{"name":"Central"},"geometry":{"type":"Polygon","coordinates":[[[-1.5942251945439195,6.238412613836781],[-1.185725690167764,6.696932872913072],[-0.7,6.4],[-0.438702,5.3],[-1.5,5.0],[-1.5942251945439195,6.238412613836781]]]}},{"type":"Feature","properties":{"name":"Eastern"},"geometry":{"type":"Polygon","coordinates":[[[-1.1370655992043412,6.929158193637611],[-1.2725274881472293,7.229158193637611],[-0.75,7.5],[0.1,6.55],[-0.4,5.95],[-0.7,6.4],[-1.185725690167764,6.696932872913072],[-1.1370655992043412,6.929158193637611]]]}},{"type":"Feature","properties":{"name":"Greater Accra"},"geometry":{"type":"Polygon","coordinates":[[[-0.4,5.95],[0.1,6.55],[0.836931,6.279979],[0.65,5.7],[0.05,5.7],[-0.4,5.95]]]}},{"type":"Feature","properties":{"name":"North East"},"geometry":{"type":"Polygon","coordinates":[[[-0.6,10.3],[0.1,10.35],[0.15,9.75],[-0.55,9.7],[-0.6,10.3]]]}},{"type":"Feature","properties":{"name":"Northern"},"geometry":{"type":"Polygon","coordinates":[[[-1.55,8.35],[-2.1,8.35],[-2.2,9.4],[-1.4,9.75],[-0.55,9.7],[-0.75,8.85],[-1.42,7.95],[-1.55,8.35]]]}},{"type":"Feature","properties":{"name":"Oti"},"geometry":{"type":"Polygon","coordinates":[[[-0.75,7.5],[-0.75,8.85],[-0.05,9.25],[0.55,8.5],[0.1,6.55],[-0.75,7.5]]]}},{"type":"Feature","properties":{"name":"Savannah"},"geometry":{"type":"Polygon","coordinates":[[[-2.2,9.4],[-2.827496,9.642461],[-2.6,10.6],[-1.4,10.8],[-1.4,9.75],[-2.2,9.4]]]}},{"type":"Feature","properties":{"name":"Upper East"},"geometry":{"type":"Polygon","coordinates":[[[-1.4,10.8],[-1.203358,11.009819],[-0.438702,11.098341],[-0.6,10.3],[-0.55,9.7],[-1.4,9.75],[-1.4,10.8]]]}},{"type":"Feature","properties":{"name":"Upper West"},"geometry":{"type":"Polygon","coordinates":[[[-2.6,10.6],[-2.940409,10.96269],[-1.203358,11.009819],[-1.4,10.8],[-2.6,10.6]]]}},{"type":"Feature","properties":{"name":"Volta"},"geometry":{"type":"Polygon","coordinates":[[[-0.05,9.25],[0.36758,10.191213],[0.461192,8.677223],[0.55,8.5],[-0.05,9.25]]]}},{"type":"Feature","properties":{"name":"Western"},"geometry":{"type":"Polygon","coordinates":[[[-1.5,5.0],[-1.5942251945439195,6.238412613836781],[-2.099742542112108,6.5270641971633445],[-2.810701,5.389051],[-2.856125,4.994476],[-1.964707,4.710462],[-1.5,5.0]]]}},{"type":"Feature","properties":{"name":"Western North"},"geometry":{"type":"Polygon","coordinates":[[[-2.099742542112108,6.5270641971633445],[-2.4,7.65],[-2.856125,7.9],[-3.006577551672966,7.280144257996747],[-2.983585,7.379705],[-2.810701,5.389051],[-2.099742542112108,6.5270641971633445]]]}}]};
 // Ghana's real national outline (single simplified polygon) — used as a hard
 // geographic clamp so the map can never pan/zoom out far enough to read as
@@ -780,10 +751,9 @@ async function mountHeatMap() {
   if (!nodes.length) { LW_MAP.fitBounds(ghanaBounds, { padding: [12, 12] }); return; }
   const byName = {}; nodes.forEach(n => { byName[normRegionName(n.name)] = n; });
 
-  // ---- Preferred path: real region-shaped choropleth (headquarters scope
-  // — one polygon + label per current region of Ghana, embedded locally so
-  // it always renders, with no network round trip and nothing to fail). ----
-  if (scope === 'headquarters') {
+  // Keep the legacy polygon view available for older HQ node payloads; current
+  // dashboards receive registered-location nodes and use their real coordinates.
+  if (scope === 'headquarters' && nodes.every(n => !n.registeredLocation)) {
     const geoLayer = L.geoJSON(GHANA_REGIONS_GEOJSON, {
       style: (feature) => {
         const n = byName[normRegionName(feature.properties.name)];
@@ -822,11 +792,11 @@ async function mountHeatMap() {
   // a heat layer that's tightened (small radius, low blur, bounded map) so
   // it reads as concentrated over real coverage points rather than bleeding
   // across the whole basemap. ----
-  const isSubRegion = scope !== 'headquarters';
-  if (window.L.heatLayer) {
-    const heatPoints = nodes.map(n => [n.latlng[0], n.latlng[1], Math.max(0.1, n.intensity / 100)]);
+  const outageNodes = nodes.filter(n => n.isOutage);
+  if (window.L.heatLayer && outageNodes.length) {
+    const heatPoints = outageNodes.map(n => [n.latlng[0], n.latlng[1], 1]);
     L.heatLayer(heatPoints, {
-      radius: isSubRegion ? 32 : 60, blur: isSubRegion ? 22 : 45, maxZoom: 12, minOpacity: 0.4,
+      radius: scope === 'headquarters' ? 28 : 32, blur: 22, maxZoom: 12, minOpacity: 0.35,
       gradient: { 0.15: '#2FE08C', 0.4: '#F2C230', 0.65: '#FF9A4D', 1.0: '#E4392E' }
     }).addTo(LW_MAP);
   }
@@ -834,20 +804,29 @@ async function mountHeatMap() {
   const bounds = [];
   nodes.forEach(n => {
     bounds.push(n.latlng);
-    const color = healthColor(100 - n.intensity);
+    const color = n.isOutage ? '#E4392E' : n.status === 'on' ? '#2FE08C' : '#8E99B0';
     const icon = L.divIcon({
       className: 'lw-map-label',
-      html: `<div class="lw-map-label__pin"><div class="lw-map-label__dot" style="background:${color}"></div><div class="lw-map-label__name">${esc(n.name)}</div><div class="lw-map-label__val" style="color:${color}">${n.intensity}% load</div></div>`,
+      html: `<div class="lw-map-label__pin"><div class="lw-map-label__dot" style="background:${color}"></div><div class="lw-map-label__name">${esc(n.name)}</div><div class="lw-map-label__val" style="color:${color}">${esc(n.statusLabel)}${n.coordsApproximate ? ' · approximate pin' : ''}</div></div>`,
       iconSize: [1, 1], iconAnchor: [0, 6]
     });
     const marker = L.marker(n.latlng, { icon }).addTo(LW_MAP);
-    marker.bindPopup(`<b>${esc(n.name)}</b><div class="lw-pop-sub">Outage intensity: ${n.intensity}% · Health: ${n.health}% · ${n.outageCount} active report${n.outageCount === 1 ? '' : 's'}</div>`, { className: 'lw-map-popup' });
+    marker.bindPopup(`<b>${esc(n.name)}</b><div class="lw-pop-sub">${n.district ? `District: ${esc(n.district)} · ` : ''}${n.region ? `Region: ${esc(n.region)} · ` : ''}${esc(n.statusLabel)} · ${n.outageCount} active outage report${n.outageCount === 1 ? '' : 's'}${n.coordsApproximate ? ' · approximate coordinates' : ''}${n.confirmations ? ` · ${n.confirmations} confirmations` : ''}</div>`, { className: 'lw-map-popup' });
   });
+
+  const updateLocationLabels = () => {
+    const showLabels = scope !== 'headquarters' || LW_MAP.getZoom() >= 9;
+    el.querySelectorAll('.lw-map-label__name, .lw-map-label__val').forEach(label => {
+      label.style.display = showLabels ? '' : 'none';
+    });
+  };
+  LW_MAP.on('zoomend', updateLocationLabels);
+  updateLocationLabels();
 
   if (bounds.length === 1) LW_MAP.setView(bounds[0], 11);
   else {
-    LW_MAP.fitBounds(bounds, { padding: [42, 42], maxZoom: 12.5 });
-    LW_MAP.setMaxBounds(L.latLngBounds(bounds).pad(0.6));
+    LW_MAP.fitBounds(bounds, { padding: [42, 42], maxZoom: scope === 'headquarters' ? 8 : 12.5 });
+    if (scope !== 'headquarters') LW_MAP.setMaxBounds(L.latLngBounds(bounds).pad(0.6));
   }
 
   setTimeout(() => LW_MAP && LW_MAP.invalidateSize(), 60);
@@ -1423,10 +1402,74 @@ async function switchTab(tab) {
   }
 }
 
+let lwLocationsMapCache = null;
+let lwLocationsMapCacheAt = 0;
+
+async function getRegisteredMapLocations() {
+  if (lwLocationsMapCache && Date.now() - lwLocationsMapCacheAt < 60000) return lwLocationsMapCache;
+  const data = await ecgGet('/locations/map');
+  if (!data || !Array.isArray(data.locations)) throw new Error('The locations map returned an invalid response');
+  lwLocationsMapCache = data.locations;
+  lwLocationsMapCacheAt = Date.now();
+  return lwLocationsMapCache;
+}
+
+function buildRegisteredMapNodes(locations, scope, events) {
+  const unit = ME.organizationUnit;
+  const region = unit.region || '';
+  const coverageNames = new Set();
+  if (scope === 'district') {
+    const areas = unit.coverageAreas?.length ? unit.coverageAreas : townsFor(region, unit.name);
+    areas.forEach(area => {
+      coverageNames.add(normalizeMapName(area));
+      const district = districtsForRegion(region).find(name => normalizeMapName(name) === normalizeMapName(area));
+      if (district) townsFor(region, district).forEach(town => coverageNames.add(normalizeMapName(town)));
+    });
+  }
+
+  return locations.flatMap(location => {
+    const name = String(location.name || '').trim();
+    const locationKey = String(location.locationKey || name).trim();
+    const lat = Number(location.lat), lng = Number(location.lng);
+    if (!name || !Number.isFinite(lat) || !Number.isFinite(lng) || lat < 4.4 || lat > 11.3 || lng < -3.4 || lng > 1.3) return [];
+
+    const knownPlace = locateArea(name) || locateArea(locationKey);
+    const locationRegion = location.region || knownPlace?.region || '';
+    const isCovered = coverageNames.has(normalizeMapName(name)) || coverageNames.has(normalizeMapName(locationKey));
+    if (scope !== 'headquarters' && normRegionName(locationRegion) !== normRegionName(region) &&
+      !(scope === 'district' && !locationRegion && isCovered)) return [];
+    if (scope === 'district' && !isCovered) return [];
+
+    const names = new Set([normalizeMapName(name), normalizeMapName(locationKey)]);
+    const outageCount = (events || []).filter(event =>
+      event.status === 'active' && event.eventType === 'outage' &&
+      (event.affectedAreas || []).some(area => names.has(normalizeMapName(area)))
+    ).length;
+    const status = ['on', 'off'].includes(String(location.status || '').toLowerCase())
+      ? String(location.status).toLowerCase()
+      : 'unknown';
+    const isOutage = status === 'off' || outageCount > 0;
+
+    return [{
+      name,
+      locationKey,
+      region: locationRegion || null,
+      district: knownPlace?.district || null,
+      latlng: [lat, lng],
+      registeredLocation: true,
+      status,
+      isOutage,
+      statusLabel: isOutage ? 'Outage reported' : status === 'on' ? 'Power on' : 'Status unknown',
+      outageCount,
+      coordsApproximate: Boolean(location.coordsApproximate),
+      confirmations: Number(location.confirmations) || 0,
+      reportedAt: location.reportedAt || null
+    }];
+  });
+}
+
 // ---- Overview (Headquarters / Regional / District live dashboard) ----
-// Shared by renderOverview() and renderLiveMapPage(): builds the node list +
-// computed metrics for this staff member's scope (region names at HQ level,
-// district names at regional level, coverage-area names at district level).
+// Builds dashboard metrics and registered map locations for the signed-in staff member's scope.
 async function buildScopeMetrics() {
   const scope = ME.organizationUnit.type;
   let scopeEvents = [];
@@ -1451,11 +1494,13 @@ async function buildScopeMetrics() {
     matchFn = (area, areaName) => String(area).toLowerCase() === String(areaName).toLowerCase();
   }
   const metrics = computeNodeMetrics(nodes, scopeEvents, matchFn);
-  return { scope, scopeEvents, nodes, metrics };
+  const registeredLocations = await getRegisteredMapLocations();
+  const mapNodes = buildRegisteredMapNodes(registeredLocations, scope, scopeEvents);
+  return { scope, scopeEvents, nodes, metrics, mapNodes };
 }
 
 async function renderOverview(content) {
-  const { scope, scopeEvents, metrics } = await buildScopeMetrics();
+  const { scope, scopeEvents, metrics, mapNodes } = await buildScopeMetrics();
   let recentEvents = scopeEvents;
   try { recentEvents = await ecgGet(`/ecg/events?orgUnitId=${ME.organizationUnit.id}`); } catch { /* keep scopeEvents */ }
 
@@ -1477,7 +1522,7 @@ async function renderOverview(content) {
     ${renderHeroStrip(scope, metrics, scopeEvents)}
     <div class="dash-grid">
       <div class="dash-col">
-        ${renderHeatMapPanel(scope, metrics)}
+        ${renderHeatMapPanel(scope, mapNodes)}
         ${renderGenDemandChart(scope)}
       </div>
       <div class="dash-col">
@@ -1496,34 +1541,36 @@ async function renderOverview(content) {
 // ---- Live Map (Heat Map) — the same real-time map as the overview panel,
 // shown full-size as its own page, plus a compact stats strip. ----
 async function renderLiveMapPage(content) {
-  const { scope, scopeEvents, metrics } = await buildScopeMetrics();
+  const { scope, mapNodes } = await buildScopeMetrics();
   const Lb = scopeLabels(scope);
-  const total = metrics.length;
-  const affected = metrics.filter(m => m.outageCount > 0).length;
-  const avgIntensity = total ? Math.round(metrics.reduce((s, m) => s + m.intensity, 0) / total) : 0;
-  const worst = [...metrics].sort((a, b) => b.intensity - a.intensity)[0];
+  const total = mapNodes.length;
+  const affectedLocations = mapNodes.filter(location => location.isOutage);
+  const affected = affectedLocations.length;
+  const affectedPercent = total ? Math.round((affected / total) * 100) : 0;
+  const worst = [...affectedLocations].sort((a, b) => b.outageCount - a.outageCount)[0];
 
   content.innerHTML = `
     <div class="ov-head">
       <div><h1>Live Outage Heat Map</h1><p>${Lb.mapSub}</p></div>
     </div>
     <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:14px; margin-bottom:16px;">
-      ${statChip('🗺️', total, scope === 'headquarters' ? 'Regions tracked' : scope === 'regional' ? 'Districts tracked' : 'Coverage areas')}
-      ${statChip('⚠️', affected, 'Currently affected')}
-      ${statChip('📊', avgIntensity + '%', 'Average outage intensity')}
-      ${statChip('🔥', worst ? worst.name : '—', 'Highest intensity area')}
+      ${statChip('🗺️', total, 'Registered locations')}
+      ${statChip('⚠️', affected, 'With outage signals')}
+      ${statChip('📊', affectedPercent + '%', 'Locations affected')}
+      ${statChip('📍', worst ? worst.name : '—', 'Most active outage location')}
     </div>
     <div class="panel" style="padding:0; overflow:hidden;">
       <div class="heatmap-row" style="padding:20px;">
         <div class="heatmap-wrap" style="flex:1;"><div id="lwLeafletMap" class="lw-leaflet-map" style="height:560px;"></div></div>
-        <div class="map-legend-col"><span>High</span><div class="grad"></div><span>Low</span></div>
+        <div class="map-legend-col"><span>Active outage</span><div class="grad"></div><span>No heat signal</span></div>
       </div>
       <div class="map-updated" style="padding:0 20px 16px;">
+        <span>Pins show registered locations; approximate coordinates are marked in their popups.</span>
         <span id="mapUpdatedAt">Last updated: ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
         <div class="map-refresh" title="Refresh" onclick="switchTab('livemap')">⟳</div>
       </div>
     </div>`;
-  window.__lwHeatNodes = metrics.map(n => ({ ...n, latlng: latLngForNode(scope, n.name) }));
+  window.__lwHeatNodes = mapNodes;
   window.__lwHeatScope = scope;
   mountHeatMap().catch(err => toast(err.message, "err"));
 }
