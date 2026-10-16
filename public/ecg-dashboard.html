@@ -123,7 +123,8 @@
     box-shadow: var(--shadow-pop); position: relative; overflow: hidden; animation: popIn .38s var(--ease);
   }
   .auth-card::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 4px; background: linear-gradient(90deg, var(--ecg-red), var(--brand), var(--brand2)); }
-  .auth-mark { width: 48px; height: 48px; border-radius: 14px; background: linear-gradient(155deg, #FF5A4E, var(--ecg-red) 60%, #A8190F); display: flex; align-items: center; justify-content: center; font-weight: 900; color: #fff; font-size: 1.05rem; margin-bottom: 18px; box-shadow: 0 10px 26px -4px rgba(228,57,46,0.45); }
+  .auth-mark { width: 56px; height: 56px; border-radius: 14px; overflow:hidden; margin-bottom:18px; }
+  .auth-mark img { display:block; width:100%; height:100%; object-fit:cover; }
   .auth-card h1 { font-size: 1.22rem; margin-bottom: 5px; letter-spacing: -0.03em; }
   .auth-card p.sub { color: var(--muted); font-size: 0.83rem; margin-bottom: 24px; line-height: 1.5; }
   .auth-tabs { display: flex; gap: 4px; background: var(--panel2); padding: 4px; border-radius: var(--r-md); margin-bottom: 24px; border: 1px solid var(--border); }
@@ -241,7 +242,7 @@
 
   /* ===== Real Leaflet basemap (heat map panel) ===== */
   .lw-leaflet-map { width: 100%; height: 100%; min-height: 400px; background: #0A0E15; }
-  .lw-leaflet-map .leaflet-tile-pane { filter: brightness(0.72) saturate(0.85) contrast(1.05); }
+  .lw-leaflet-map .leaflet-tile-pane { filter: brightness(1.12) saturate(0.9) contrast(1.15); }
   .lw-leaflet-map .leaflet-control-attribution { background: rgba(5,7,11,0.72) !important; color: var(--faint) !important; font-size: 9px !important; }
   .lw-leaflet-map .leaflet-control-attribution a { color: var(--muted) !important; }
   .lw-leaflet-map .leaflet-control-zoom a { background: var(--panel-raised) !important; color: var(--txt) !important; border-color: var(--border2) !important; }
@@ -249,7 +250,7 @@
   .lw-map-label { background: transparent; border: none; box-shadow: none; pointer-events: none; }
   .lw-map-label__pin { display: flex; flex-direction: column; align-items: center; gap: 3px; transform: translateY(-2px); }
   .lw-map-label__dot { width: 9px; height: 9px; border-radius: 99px; border: 1.5px solid #05070B; box-shadow: 0 0 0 3px rgba(255,255,255,0.06); }
-  .lw-map-label__name { font-family: var(--font); font-size: 11px; font-weight: 800; color: #F5F7FB; white-space: nowrap; text-shadow: 0 1px 3px #000, 0 0 8px rgba(0,0,0,0.9); letter-spacing: -0.01em; }
+  .lw-map-label__name { font-family: var(--font); font-size: 11px; font-weight: 800; color: #fff !important; background:rgba(5,9,16,.9); border:1px solid rgba(255,255,255,.36); border-radius:5px; padding:2px 6px; white-space: nowrap; text-shadow: 0 1px 3px #000, 0 0 8px rgba(0,0,0,0.9); letter-spacing: -0.01em; }
   .lw-map-label__val { font-family: var(--font-mono); font-size: 9px; font-weight: 700; white-space: nowrap; text-shadow: 0 1px 3px #000; margin-top: -2px; }
   .lw-map-popup .leaflet-popup-content-wrapper { background: var(--panel-raised); color: var(--txt); border: 1px solid var(--border2); border-radius: var(--r-md); box-shadow: var(--shadow-pop); }
   .lw-map-popup .leaflet-popup-tip { background: var(--panel-raised); border: 1px solid var(--border2); }
@@ -397,7 +398,7 @@
 <!-- ============== AUTH VIEW ============== -->
 <div id="authView">
   <div class="auth-card">
-    <div class="auth-mark">ECG</div>
+    <div class="auth-mark"><img src="/images/dev-logo.png" alt="LightWatch"></div>
     <h1>LightWatch ECG Operations</h1>
     <p class="sub">Staff access is invitation-only. This page is separate from the public LightWatch app.</p>
 
@@ -794,7 +795,7 @@ async function mountHeatMap() {
         L.marker(pt, {
           icon: L.divIcon({
             className: 'lw-map-label',
-            html: `<div class="lw-map-label__pin"><div class="lw-map-label__name">${esc(label)}</div>${n ? `<div class="lw-map-label__val" style="color:${color}">${n.intensity}% load</div>` : ''}</div>`,
+            html: `<div class="lw-map-label__pin"><div class="lw-map-label__name" style="color:#fff!important;background:rgba(5,9,16,.94);border:1px solid rgba(255,255,255,.42);padding:2px 6px;border-radius:5px;text-shadow:0 1px 3px #000">${esc(label)}</div>${n ? `<div class="lw-map-label__val" style="color:#fff!important;background:rgba(5,9,16,.94);border:1px solid rgba(255,255,255,.36);padding:1px 5px;border-radius:4px;text-shadow:0 1px 3px #000">${n.intensity}% load</div>` : ''}</div>`,
             iconSize: [1, 1], iconAnchor: [0, 0]
           }),
           interactive: false
@@ -826,7 +827,7 @@ async function mountHeatMap() {
     const color = n.isOutage ? '#E4392E' : n.status === 'on' ? '#2FE08C' : '#8E99B0';
     const icon = L.divIcon({
       className: 'lw-map-label',
-      html: `<div class="lw-map-label__pin"><div class="lw-map-label__dot" style="background:${color}"></div><div class="lw-map-label__name">${esc(n.name)}</div><div class="lw-map-label__val" style="color:${color}">${esc(n.statusLabel)}${n.coordsApproximate ? ' · approximate pin' : ''}</div></div>`,
+      html: `<div class="lw-map-label__pin"><div class="lw-map-label__dot" style="background:${color}"></div><div class="lw-map-label__name" style="color:#fff!important;background:rgba(5,9,16,.94);border:1px solid rgba(255,255,255,.42);padding:2px 6px;border-radius:5px;text-shadow:0 1px 3px #000">${esc(n.name)}</div><div class="lw-map-label__val" style="color:#fff!important;background:rgba(5,9,16,.94);border:1px solid rgba(255,255,255,.36);padding:1px 5px;border-radius:4px;text-shadow:0 1px 3px #000">${esc(n.statusLabel)}${n.coordsApproximate ? ' · approximate pin' : ''}</div></div>`,
       iconSize: [1, 1], iconAnchor: [0, 6]
     });
     const marker = L.marker(n.latlng, { icon }).addTo(layerGroup);
@@ -843,7 +844,7 @@ async function mountHeatMap() {
       const color = outageCount ? '#E4392E' : '#8E99B0';
       const icon = L.divIcon({
         className: 'lw-map-label',
-        html: `<div class="lw-map-label__pin"><div class="lw-map-label__name">${esc(districtName)}</div><div class="lw-map-label__val" style="color:${color}">${locations.length} registered location${locations.length === 1 ? '' : 's'}${outageCount ? ` · ${outageCount} outage${outageCount === 1 ? '' : 's'}` : ''}</div></div>`,
+        html: `<div class="lw-map-label__pin"><div class="lw-map-label__name" style="color:#fff!important;background:rgba(5,9,16,.94);border:1px solid rgba(255,255,255,.42);padding:2px 6px;border-radius:5px;text-shadow:0 1px 3px #000">${esc(districtName)}</div><div class="lw-map-label__val" style="color:#fff!important;background:rgba(5,9,16,.94);border:1px solid rgba(255,255,255,.36);padding:1px 5px;border-radius:4px;text-shadow:0 1px 3px #000">${locations.length} registered location${locations.length === 1 ? '' : 's'}${outageCount ? ` · ${outageCount} outage${outageCount === 1 ? '' : 's'}` : ''}</div></div>`,
         iconSize: [1, 1], iconAnchor: [0, 0]
       });
       const marker = L.marker(center, { icon }).addTo(districtLayer);

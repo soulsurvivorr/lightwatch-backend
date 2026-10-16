@@ -31,7 +31,7 @@
 //      require('./ecg-power')(app, { mongoose });
 // ============================================================
 
-module.exports = function setupEcgPower(app, { mongoose }) {
+module.exports = function setupEcgPower(app, { mongoose, applyLightStatusUpdate }) {
     const ecg = app.locals.ecg;
     if (!ecg) {
         throw new Error('[ecg-power] app.locals.ecg is missing — require("./ecg-auth")(app, ...) must run before require("./ecg-power")(app, ...)');
@@ -39,6 +39,17 @@ module.exports = function setupEcgPower(app, { mongoose }) {
     const { OrgUnit, EcgStaff } = ecg.models;
     const { verifyEcgToken } = ecg.middleware;
     const { canManageUnit, logAudit, hasPermission, publicOrgUnit } = ecg.helpers;
+
+    async function syncAppLightStatus(unit, areas, status, reason, reporter = 'ECG Dashboard') {
+        if (typeof applyLightStatusUpdate !== 'function') {
+            throw new Error('The shared app light-status updater is unavailable');
+        }
+        const locations = areas.includes('all') ? (unit.coverageAreas || []) : areas;
+        if (!locations.length) throw new Error(`No city or town coverage is configured for ${unit.name}`);
+        for (const location of locations) {
+            await applyLightStatusUpdate(location, status, { reportedByOverride: reporter, reason });
+        }
+    }
 
     const powerStatusSchema = new mongoose.Schema({
         scope: { type: String, enum: ['nationwide', 'regional', 'district'], required: true },
@@ -53,11 +64,13 @@ module.exports = function setupEcgPower(app, { mongoose }) {
         byRole: { type: String, required: true },
         active: { type: Boolean, default: true }, // true while this outage is unresolved
         startedAt: { type: Date, default: Date.now },
+        restoreAt: { type: Date, default: null },
         endedAt: { type: Date, default: null },
         createdAt: { type: Date, default: Date.now }
     });
     powerStatusSchema.index({ scope: 1, active: 1 });
     powerStatusSchema.index({ orgUnitId: 1, active: 1 });
+    powerStatusSchema.index({ active: 1, restoreAt: 1 });
 
     const PowerStatusChange = mongoose.models.EcgPowerStatusChange || mongoose.model('EcgPowerStatusChange', powerStatusSchema);
 
@@ -100,9 +113,41 @@ module.exports = function setupEcgPower(app, { mongoose }) {
             id: c._id, scope: c.scope, orgUnitId: c.orgUnitId, orgUnitName: c.orgUnitName,
             region: c.region, areas: c.areas, action: c.action, reason: c.reason,
             byStaffName: c.byStaffName, byRole: c.byRole, active: c.active,
-            startedAt: c.startedAt, endedAt: c.endedAt, createdAt: c.createdAt
+            startedAt: c.startedAt, restoreAt: c.restoreAt, endedAt: c.endedAt, createdAt: c.createdAt
         };
     }
+
+    let scheduledRestoreRunning = false;
+    async function processScheduledRestores() {
+        if (scheduledRestoreRunning) return;
+        scheduledRestoreRunning = true;
+        try {
+            const now = new Date();
+            const due = await PowerStatusChange.find({ active: true, restoreAt: { $type: 'date', $lte: now } }).sort({ restoreAt: 1 }).limit(100).lean();
+            for (const item of due) {
+                const restored = await PowerStatusChange.findOneAndUpdate(
+                    { _id: item._id, active: true, restoreAt: { $type: 'date', $lte: now } },
+                    { $set: { active: false, endedAt: now } },
+                    { new: true }
+                );
+                if (!restored) continue;
+                const reason = 'Power status automatically restored when its timer ended.';
+                const unit = restored.orgUnitId ? await OrgUnit.findById(restored.orgUnitId) : null;
+                if (unit) {
+                    await syncAppLightStatus(unit, restored.areas, 'on', reason, 'ECG Dashboard Timer');
+                }
+                await mirrorToPublicNews({ scope: restored.scope, unitName: restored.orgUnitName, region: restored.region, areas: restored.areas, action: 'power_restored', reason, byName: 'Scheduled timer' });
+                await logAudit({ staff: null, orgUnit: unit, action: 'power_auto_restored', target: restored.orgUnitName, details: { changeId: restored._id, areas: restored.areas, restoreAt: restored.restoreAt } });
+            }
+        } catch (err) {
+            console.error('[ecg-power] scheduled restore check failed:', err.message);
+        } finally {
+            scheduledRestoreRunning = false;
+        }
+    }
+    const scheduledRestoreTimer = setInterval(processScheduledRestores, 30000);
+    if (scheduledRestoreTimer.unref) scheduledRestoreTimer.unref();
+    processScheduledRestores();
 
     // ---- PUBLIC: current active power-status changes (for index.html /
     //      the "live status" widgets to cross-reference official state) ----
@@ -192,7 +237,7 @@ module.exports = function setupEcgPower(app, { mongoose }) {
     //      (or ['all']) — same rule ecg-news.js already applies to events. ----
     app.post('/ecg/power/district', verifyEcgToken, async (req, res) => {
         try {
-            const { orgUnitId, action, reason, areas } = req.body || {};
+            const { orgUnitId, action, reason, areas, restoreAfterMinutes } = req.body || {};
             if (!['power_off', 'power_restored'].includes(action)) return res.status(400).json({ error: 'action must be power_off or power_restored' });
 
             const targetUnitId = orgUnitId || (req.ecgOrgUnit.type === 'district' ? req.ecgOrgUnit._id : null);
@@ -216,16 +261,32 @@ module.exports = function setupEcgPower(app, { mongoose }) {
                 }
             }
 
+            const restoreMinutes = restoreAfterMinutes === undefined || restoreAfterMinutes === null || restoreAfterMinutes === ''
+                ? null
+                : Number(restoreAfterMinutes);
+            if (restoreMinutes !== null && (!Number.isInteger(restoreMinutes) || restoreMinutes < 1 || restoreMinutes > 1440)) {
+                return res.status(400).json({ error: 'restoreAfterMinutes must be a whole number between 1 and 1440' });
+            }
+            const now = new Date();
+
+            await syncAppLightStatus(
+                unit,
+                cleanAreas,
+                action === 'power_off' ? 'off' : 'on',
+                reason || (action === 'power_off' ? 'Power status marked off by ECG staff.' : 'Power status restored by ECG staff.')
+            );
+
             if (action === 'power_restored') {
                 const restoreFilter = { scope: 'district', orgUnitId: unit._id, active: true };
-                if (!cleanAreas.includes('all')) restoreFilter.areas = { $in: cleanAreas };
-                await PowerStatusChange.updateMany(restoreFilter, { active: false, endedAt: new Date() });
+                if (!cleanAreas.includes('all')) restoreFilter.$or = [{ areas: { $in: cleanAreas } }, { areas: 'all' }];
+                await PowerStatusChange.updateMany(restoreFilter, { active: false, endedAt: now });
             }
             const change = await PowerStatusChange.create({
                 scope: 'district', orgUnitId: unit._id, orgUnitName: unit.name, region: unit.region, areas: cleanAreas,
                 action, reason: reason ? String(reason).trim() : '',
                 byStaffId: req.ecgStaff._id, byStaffName: req.ecgStaff.name, byRole: req.ecgStaff.role,
-                active: action === 'power_off'
+                active: action === 'power_off', startedAt: now,
+                restoreAt: action === 'power_off' && restoreMinutes !== null ? new Date(now.getTime() + restoreMinutes * 60000) : null
             });
 
             await logAudit({ staff: req.ecgStaff, orgUnit: req.ecgOrgUnit, action: `power_${action === 'power_off' ? 'off' : 'restored'}_district`, target: unit.name, details: { changeId: change._id, areas: cleanAreas, reason }, req });

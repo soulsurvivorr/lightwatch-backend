@@ -5281,7 +5281,7 @@ require('./ecg-news')(app, { mongoose });
 //    and mirrored into the public GET /news feed (index.html). Wired
 //    in AFTER ecg-news.js/ecg-auth.js and after news.js so the
 //    NewsEvent model it mirrors into already exists. ──
-require('./ecg-power')(app, { mongoose });
+require('./ecg-power')(app, { mongoose, applyLightStatusUpdate });
 
 // ── ECG operations: power plants, transmission lines, regions
 //    overview, alerts & announcements, reports & analytics, per-unit
