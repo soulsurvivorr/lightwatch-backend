@@ -1,3 +1,4 @@
+process.on('unhandledRejection', (err) => console.error('[unhandledRejection]', err));
 require('dotenv').config();
 require('newrelic');
 const path = require('path');
@@ -775,7 +776,7 @@ async function serveEcgBoundaryGeoJSON(req, res, level) {
     if (!sourceUrl) return res.status(404).json({ error: 'Unknown boundary layer' });
     const cached = ECG_BOUNDARY_CACHE.get(level);
     res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
-    res.setHeader('X-Geo-Boundary-Source', 'Ghana Boundaries 2021 — Ghana Statistical Services / UN / Michael Bauer Research');
+    res.setHeader('X-Geo-Boundary-Source', 'Ghana Boundaries 2021 - Ghana Statistical Services / UN / Michael Bauer Research');
     if (cached && Date.now() - cached.fetchedAt < ECG_BOUNDARY_CACHE_TTL_MS) return res.json(cached.data);
     try {
         const upstream = await fetch(sourceUrl, {
@@ -796,8 +797,14 @@ async function serveEcgBoundaryGeoJSON(req, res, level) {
         return res.status(502).json({ error: 'Boundary data is temporarily unavailable', source: 'Ghana Boundaries 2021' });
     }
 }
-app.get('/ecg/map/boundaries/districts', (req, res) => serveEcgBoundaryGeoJSON(req, res, 'districts'));
-app.get('/ecg/map/boundaries/regions', (req, res) => serveEcgBoundaryGeoJSON(req, res, 'regions'));
+app.get('/ecg/map/boundaries/districts', async (req, res) => {
+    try { await serveEcgBoundaryGeoJSON(req, res, 'districts'); }
+    catch (e) { console.error('[boundary] districts error:', e.message); if (!res.headersSent) res.status(500).json({ error: 'Boundary error' }); }
+});
+app.get('/ecg/map/boundaries/regions', async (req, res) => {
+    try { await serveEcgBoundaryGeoJSON(req, res, 'regions'); }
+    catch (e) { console.error('[boundary] regions error:', e.message); if (!res.headersSent) res.status(500).json({ error: 'Boundary error' }); }
+});
 
 // Serves frontend files from the frontend folder during development
 // In production, copy built frontend files to a 'public' folder or adjust path
